@@ -48,3 +48,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets
       - run: cargo test --locked
+
+      # The fuzz targets include kl's sources by path, and nothing above builds
+      # them. This comes last, since it links the library built above.
+      - run: cargo check --manifest-path fuzz/Cargo.toml
