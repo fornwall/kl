@@ -74,6 +74,25 @@ impl Grid {
         self.cells.fill(Cell::default());
     }
 
+    /// Blanks the left half of a double width character whose right half is at
+    /// this position, since text is about to go there. Without this, the left
+    /// half would be drawn as the whole character, hiding the new text.
+    fn split_wide(&mut self, x: u16, y: u16) {
+        let is_tail = |grid: &Self, index: usize| {
+            grid.cells
+                .get(index)
+                .is_some_and(|cell| cell.width == Width::Tail)
+        };
+        if let Some(index) = self.index(x, y).filter(|index| is_tail(self, *index))
+            && let Some(head) = index.checked_sub(1).and_then(|i| self.cells.get_mut(i))
+        {
+            *head = Cell {
+                style: head.style,
+                ..Cell::default()
+            };
+        }
+    }
+
     /// Writes text, returning the column after it. Stops at `limit`, and leaves
     /// out a double width character that would not fit.
     fn put_str(&mut self, mut x: u16, y: u16, text: &str, style: Style, limit: u16) -> u16 {
@@ -408,6 +427,7 @@ fn draw_position(grid: &mut Grid, rect: Rect, scrollbar: Option<ghostty::Scrollb
     let text = format!("[{}/{}]", scrollbar.lines_below(), scrollbar.history());
     let width = text_width(&text);
     let x = rect.x + rect.width.saturating_sub(width);
+    grid.split_wide(x, rect.y);
     grid.put_str(x, rect.y, &text, mode_style(), rect.x + rect.width);
 }
 
@@ -616,6 +636,27 @@ mod tests {
         assert_eq!(end, 3);
         assert_eq!(grid.cells[1].width, Width::Wide);
         assert_eq!(grid.cells[2].width, Width::Tail);
+    }
+
+    #[test]
+    fn the_position_in_copy_mode_does_not_leave_half_a_wide_character() {
+        let mut grid = Grid::new(6, 1);
+        grid.put_str(0, 0, "\u{4e16}\u{4e16}\u{4e16}", Style::default(), 6);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 6,
+            height: 1,
+        };
+        let scrollbar = ghostty::Scrollbar {
+            total: 1,
+            offset: 0,
+            len: 1,
+        };
+        draw_position(&mut grid, rect, Some(scrollbar));
+        assert_eq!(grid.cells[0], Cell::default());
+        assert_eq!(grid.cells[1].text.as_str(), "[");
+        assert_eq!(grid.cells[1].width, Width::Narrow);
     }
 
     fn emitted(renderer: &mut Renderer) -> String {
