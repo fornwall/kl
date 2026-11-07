@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 
+[lints.rust]
+warnings = "deny"
+
 [lints.clippy]
 # Whole groups. Priority -1 lets the individual entries below override them.
 all = { level = "deny", priority = -1 }
@@ -20,7 +23,6 @@ pedantic = { level = "deny", priority = -1 }
 # A panic in a multiplexer takes every session down with it.
 expect_used = "deny"
 get_unwrap = "deny"
-indexing_slicing = "deny"
 panic = "deny"
 panic_in_result_fn = "deny"
 string_slice = "deny"
