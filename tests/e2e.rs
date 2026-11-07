@@ -243,6 +243,12 @@ impl Screen {
 
     /// Presses and releases a key, as the outer terminal would report it.
     fn key(&mut self, key: i32, mods: u16, text: &str, unshifted: u32) {
+        let bytes = self.key_bytes(key, mods, text, unshifted);
+        self.send_bytes(&bytes);
+    }
+
+    fn key_bytes(&mut self, key: i32, mods: u16, text: &str, unshifted: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
         for action in [KeyAction::Press, KeyAction::Release] {
             let input = KeyInput {
                 action,
@@ -256,9 +262,9 @@ impl Screen {
                 },
                 unshifted,
             };
-            let bytes = self.terminal.encode_key(&input);
-            self.send_bytes(&bytes);
+            bytes.extend(self.terminal.encode_key(&input));
         }
+        bytes
     }
 
     /// Types text on a US keyboard.
@@ -295,6 +301,11 @@ impl Screen {
 
     fn ctrl(&mut self, c: char) {
         self.key(ghostty_key(c), MOD_CTRL, "", u32::from(c));
+    }
+
+    /// What the prefix key sends.
+    fn ctrl_b_bytes(&mut self) -> Vec<u8> {
+        self.key_bytes(ghostty_key('b'), MOD_CTRL, "", u32::from('b'))
     }
 
     /// The prefix followed by a key.
@@ -475,12 +486,12 @@ fn kill_pane_asks_first() {
     screen.prefix("%");
     screen.wait_for("a border", |lines| lines[5].contains('│'));
     screen.prefix("x");
-    screen.wait_for_text("kill-pane?");
+    screen.wait_for_text("kill-pane 1? (y/n)");
     screen.type_text("n");
-    screen.wait_for_no_text("kill-pane?");
+    screen.wait_for_no_text("kill-pane 1?");
     assert!(screen.lines()[5].contains('│'));
     screen.prefix("x");
-    screen.wait_for_text("kill-pane?");
+    screen.wait_for_text("kill-pane 1? (y/n)");
     screen.type_text("y");
     screen.wait_for("the border to go", |lines| !lines[5].contains('│'));
 }
@@ -526,6 +537,90 @@ fn switches_between_windows() {
     screen.wait_for_text("echo one");
     screen.prefix("l");
     screen.wait_for_text("echo two");
+}
+
+/// Splits the window in two, one above the other. Returns the border's row.
+fn split_stacked(screen: &mut Screen) -> usize {
+    screen.prefix("\"");
+    let is_border = |line: &String| line.starts_with('─');
+    let lines = screen.wait_for("a border", |lines| lines.iter().any(is_border));
+    lines.iter().position(is_border).unwrap()
+}
+
+#[test]
+fn resize_keys_repeat_without_the_prefix() {
+    let mut screen = Screen::new(80, 25);
+    let border = split_stacked(&mut screen);
+
+    // All at once, since the time between them is what is at stake.
+    let up = screen.key_bytes(key::ARROW_UP, MOD_CTRL, "", 0);
+    let mut keys = screen.ctrl_b_bytes();
+    keys.extend_from_slice(&up);
+    keys.extend_from_slice(&up);
+    screen.send_bytes(&keys);
+    screen.wait_for("the border to move twice", |lines| {
+        lines[border - 2].contains('─')
+    });
+}
+
+#[test]
+fn modifiers_do_not_end_a_repeat() {
+    let mut screen = Screen::new(80, 25);
+    let border = split_stacked(&mut screen);
+
+    let up = screen.key_bytes(key::ARROW_UP, MOD_CTRL, "", 0);
+    let control = screen.key_bytes(key::CONTROL_LEFT, 0, "", 0);
+    let mut keys = screen.ctrl_b_bytes();
+    keys.extend_from_slice(&up);
+    keys.extend_from_slice(&control);
+    keys.extend_from_slice(&up);
+    screen.send_bytes(&keys);
+    screen.wait_for("the border to move twice", |lines| {
+        lines[border - 2].contains('─')
+    });
+}
+
+#[test]
+fn other_keys_end_a_repeat_and_reach_the_program() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("%");
+    screen.wait_for("a border", |lines| lines[5].contains('│'));
+    let left = screen.key_bytes(key::ARROW_LEFT, 0, "", 0);
+    let c = screen.key_bytes(ghostty_key('c'), 0, "c", u32::from('c'));
+    let mut keys = screen.ctrl_b_bytes();
+    keys.extend_from_slice(&left);
+    keys.extend_from_slice(&c);
+    screen.send_bytes(&keys);
+    screen.wait_for("the key in the left pane", |lines| {
+        lines[0].starts_with("$ c")
+    });
+    let output = screen.command(&["list-windows"]);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
+}
+
+#[test]
+fn a_repeat_runs_out() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("%");
+    screen.wait_for("a border", |lines| lines[5].contains('│'));
+    screen.ctrl('b');
+    screen.key(key::ARROW_LEFT, 0, "", 0);
+    std::thread::sleep(Duration::from_millis(600));
+    // With the repeat over, this moves the cursor in the shell instead.
+    screen.key(key::ARROW_RIGHT, 0, "", 0);
+    screen.type_text("typed");
+    screen.wait_for("the key in the left pane", |lines| {
+        lines[0].contains("typed")
+    });
+}
+
+#[test]
+fn lists_the_keys() {
+    let screen = Screen::new(80, 24);
+    let output = screen.command(&["list-keys", "-N"]);
+    let keys = String::from_utf8_lossy(&output.stdout);
+    assert!(keys.contains("C-b %"), "{keys}");
+    assert!(keys.contains("Split window horizontally"), "{keys}");
 }
 
 #[test]

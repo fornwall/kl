@@ -64,7 +64,6 @@ What is missing for daily use compared with tmux.
 - `C-b ?` listing keys, `C-b w` to choose a window, `C-b q` to show pane numbers.
 - `C-b {` and `}` to swap panes, `C-b !` to break a pane out, `join-pane`.
 - `C-b Space` and layouts such as even-horizontal, tiled and main-vertical.
-- Repeatable keys, so that `C-b C-Up C-Up` resizes twice.
 - `-t` targets for commands, and format strings for `list-*` and
   `display-message`.
 

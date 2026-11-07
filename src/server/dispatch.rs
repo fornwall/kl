@@ -4,13 +4,15 @@ use std::ffi::c_int;
 use std::time::{Duration, Instant};
 
 use super::copy_mode::{self, CopyMode, Outcome};
+use super::format::Context;
+use super::keys;
 use super::layout::{Divider, PaneId, Rect};
 use super::pane::Pane;
 use super::session::{Monitor, Window};
 use super::ui::{Prompt, PromptAction, PromptOutcome};
 use super::{COLOR_QUERIES, Lifecycle, Server};
-use crate::command::{self, Command, Direction, SplitKind};
-use crate::ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
+use crate::command::{self, Command};
+use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
     KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MouseAction, MouseButton, MouseInput,
 };
@@ -19,6 +21,10 @@ use crate::proto::ServerMessage;
 
 /// How close together clicks must be to count as a double or triple click.
 const MULTI_CLICK_TIME: Duration = Duration::from_millis(400);
+
+/// How long a repeatable binding keeps working without the prefix, which is
+/// tmux's `repeat-time`.
+const REPEAT_TIME: Duration = Duration::from_millis(500);
 
 /// Rows moved for each step of the wheel.
 const WHEEL_ROWS: i32 = 3;
@@ -45,84 +51,6 @@ pub struct Click {
     x: u16,
     y: u16,
     count: u8,
-}
-
-/// What a key does after the prefix.
-enum Binding {
-    Run(Command),
-    Confirm(&'static str, Command),
-    CommandPrompt,
-    RenamePrompt,
-    SendPrefix,
-}
-
-const fn arrow_direction(key: c_int) -> Option<Direction> {
-    match key {
-        key::ARROW_LEFT => Some(Direction::Left),
-        key::ARROW_RIGHT => Some(Direction::Right),
-        key::ARROW_UP => Some(Direction::Up),
-        key::ARROW_DOWN => Some(Direction::Down),
-        _ => None,
-    }
-}
-
-const fn arrow_binding(direction: Direction, mods: u16) -> Option<Binding> {
-    let command = match mods {
-        0 => Command::SelectPane(direction),
-        MOD_CTRL => Command::ResizePane {
-            direction,
-            cells: 1,
-        },
-        MOD_ALT => Command::ResizePane {
-            direction,
-            cells: 5,
-        },
-        _ => return None,
-    };
-    Some(Binding::Run(command))
-}
-
-/// tmux's default key table, or the part of it that exists here.
-fn prefix_binding(event: &KeyEvent) -> Option<Binding> {
-    if let Some(direction) = arrow_direction(event.key) {
-        return arrow_binding(direction, event.binding_mods());
-    }
-    if event.key == key::PAGE_UP {
-        return Some(Binding::Run(Command::CopyMode { page_up: true }));
-    }
-    if event.is_ctrl('b') {
-        return Some(Binding::SendPrefix);
-    }
-    let run = |command| Some(Binding::Run(command));
-    let split = |kind| {
-        Some(Binding::Run(Command::SplitWindow {
-            kind,
-            program: Vec::new(),
-        }))
-    };
-    match event.char()? {
-        'c' => run(Command::NewWindow {
-            name: None,
-            program: Vec::new(),
-        }),
-        'n' => run(Command::NextWindow),
-        'p' => run(Command::PreviousWindow),
-        'l' => run(Command::LastWindow),
-        'o' => run(Command::NextPane),
-        ';' => run(Command::LastPane),
-        'z' => run(Command::ToggleZoom),
-        'd' => run(Command::DetachClient),
-        '[' => run(Command::CopyMode { page_up: false }),
-        ']' => run(Command::PasteBuffer),
-        '%' => split(SplitKind::Horizontal),
-        '"' => split(SplitKind::Vertical),
-        ':' => Some(Binding::CommandPrompt),
-        ',' => Some(Binding::RenamePrompt),
-        'x' => Some(Binding::Confirm("kill-pane? (y/n) ", Command::KillPane)),
-        '&' => Some(Binding::Confirm("kill-window? (y/n) ", Command::KillWindow)),
-        digit @ '0'..='9' => run(Command::SelectWindow(digit.to_digit(10)?)),
-        _ => None,
-    }
 }
 
 const fn is_wheel(button: Option<MouseButton>) -> bool {
@@ -210,8 +138,26 @@ impl Server {
             .is_some_and(|pane| pane.copy_mode.is_some())
     }
 
+    /// Whether this key continues a run of repeatable bindings. Any other key
+    /// ends the run, and then means what it would mean otherwise.
+    fn repeats(&mut self, event: &KeyEvent) -> bool {
+        if event.action == KeyAction::Release {
+            return false;
+        }
+        let in_time = self
+            .repeat_until
+            .is_some_and(|until| Instant::now() < until);
+        let repeatable = || keys::binding(event).is_some_and(|binding| binding.repeat);
+        let repeats = in_time && (key::is_modifier(event.key) || repeatable());
+        if !repeats {
+            self.repeat_until = None;
+        }
+        repeats
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) {
-        let captured = self.ui.prompt.is_some() || self.prefix || self.in_copy_mode();
+        let repeats = self.repeats(event);
+        let captured = self.ui.prompt.is_some() || self.prefix || repeats || self.in_copy_mode();
         if event.action == KeyAction::Release {
             if let Some(position) = self.swallowed.iter().position(|key| *key == event.key) {
                 self.swallowed.swap_remove(position);
@@ -229,7 +175,7 @@ impl Server {
         }
         if self.ui.prompt.is_some() {
             self.prompt_key(event);
-        } else if std::mem::take(&mut self.prefix) {
+        } else if std::mem::take(&mut self.prefix) || repeats {
             self.run_binding(event);
         } else if event.is_ctrl('b') {
             // As in tmux, the prefix goes before the keys of copy mode too.
@@ -250,23 +196,11 @@ impl Server {
 
     fn run_binding(&mut self, event: &KeyEvent) {
         self.dirty = true;
-        match prefix_binding(event) {
-            Some(Binding::Run(command)) => self.run_interactive(command),
-            Some(Binding::Confirm(label, command)) => {
-                let action = PromptAction::Confirm(command);
-                self.ui.prompt = Some(Prompt::new(label, "", action));
-            }
-            Some(Binding::CommandPrompt) => {
-                self.ui.prompt = Some(Prompt::new(":", "", PromptAction::Command));
-            }
-            Some(Binding::RenamePrompt) => {
-                let name = self.session.window().map_or("", |window| &window.name);
-                let prompt = Prompt::new("(rename-window) ", name, PromptAction::RenameWindow);
-                self.ui.prompt = Some(prompt);
-            }
-            Some(Binding::SendPrefix) => self.forward_key(event),
-            None => {}
-        }
+        let Some(binding) = keys::binding(event) else {
+            return;
+        };
+        self.repeat_until = binding.repeat.then(|| Instant::now() + REPEAT_TIME);
+        self.run_line(binding.command);
     }
 
     /// Runs a command the user gave here, showing what comes of it.
@@ -286,14 +220,18 @@ impl Server {
             PromptOutcome::Editing => self.ui.prompt = Some(prompt),
             PromptOutcome::Cancelled => {}
             PromptOutcome::Done(text) => match prompt.action {
-                PromptAction::Command => self.run_prompt_line(&text),
-                PromptAction::RenameWindow => self.run_interactive(Command::RenameWindow(text)),
-                PromptAction::Confirm(command) => self.run_interactive(command),
+                PromptAction::Command(Some(template)) => {
+                    let text = text.replace('\\', "\\\\").replace('"', "\\\"");
+                    self.run_line(&template.replace("%%", &text));
+                }
+                PromptAction::Command(None) => self.run_line(&text),
+                PromptAction::Confirm(command) => self.run_interactive(*command),
             },
         }
     }
 
-    fn run_prompt_line(&mut self, line: &str) {
+    /// Runs a line of text as a command. An empty one is nothing to complain about.
+    fn run_line(&mut self, line: &str) {
         let words = command::split_words(line);
         if words.as_ref().is_ok_and(Vec::is_empty) {
             return;
@@ -301,6 +239,49 @@ impl Server {
         match words.and_then(|words| command::parse(&words)) {
             Ok(command) => self.run_interactive(command),
             Err(error) => self.ui.show_message(error),
+        }
+    }
+
+    fn command_prompt(
+        &mut self,
+        prompt: Option<&str>,
+        initial: Option<&str>,
+        template: Option<String>,
+    ) {
+        let context = Context::current(&self.session);
+        let label = match (prompt, &template) {
+            (Some(prompt), _) => format!("{} ", context.expand(prompt)),
+            (None, Some(template)) => {
+                format!("({}) ", template.split(' ').next().unwrap_or(template))
+            }
+            (None, None) => ":".to_owned(),
+        };
+        let initial = initial.map_or_else(String::new, |initial| context.expand(initial));
+        let action = PromptAction::Command(template);
+        self.ui.prompt = Some(Prompt::new(&label, &initial, action));
+    }
+
+    fn confirm_before(&mut self, prompt: Option<&str>, command: Box<Command>) {
+        let label = prompt.map_or_else(
+            || "Confirm? (y/n) ".to_owned(),
+            |prompt| format!("{} ", Context::current(&self.session).expand(prompt)),
+        );
+        let action = PromptAction::Confirm(command);
+        self.ui.prompt = Some(Prompt::new(&label, "", action));
+    }
+
+    fn send_prefix(&mut self) {
+        let input = KeyInput {
+            action: KeyAction::Press,
+            key: key::from_codepoint(u32::from('b')),
+            mods: MOD_CTRL,
+            consumed_mods: 0,
+            text: "",
+            unshifted: u32::from('b'),
+        };
+        if let Some(pane) = self.session.active_pane_mut() {
+            let bytes = pane.terminal.encode_key(&input);
+            pane.send(&bytes);
         }
     }
 
@@ -326,6 +307,14 @@ impl Server {
         self.dirty = true;
         self.names_may_change();
         match command {
+            Command::Prompt {
+                prompt,
+                initial,
+                template,
+            } => self.command_prompt(prompt.as_deref(), initial.as_deref(), template),
+            Command::ConfirmBefore { prompt, command } => {
+                self.confirm_before(prompt.as_deref(), command);
+            }
             Command::CopyMode { page_up } => self.start_copy_mode(page_up),
             Command::DetachClient => self.detach(),
             Command::DisplayMessage(text) => self.ui.show_message(text),
@@ -343,6 +332,9 @@ impl Server {
             Command::LastWindow => {
                 let last = self.session.last.ok_or("no last window")?;
                 self.session.select_window(last);
+            }
+            Command::ListKeys { notes } => {
+                return Ok(format!("{}\n", keys::list(notes).join("\n")));
             }
             Command::ListPanes => return Ok(self.list_panes()),
             Command::ListWindows => return Ok(self.list_windows()),
@@ -376,6 +368,7 @@ impl Server {
                     pane.send(&bytes);
                 }
             }
+            Command::SendPrefix => self.send_prefix(),
             Command::SetMonitorActivity(value) => {
                 if let Some(window) = self.session.window_mut() {
                     let on = value.unwrap_or(window.monitor == Monitor::Off);

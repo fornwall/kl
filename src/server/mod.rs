@@ -3,6 +3,8 @@
 
 mod copy_mode;
 mod dispatch;
+mod format;
+mod keys;
 mod layout;
 mod pane;
 mod render;
@@ -133,6 +135,8 @@ pub struct Server {
     parser: Parser,
     /// The prefix key was pressed, so the next key is a command.
     prefix: bool,
+    /// Until when a repeatable binding works without the prefix.
+    repeat_until: Option<Instant>,
     /// Keys kl acted on, whose release programs should not see either.
     swallowed: Vec<c_int>,
     drag: Drag,
@@ -223,6 +227,7 @@ pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
         renderer: Renderer::default(),
         parser: Parser::default(),
         prefix: false,
+        repeat_until: None,
         swallowed: Vec::new(),
         drag: Drag::None,
         last_click: None,
@@ -427,6 +432,7 @@ impl Server {
         }
         self.parser = Parser::default();
         self.prefix = false;
+        self.repeat_until = None;
         self.swallowed.clear();
         self.drag = Drag::None;
         self.session.environment = environment;

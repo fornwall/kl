@@ -12,15 +12,14 @@ const MESSAGE_TIME: Duration = Duration::from_secs(3);
 /// What to do with the text of a finished prompt.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PromptAction {
-    /// Run the text as a command.
-    Command,
-    RenameWindow,
+    /// Run the text as a command, or as part of the template if there is one.
+    Command(Option<String>),
     /// Run this command if the answer is `y`.
-    Confirm(Command),
+    Confirm(Box<Command>),
 }
 
 pub struct Prompt {
-    pub label: &'static str,
+    pub label: String,
     pub action: PromptAction,
     text: Vec<char>,
     cursor: usize,
@@ -35,10 +34,10 @@ pub enum PromptOutcome {
 }
 
 impl Prompt {
-    pub fn new(label: &'static str, initial: &str, action: PromptAction) -> Self {
+    pub fn new(label: &str, initial: &str, action: PromptAction) -> Self {
         let text: Vec<char> = initial.chars().collect();
         Self {
-            label,
+            label: label.to_owned(),
             action,
             cursor: text.len(),
             text,
@@ -152,7 +151,7 @@ mod tests {
 
     #[test]
     fn edits_text() {
-        let mut prompt = Prompt::new(":", "", PromptAction::Command);
+        let mut prompt = Prompt::new(":", "", PromptAction::Command(None));
         typed(&mut prompt, "helo");
         prompt.handle_key(&key(b"\x1b[D"));
         typed(&mut prompt, "l");
@@ -168,14 +167,14 @@ mod tests {
 
     #[test]
     fn starts_with_initial_text_ready_to_edit() {
-        let mut prompt = Prompt::new("name: ", "zsh", PromptAction::RenameWindow);
+        let mut prompt = Prompt::new("name: ", "zsh", PromptAction::Command(None));
         typed(&mut prompt, "2");
         assert_eq!(prompt.text(), "zsh2");
     }
 
     #[test]
     fn clears_to_the_start_of_the_line() {
-        let mut prompt = Prompt::new(":", "abcd", PromptAction::Command);
+        let mut prompt = Prompt::new(":", "abcd", PromptAction::Command(None));
         prompt.handle_key(&key(b"\x1b[D"));
         prompt.handle_key(&key(&[0x15]));
         assert_eq!(prompt.text(), "d");
@@ -183,7 +182,7 @@ mod tests {
 
     #[test]
     fn cancels() {
-        let mut prompt = Prompt::new(":", "x", PromptAction::Command);
+        let mut prompt = Prompt::new(":", "x", PromptAction::Command(None));
         assert_eq!(prompt.handle_key(&key(&[3])), PromptOutcome::Cancelled);
         assert_eq!(
             prompt.handle_key(&key(b"\x1b[27u")),
@@ -193,7 +192,7 @@ mod tests {
 
     #[test]
     fn confirmation_takes_only_y() {
-        let action = PromptAction::Confirm(Command::KillPane);
+        let action = PromptAction::Confirm(Box::new(Command::KillPane));
         let mut prompt = Prompt::new("kill? ", "", action);
         assert_eq!(prompt.handle_key(&key(b"n")), PromptOutcome::Cancelled);
         assert_eq!(

@@ -23,6 +23,16 @@ pub enum SplitKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Asks for a line, and runs it or fills it in to a template at `%%`.
+    Prompt {
+        prompt: Option<String>,
+        initial: Option<String>,
+        template: Option<String>,
+    },
+    ConfirmBefore {
+        prompt: Option<String>,
+        command: Box<Self>,
+    },
     CopyMode {
         page_up: bool,
     },
@@ -33,6 +43,10 @@ pub enum Command {
     KillWindow,
     LastPane,
     LastWindow,
+    /// `list-keys`, with what each key does in words for `-N`.
+    ListKeys {
+        notes: bool,
+    },
     ListPanes,
     ListWindows,
     NewWindow {
@@ -53,6 +67,7 @@ pub enum Command {
     SelectPane(Direction),
     SelectWindow(u32),
     SendKeys(Vec<String>),
+    SendPrefix,
     /// Turns a window's `monitor-activity` option on or off, or toggles it.
     SetMonitorActivity(Option<bool>),
     SplitWindow {
@@ -68,6 +83,8 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         return Err("no command".to_owned());
     };
     match name.as_str() {
+        "command-prompt" => parse_command_prompt(args),
+        "confirm-before" | "confirm" => parse_confirm_before(args),
         "copy-mode" => parse_copy_mode(args),
         "detach-client" | "detach" => no_args(name, args, Command::DetachClient),
         "display-message" | "display" => Ok(Command::DisplayMessage(args.join(" "))),
@@ -76,6 +93,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "kill-window" | "killw" => no_args(name, args, Command::KillWindow),
         "last-pane" | "lastp" => no_args(name, args, Command::LastPane),
         "last-window" | "last" => no_args(name, args, Command::LastWindow),
+        "list-keys" | "lsk" => parse_list_keys(args),
         "list-panes" | "lsp" => no_args(name, args, Command::ListPanes),
         "list-windows" | "lsw" => no_args(name, args, Command::ListWindows),
         "new-window" | "neww" => parse_new_window(args),
@@ -88,9 +106,74 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "select-pane" | "selectp" => parse_select_pane(args),
         "select-window" | "selectw" => parse_select_window(args),
         "send-keys" | "send" => Ok(Command::SendKeys(args.to_vec())),
+        "send-prefix" => no_args(name, args, Command::SendPrefix),
         "set-option" | "set" | "set-window-option" | "setw" => parse_set_option(args),
         "split-window" | "splitw" => Ok(parse_split_window(args)),
         other => Err(format!("unknown command: {other}")),
+    }
+}
+
+/// Parses a line of text as a command.
+pub fn parse_line(line: &str) -> Result<Command, String> {
+    parse(&split_words(line)?)
+}
+
+/// The flags of a command, as getopt finds them in front of its other arguments.
+struct Flags<'a> {
+    found: Vec<(char, Option<&'a str>)>,
+    rest: &'a [String],
+}
+
+impl<'a> Flags<'a> {
+    /// Takes the flags in `spec`, in which a colon follows those with a value.
+    fn parse(args: &'a [String], spec: &str) -> Result<Self, String> {
+        let mut found = Vec::new();
+        let mut rest = args;
+        while let Some((word, tail)) = rest.split_first() {
+            let Some(letters) = word.strip_prefix('-').filter(|letters| !letters.is_empty()) else {
+                break;
+            };
+            rest = tail;
+            if letters == "-" {
+                break;
+            }
+            let mut chars = letters.chars();
+            while let Some(flag) = chars.next() {
+                let mut spec = spec.chars().skip_while(|c| *c != flag || flag == ':');
+                if spec.next().is_none() {
+                    return Err(format!("unknown flag -{flag}"));
+                }
+                if spec.next() != Some(':') {
+                    found.push((flag, None));
+                    continue;
+                }
+                let attached = chars.as_str();
+                let value = if attached.is_empty() {
+                    let (value, tail) = rest
+                        .split_first()
+                        .ok_or_else(|| format!("-{flag} expects an argument"))?;
+                    rest = tail;
+                    value.as_str()
+                } else {
+                    attached
+                };
+                found.push((flag, Some(value)));
+                break;
+            }
+        }
+        Ok(Self { found, rest })
+    }
+
+    fn has(&self, flag: char) -> bool {
+        self.found.iter().any(|(found, _)| *found == flag)
+    }
+
+    /// The value of a flag, the last one if given more than once.
+    fn value(&self, flag: char) -> Option<String> {
+        let values = self.found.iter().rev();
+        values
+            .filter(|(found, _)| *found == flag)
+            .find_map(|(_, value)| value.map(str::to_owned))
     }
 }
 
@@ -100,6 +183,43 @@ fn no_args(name: &str, args: &[String], command: Command) -> Result<Command, Str
     } else {
         Err(format!("{name}: too many arguments"))
     }
+}
+
+fn parse_command_prompt(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "I:p:")?;
+    let template = match flags.rest {
+        [] => None,
+        [template] => Some(template.clone()),
+        _ => return Err("usage: command-prompt [-I initial] [-p prompt] [template]".to_owned()),
+    };
+    Ok(Command::Prompt {
+        prompt: flags.value('p'),
+        initial: flags.value('I'),
+        template,
+    })
+}
+
+fn parse_confirm_before(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "p:")?;
+    let command = match flags.rest {
+        [] => return Err("usage: confirm-before [-p prompt] command".to_owned()),
+        [line] => parse_line(line)?,
+        words => parse(words)?,
+    };
+    Ok(Command::ConfirmBefore {
+        prompt: flags.value('p'),
+        command: Box::new(command),
+    })
+}
+
+fn parse_list_keys(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "N")?;
+    if !flags.rest.is_empty() {
+        return Err("usage: list-keys [-N]".to_owned());
+    }
+    Ok(Command::ListKeys {
+        notes: flags.has('N'),
+    })
 }
 
 fn parse_copy_mode(args: &[String]) -> Result<Command, String> {
@@ -365,6 +485,67 @@ mod tests {
             "invalid option: status"
         );
         assert!(parse(&words("setw monitor-activity maybe")).is_err());
+    }
+
+    #[test]
+    fn parses_prompts() {
+        assert_eq!(
+            command("command-prompt"),
+            Command::Prompt {
+                prompt: None,
+                initial: None,
+                template: None,
+            }
+        );
+        assert_eq!(
+            command(r##"command-prompt -I "#W" -p name "rename-window '%%'""##),
+            Command::Prompt {
+                prompt: Some("name".to_owned()),
+                initial: Some("#W".to_owned()),
+                template: Some("rename-window '%%'".to_owned()),
+            }
+        );
+        assert_eq!(
+            command(r#"confirm-before -p "sure?" kill-pane"#),
+            Command::ConfirmBefore {
+                prompt: Some("sure?".to_owned()),
+                command: Box::new(Command::KillPane),
+            }
+        );
+        assert_eq!(
+            command(r#"confirm "resize-pane -Z""#),
+            Command::ConfirmBefore {
+                prompt: None,
+                command: Box::new(Command::ToggleZoom),
+            }
+        );
+    }
+
+    fn flags<'a>(args: &'a [String], spec: &str) -> Result<Flags<'a>, String> {
+        Flags::parse(args, spec)
+    }
+
+    #[test]
+    fn reads_flags_as_getopt_does() {
+        let args = words("-ab -t one -ctwo -- -d rest");
+        let parsed = flags(&args, "abt:c:d").unwrap();
+        assert_eq!(parsed.value('t').as_deref(), Some("one"));
+        assert_eq!(parsed.value('c').as_deref(), Some("two"));
+        assert_eq!(parsed.rest, ["-d", "rest"]);
+        assert!(parsed.has('a'));
+        assert!(!parsed.has('d'));
+
+        let args = words("-a word -b");
+        assert_eq!(flags(&args, "ab").unwrap().rest, ["word", "-b"]);
+
+        let args = words("- word");
+        assert_eq!(flags(&args, "ab").unwrap().rest, ["-", "word"]);
+
+        let args = words("-x");
+        assert_eq!(flags(&args, "ab").err().unwrap(), "unknown flag -x");
+
+        let args = words("-t");
+        assert_eq!(flags(&args, "t:").err().unwrap(), "-t expects an argument");
     }
 
     #[test]

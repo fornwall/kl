@@ -32,6 +32,10 @@ pub enum Monitor {
 }
 
 impl Window {
+    pub fn has_activity(&self) -> bool {
+        self.monitor == Monitor::Flagged
+    }
+
     /// The panes on display in the given area.
     fn visible(&self, area: Rect) -> Vec<(PaneId, Rect)> {
         if self.zoomed {
@@ -156,6 +160,26 @@ impl Session {
         for pane in self.panes.values_mut() {
             pane.set_outer_colors(&self.colors);
         }
+    }
+
+    /// The marks after a window's name on the status line.
+    pub fn window_flags(&self, window: &Window) -> String {
+        let mut flags = String::new();
+        if window.has_activity() {
+            flags.push('#');
+        }
+        if window.bell {
+            flags.push('!');
+        }
+        if window.index == self.current {
+            flags.push('*');
+        } else if self.last == Some(window.index) {
+            flags.push('-');
+        }
+        if window.zoomed {
+            flags.push('Z');
+        }
+        flags
     }
 
     /// Fits every pane of every window to the current size.

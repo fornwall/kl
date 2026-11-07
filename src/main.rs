@@ -48,11 +48,17 @@ Panes:
   list-panes (lsp)                            list panes in the window
 
 Other:
+  list-keys (lsk) [-N]                        list the keys after the prefix
   send-keys (send) key...                     type into the active pane
+  send-prefix                                 type the prefix key into the pane
+  command-prompt [-I text] [-p prompt] [template]  ask for a command to run
+  confirm-before [-p prompt] command          run a command after asking
   copy-mode [-u], paste-buffer (pasteb), display-message (display) text
 
 Keys follow tmux, with C-b as the prefix: c n p l 0-9 , & for windows,
 % \" o ; z x arrows for panes, [ ] for copying, : for commands and d to detach.
+Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a
+second, so that C-b C-Up C-Up resizes twice.
 The mouse selects panes and windows, drags borders, scrolls and copies text.
 ";
 

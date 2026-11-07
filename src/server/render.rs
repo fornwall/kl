@@ -2,7 +2,7 @@
 //! outer terminal only what changed since the last frame.
 
 use super::layout::{Divider, Rect};
-use super::session::{Monitor, Session, Window};
+use super::session::{Session, Window};
 use super::ui::Ui;
 use crate::ghostty::{
     self, Cell, CursorShape, Progress, STYLE_BLINK, STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE,
@@ -319,7 +319,7 @@ impl Renderer {
         for window in &session.windows {
             let label = window_label(session, window);
             let start = x;
-            let alert = window.bell || window.monitor == Monitor::Flagged;
+            let alert = window.bell || window.has_activity();
             let label_style = if alert { alert_style() } else { style };
             x = self.next.put_str(x, y, &label, label_style, right_start);
             self.status_entries.push(StatusEntry {
@@ -473,21 +473,7 @@ fn draw_position(grid: &mut Grid, rect: Rect, scrollbar: Option<ghostty::Scrollb
 }
 
 fn window_label(session: &Session, window: &Window) -> String {
-    let mut flags = String::new();
-    if window.monitor == Monitor::Flagged {
-        flags.push('#');
-    }
-    if window.bell {
-        flags.push('!');
-    }
-    if window.index == session.current {
-        flags.push('*');
-    } else if session.last == Some(window.index) {
-        flags.push('-');
-    }
-    if window.zoomed {
-        flags.push('Z');
-    }
+    let flags = session.window_flags(window);
     format!("{}:{}{flags}", window.index, window.name)
 }
 
@@ -505,7 +491,7 @@ fn status_right(session: &Session) -> String {
 
 fn cursor_target(session: &Session, ui: &Ui) -> CursorTarget {
     if let Some(prompt) = &ui.prompt {
-        let x = text_width(prompt.label) + text_width(&prompt.text_before_cursor());
+        let x = text_width(&prompt.label) + text_width(&prompt.text_before_cursor());
         return Some((x, session.size.rows.saturating_sub(1), 2));
     }
     let pane = session.active_pane()?;
