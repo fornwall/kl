@@ -8,11 +8,11 @@ use super::layout::{Divider, PaneId, Rect};
 use super::pane::Pane;
 use super::session::Window;
 use super::ui::{Prompt, PromptAction, PromptOutcome};
-use super::{Lifecycle, Server};
+use super::{COLOR_QUERIES, Lifecycle, Server};
 use crate::command::{self, Command, Direction, SplitKind};
 use crate::ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
-    KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MouseAction, MouseButton, MouseInput, Rgb,
+    KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MouseAction, MouseButton, MouseInput,
 };
 use crate::input::{Event, KeyEvent, MouseEvent};
 use crate::proto::ServerMessage;
@@ -154,8 +154,15 @@ fn in_pane(pane: &Pane, event: MouseEvent) -> (u16, u16) {
 
 impl Server {
     pub fn handle_input(&mut self, bytes: &[u8]) {
-        for event in self.parser.feed(bytes) {
+        let events = self.parser.feed(bytes);
+        let colors = events.iter().any(Event::is_about_colors);
+        for event in events {
             self.handle_event(event);
+        }
+        // After all of them, as a single reply can come as many events.
+        if colors {
+            self.session.apply_colors();
+            self.dirty = true;
         }
         self.escape_since = self.parser.has_pending_escape().then(Instant::now);
     }
@@ -167,17 +174,15 @@ impl Server {
             Event::Mouse(event) => self.handle_mouse(event),
             Event::Paste(text) => self.handle_paste(&text),
             Event::Focus(focused) => self.session.report_focus(focused),
-            Event::Foreground(rgb) => self.set_colors(Some(rgb), None),
-            Event::Background(rgb) => self.set_colors(None, Some(rgb)),
-        }
-    }
-
-    fn set_colors(&mut self, foreground: Option<Rgb>, background: Option<Rgb>) {
-        let colors = &mut self.session.colors;
-        colors.0 = foreground.or(colors.0);
-        colors.1 = background.or(colors.1);
-        for pane in self.session.panes.values_mut() {
-            pane.terminal.set_default_colors(foreground, background);
+            Event::Foreground(rgb) => self.session.colors.foreground = Some(rgb),
+            Event::Background(rgb) => self.session.colors.background = Some(rgb),
+            Event::ColorScheme { dark } => {
+                // A new scheme most likely brought new colors along.
+                let old = self.session.colors.dark.replace(dark);
+                if old.is_some_and(|old| old != dark) {
+                    self.send_output(COLOR_QUERIES);
+                }
+            }
         }
     }
 

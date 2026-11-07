@@ -42,6 +42,7 @@ pub const MODE_FOCUS_EVENT: u16 = 1004;
 pub const MODE_ALTERNATE_SCROLL: u16 = 1007;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
+const MODE_REPORT_COLOR_SCHEME: u16 = 2031;
 
 /// A `GhosttyResult` other than success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +220,33 @@ pub struct MouseInput {
     pub x: u16,
     pub y: u16,
     pub any_pressed: bool,
+}
+
+/// What the outer terminal said about its colors.
+#[derive(Clone, Debug, Default)]
+pub struct OuterColors {
+    pub foreground: Option<Rgb>,
+    pub background: Option<Rgb>,
+    /// Whether it is in a dark color scheme, if it says.
+    pub dark: Option<bool>,
+}
+
+impl OuterColors {
+    /// The `GhosttyColorScheme` to tell programs. Going by the background is
+    /// the next best thing for a terminal that does not say, and dark is what
+    /// most people have.
+    fn color_scheme(&self) -> c_int {
+        let brightness = |rgb: Rgb| u16::from(rgb.r) + u16::from(rgb.g) + u16::from(rgb.b);
+        let dark = self
+            .dark
+            .or_else(|| self.background.map(|rgb| brightness(rgb) < 3 * 128))
+            .unwrap_or(true);
+        if dark {
+            ffi::COLOR_SCHEME_DARK
+        } else {
+            ffi::COLOR_SCHEME_LIGHT
+        }
+    }
 }
 
 /// What programs asked of the terminal. Filled in during [`Terminal::write`]
@@ -656,20 +684,25 @@ impl Terminal {
         })
     }
 
-    /// Sets the colors reported to programs that ask for them.
-    pub fn set_default_colors(&mut self, foreground: Option<Rgb>, background: Option<Rgb>) {
-        if let Some(rgb) = foreground {
+    /// Takes over what the outer terminal said about its colors, for programs
+    /// that ask. Returns the report for a program that wants to hear when the
+    /// color scheme changes, if it just did.
+    pub fn set_outer_colors(&mut self, colors: &OuterColors) -> Vec<u8> {
+        if let Some(rgb) = colors.foreground {
             best_effort(self.set(ffi::OPT_COLOR_FOREGROUND, (&raw const rgb).cast()));
         }
-        if let Some(rgb) = background {
+        if let Some(rgb) = colors.background {
             best_effort(self.set(ffi::OPT_COLOR_BACKGROUND, (&raw const rgb).cast()));
-            let brightness = u16::from(rgb.r) + u16::from(rgb.g) + u16::from(rgb.b);
-            self.effects().color_scheme = if brightness < 3 * 128 {
-                ffi::COLOR_SCHEME_DARK
-            } else {
-                ffi::COLOR_SCHEME_LIGHT
-            };
         }
+        let scheme = colors.color_scheme();
+        let changed = std::mem::replace(&mut self.effects().color_scheme, scheme) != scheme;
+        if !changed || !self.mode(MODE_REPORT_COLOR_SCHEME) {
+            return Vec::new();
+        }
+        encode_into(|buf, len, written| {
+            // SAFETY: `buf` is valid for `len` bytes, and `written` for a write.
+            unsafe { ffi::ghostty_color_scheme_report_encode(scheme, buf, len, written) }
+        })
     }
 
     fn string(&self, data: c_int) -> String {
@@ -1575,6 +1608,47 @@ mod tests {
         let mut terminal = Terminal::new(10, 2).unwrap();
         terminal.write(b"\x1b]52;c;aGVsbG8=\x07");
         assert_eq!(terminal.effects().clipboard, [b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn prefers_the_scheme_the_outer_terminal_reports() {
+        let white = Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        let guessed = OuterColors {
+            background: Some(white),
+            ..OuterColors::default()
+        };
+        assert_eq!(guessed.color_scheme(), ffi::COLOR_SCHEME_LIGHT);
+        let reported = OuterColors {
+            dark: Some(true),
+            ..guessed
+        };
+        assert_eq!(reported.color_scheme(), ffi::COLOR_SCHEME_DARK);
+        assert_eq!(
+            OuterColors::default().color_scheme(),
+            ffi::COLOR_SCHEME_DARK
+        );
+    }
+
+    #[test]
+    fn reports_a_new_color_scheme_only_to_programs_that_asked() {
+        let light = OuterColors {
+            dark: Some(false),
+            ..OuterColors::default()
+        };
+        let dark = OuterColors {
+            dark: Some(true),
+            ..OuterColors::default()
+        };
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        assert_eq!(terminal.set_outer_colors(&light), b"");
+        terminal.write(b"\x1b[?2031h");
+        assert_eq!(terminal.set_outer_colors(&light), b"");
+        assert_eq!(terminal.set_outer_colors(&dark), b"\x1b[?997;1n");
+        assert_eq!(terminal.set_outer_colors(&light), b"\x1b[?997;2n");
     }
 
     #[test]

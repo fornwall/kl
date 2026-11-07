@@ -10,7 +10,7 @@ use std::process::Command;
 
 use super::copy_mode::CopyMode;
 use super::layout::{PaneId, Rect};
-use crate::ghostty::{Notification, Rgb, Terminal};
+use crate::ghostty::{Notification, OuterColors, Terminal};
 use crate::sys::{self, WinSize};
 
 /// How much to read from a pty at a time.
@@ -158,12 +158,12 @@ impl Pane {
         id: PaneId,
         spawn: &Spawn<'_>,
         size: WinSize,
-        colors: (Option<Rgb>, Option<Rgb>),
+        colors: &OuterColors,
     ) -> io::Result<Self> {
         let cols = size.cols.max(1);
         let rows = size.rows.max(1);
         let mut terminal = Terminal::new(cols, rows).map_err(io::Error::other)?;
-        terminal.set_default_colors(colors.0, colors.1);
+        terminal.set_outer_colors(colors);
         let (pty, child) = sys::spawn_on_pty(build_command(spawn, id), size)?;
         if !sys::selectable(pty.as_raw_fd()) {
             return Err(io::Error::other("too many panes"));
@@ -269,6 +269,13 @@ impl Pane {
             copy_mode.y = copy_mode.y.min(rows - 1);
         }
         self.take_activity();
+    }
+
+    /// Takes over the outer terminal's colors, telling the program if it asked
+    /// to hear about a change of color scheme.
+    pub fn set_outer_colors(&mut self, colors: &OuterColors) {
+        let report = self.terminal.set_outer_colors(colors);
+        self.send(&report);
     }
 
     /// Tells the program, if it asked, that it gained or lost the keyboard.

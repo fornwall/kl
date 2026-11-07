@@ -409,6 +409,12 @@ unsafe extern "C" {
         buf_len: usize,
         written: *mut usize,
     ) -> c_int;
+    pub fn ghostty_color_scheme_report_encode(
+        scheme: c_int,
+        buf: *mut u8,
+        buf_len: usize,
+        written: *mut usize,
+    ) -> c_int;
     pub fn ghostty_paste_encode(
         data: *mut c_char,
         data_len: usize,

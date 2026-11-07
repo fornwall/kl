@@ -29,11 +29,22 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
-use ghostty::{KeyAction, KeyInput, Notification, Progress, Terminal, Width};
+use ghostty::{KeyAction, KeyInput, Notification, OuterColors, Progress, Rgb, Terminal, Width};
 use sys::WinSize;
 
 const KL: &str = env!("CARGO_BIN_EXE_kl");
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+const OUTER_FOREGROUND: Rgb = Rgb {
+    r: 0xee,
+    g: 0xdd,
+    b: 0xcc,
+};
+const OUTER_BACKGROUND: Rgb = Rgb {
+    r: 0x11,
+    g: 0x22,
+    b: 0x33,
+};
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
@@ -101,6 +112,11 @@ impl Screen {
         let (pty, child) = sys::spawn_on_pty(command, size).unwrap();
         let mut terminal = Terminal::new(cols, rows).unwrap();
         terminal.resize(cols, rows, 10, 20).unwrap();
+        terminal.set_outer_colors(&OuterColors {
+            foreground: Some(OUTER_FOREGROUND),
+            background: Some(OUTER_BACKGROUND),
+            dark: Some(true),
+        });
         let mut screen = Self {
             terminal,
             pty,
@@ -309,6 +325,13 @@ impl Screen {
         };
         self.terminal.resize(cols, rows, 10, 20).unwrap();
         sys::set_winsize(self.pty.as_fd(), size).unwrap();
+    }
+
+    /// What a change of theme in the outer terminal comes down to.
+    fn change_outer_colors(&mut self, colors: &OuterColors) {
+        let report = self.terminal.set_outer_colors(colors);
+        assert!(!report.is_empty(), "kl did not ask to hear about this");
+        self.send_bytes(&report);
     }
 
     fn wait_for_exit(&mut self) {
@@ -1036,31 +1059,38 @@ fn forwards_clipboard_writes_to_the_outer_terminal() {
 
 #[test]
 fn programs_can_query_the_outer_colors() {
-    let dir = Rc::new(Scratch::new());
-    let size = WinSize {
-        cols: 80,
-        rows: 24,
-        ..WinSize::default()
-    };
-    let (pty, child) = sys::spawn_on_pty(kl_command(&dir.0), size).unwrap();
-    let mut terminal = Terminal::new(80, 24).unwrap();
-    let background = ghostty::Rgb {
-        r: 0x11,
-        g: 0x22,
-        b: 0x33,
-    };
-    terminal.set_default_colors(None, Some(background));
-    let mut screen = Screen {
-        terminal,
-        pty,
-        child,
-        dir,
-        raw: Vec::new(),
-    };
-    screen.wait_for("a prompt", |lines| lines[0].starts_with('$'));
+    let mut screen = Screen::new(80, 24);
     screen.run(r"printf '\033]11;?\033\\'; cat -v");
     screen.enter();
     screen.wait_for_text("rgb:1111/2222/3333");
+}
+
+#[test]
+fn programs_hear_when_the_color_scheme_changes() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("%");
+    screen.wait_for("a prompt in the new pane", |lines| lines[0].ends_with("│$"));
+    // Listening in a pane out of sight, which still has to adapt.
+    screen.run_setup_then_cat(r"printf '\033[?2031h'");
+    screen.prefix("c");
+    screen.wait_for("a second window", |lines| {
+        lines.last().is_some_and(|status| status.contains(" 1:"))
+    });
+
+    screen.change_outer_colors(&OuterColors {
+        foreground: Some(OUTER_BACKGROUND),
+        background: Some(OUTER_FOREGROUND),
+        dark: Some(false),
+    });
+    screen.prefix("0");
+    screen.wait_for_text("^[[?997;2n");
+
+    // The query is answered from the same knowledge, and the new colors are in.
+    screen.prefix("o");
+    screen.run(r"printf '\033[?996n\033]11;?\033\\'; cat -v");
+    screen.enter();
+    let lines = screen.wait_for_text("rgb:eeee/dddd/cccc");
+    assert!(lines.iter().any(|line| line.contains("^[[?997;2n")));
 }
 
 #[test]

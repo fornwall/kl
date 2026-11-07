@@ -22,21 +22,21 @@ const SERVER_START_TIME: Duration = Duration::from_secs(5);
 /// stack per screen, so it goes on after switching to the alternate screen.
 ///
 /// The keyboard flags ask for everything, so panes can get full-fidelity events
-/// whatever they ask for. The queries at the end find out the default colors,
-/// to report to programs that ask. Grapheme clustering is saved rather than just
-/// turned off afterwards, since it is on by default in Ghostty.
+/// whatever they ask for. Grapheme clustering is saved rather than just turned
+/// off afterwards, since it is on by default in Ghostty.
 const ENTER_TERMINAL: &[u8] = b"\x1b[?1049h\
     \x1b[>31u\
     \x1b[?2027s\x1b[?2027h\
     \x1b[?1003h\x1b[?1006h\
     \x1b[?2004h\
     \x1b[?1004h\
-    \x1b]10;?\x1b\\\x1b]11;?\x1b\\";
+    \x1b[?2031h";
 
 /// Undoes [`ENTER_TERMINAL`], in reverse, along with what frames leave behind.
 /// The client does this rather than the server, so that it happens even if the
 /// server dies.
-const LEAVE_TERMINAL: &[u8] = b"\x1b[?1004l\
+const LEAVE_TERMINAL: &[u8] = b"\x1b[?2031l\
+    \x1b[?1004l\
     \x1b[?2004l\
     \x1b[?1006l\x1b[?1003l\
     \x1b[?2027r\

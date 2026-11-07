@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use super::layout::{self, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
 use crate::command::{Direction, SplitKind};
-use crate::ghostty::{Progress, Rgb};
+use crate::ghostty::{OuterColors, Progress};
 use crate::sys::WinSize;
 
 pub struct Window {
@@ -43,8 +43,7 @@ pub struct Session {
     pub size: WinSize,
     /// The layout changed, so the whole screen must be composed again.
     pub repaint: bool,
-    /// The outer terminal's default foreground and background.
-    pub colors: (Option<Rgb>, Option<Rgb>),
+    pub colors: OuterColors,
     /// What new panes get of the environment of the latest client, in the form
     /// of [`crate::proto::ClientMessage::Attach`].
     pub environment: Vec<String>,
@@ -56,7 +55,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub const fn new(socket: String) -> Self {
+    pub fn new(socket: String) -> Self {
         Self {
             windows: Vec::new(),
             panes: BTreeMap::new(),
@@ -69,7 +68,7 @@ impl Session {
                 height_px: 0,
             },
             repaint: true,
-            colors: (None, None),
+            colors: OuterColors::default(),
             environment: Vec::new(),
             progress_reported: false,
             socket,
@@ -137,6 +136,13 @@ impl Session {
             .or_else(|| visible.iter().find_map(|(id, _)| of(id)))
     }
 
+    /// Passes on what the outer terminal said about its colors.
+    pub fn apply_colors(&mut self) {
+        for pane in self.panes.values_mut() {
+            pane.set_outer_colors(&self.colors);
+        }
+    }
+
     /// Fits every pane of every window to the current size.
     pub fn relayout(&mut self) {
         let area = self.area();
@@ -173,7 +179,7 @@ impl Session {
             width_px: 0,
             height_px: 0,
         };
-        let pane = Pane::spawn(id, &spawn, size, self.colors)
+        let pane = Pane::spawn(id, &spawn, size, &self.colors)
             .map_err(|error| format!("cannot start a pane: {error}"))?;
         self.panes.insert(id, pane);
         self.next_pane += 1;

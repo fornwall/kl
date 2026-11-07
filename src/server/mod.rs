@@ -51,6 +51,11 @@ const STARTUP_TIME: Duration = Duration::from_secs(10);
 /// must not keep the server alive.
 const GOODBYE_TIME: Duration = Duration::from_secs(1);
 
+/// Asks the outer terminal about its colors, for programs that want to know.
+/// The server does this rather than the client, since it needs to ask again
+/// when the color scheme changes.
+const COLOR_QUERIES: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n";
+
 struct Connection {
     id: u64,
     stream: UnixStream,
@@ -421,6 +426,7 @@ impl Server {
         }
         self.renderer.invalidate();
         self.dirty = true;
+        self.send_output(COLOR_QUERIES);
     }
 
     fn run_client_command(&mut self, id: u64, version: u32, args: &[String]) {

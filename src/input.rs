@@ -134,6 +134,19 @@ pub enum Event {
     Foreground(Rgb),
     /// The terminal's default background color, from OSC 11.
     Background(Rgb),
+    /// The terminal's color scheme, as asked for or from mode 2031.
+    ColorScheme {
+        dark: bool,
+    },
+}
+
+impl Event {
+    pub const fn is_about_colors(&self) -> bool {
+        matches!(
+            self,
+            Self::Foreground(_) | Self::Background(_) | Self::ColorScheme { .. }
+        )
+    }
 }
 
 #[derive(Default)]
@@ -393,6 +406,8 @@ fn parse_csi(rest: &[u8]) -> Step {
         (b'Z', "") => Step::Consumed(used, Some(key_event(key::TAB, MOD_SHIFT))),
         (b'I', "") => Step::Consumed(used, Some(Event::Focus(true))),
         (b'O', "") => Step::Consumed(used, Some(Event::Focus(false))),
+        (b'n', "?997;1") => Step::Consumed(used, Some(Event::ColorScheme { dark: true })),
+        (b'n', "?997;2") => Step::Consumed(used, Some(Event::ColorScheme { dark: false })),
         (b'M' | b'm', _) if params.starts_with('<') => {
             let event = parse_mouse(params.get(1..).unwrap_or(""), last == b'M');
             Step::Consumed(used, event.map(Event::Mouse))
@@ -842,12 +857,23 @@ mod tests {
     }
 
     #[test]
+    fn reads_color_scheme_reports() {
+        assert_eq!(
+            events(b"\x1b[?997;1n\x1b[?997;2n"),
+            [
+                Event::ColorScheme { dark: true },
+                Event::ColorScheme { dark: false }
+            ]
+        );
+    }
+
+    #[test]
     fn skips_sequences_it_does_not_know() {
         assert_eq!(events(b"\x1b]52;c;aGk=\x07"), []);
         assert_eq!(events(b"\x1bP1$r0m\x1b\\"), []);
         assert_eq!(events(b"\x1b_Gi=1\x1b\\"), []);
         assert_eq!(events(b"\x1b[?62;22c"), []);
-        assert_eq!(only_key(b"\x1b[?997;1na").text, "a");
+        assert_eq!(only_key(b"\x1b[?998;1na").text, "a");
     }
 
     #[test]
