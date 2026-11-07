@@ -62,13 +62,10 @@ These are choices rather than gaps, and each has a reason.
   tmux goes by the first client that knows. When terminals disagree, programs that
   asked to hear of changes get told as the window moves between them.
 - **A program has the keyboard while any terminal showing it does.**
-- **Programs read kl's paste buffers, never the system clipboard.** An OSC 52 read
-  gets the newest automatic buffer without asking, and only from the active pane.
-  Any other pane gets nothing. This goes further than tmux, which by default does
-  not answer such reads at all, and does what it does with `set-clipboard on`. The
-  answer goes to a program's pty, which can lead to another host, so a program
-  there can read what was last copied in kl, while text copied outside kl stays
-  out of reach.
+- **Programs cannot read the clipboard.** They can write to it, but an OSC 52 read
+  gets no answer, the same as with tmux by default and with herdr. An answer goes
+  to a program's pty, which can lead to another host, so anything there could
+  quietly read what was copied here.
 - **Notifications get through from every pane,** seen or not, since telling you
   about something out of sight is what they are for.
 - **Images are worth their size.** Kitty graphics and PNG decoding add about

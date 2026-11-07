@@ -3306,6 +3306,9 @@ fn a_failed_restart_leaves_the_server_running() {
     screen.wait_for_text("still-2");
 }
 
+/// The format for which pane is active.
+const ACTIVE_PANE: &str = concat!("#{", "pane_id}");
+
 /// A panic or an abort takes the server, and every pane with it.
 fn assert_server_is_alive(screen: &Screen) {
     let output = screen.command(&["list-windows"]);
@@ -3358,32 +3361,6 @@ fn asking_to_send_too_much_cannot_take_the_server_down() {
     let output = screen.command(&["send-keys", "-N", "4294967295", &keys]);
     assert!(!output.status.success());
     assert_server_is_alive(&screen);
-}
-
-/// A few bytes can ask for all of a paste buffer. These ask for about 960 MB of
-/// replies from a program that reads none of them, which must not end the server.
-/// Queries take 9 bytes, and half of one would swallow what comes after it.
-#[test]
-#[expect(
-    clippy::literal_string_with_formatting_args,
-    reason = "these are formats, just not the ones of Rust"
-)]
-fn a_program_that_does_not_read_its_replies_stays_within_bounds() {
-    let mut screen = Screen::new(80, 24);
-    let buffer = "x".repeat(100_000);
-    assert!(screen.command(&["set-buffer", &buffer]).status.success());
-    screen.run(
-        r#"stty raw -echo; yes "$(printf '\033]52;c;?\007')" | tr -d '\n' | head -c 64998; printf 'fin''ished\r\n'; sleep 100"#,
-    );
-    screen.wait_for_text("finished");
-    let pid = screen.command(&["display-message", "-p", "#{pid}"]).stdout;
-    let pid = String::from_utf8_lossy(&pid).trim().to_owned();
-    let rss = Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid])
-        .output()
-        .unwrap();
-    let rss: u64 = String::from_utf8_lossy(&rss.stdout).trim().parse().unwrap();
-    assert!(rss < 400_000, "the server uses {rss} kB");
 }
 
 #[test]
@@ -3840,35 +3817,15 @@ fn forwards_clipboard_writes_to_the_outer_terminal() {
 }
 
 #[test]
-fn the_active_pane_reads_the_newest_paste_buffer() {
+fn programs_get_no_answer_when_reading_the_clipboard() {
     let mut screen = Screen::new(80, 24);
     assert!(screen.command(&["set-buffer", "hello"]).status.success());
     screen.run_setup_then_cat(r"printf '\033]52;c;?\033\\'");
-    screen.wait_for_text("52;c;aGVsbG8=");
-}
-
-#[test]
-fn reading_the_clipboard_gets_nothing_without_a_paste_buffer() {
-    let mut screen = Screen::new(80, 24);
-    screen.run_setup_then_cat(r"printf '\033]52;c;?\033\\'");
-    screen.wait_for_text("52;c;^[");
-}
-
-#[test]
-fn a_pane_not_in_use_cannot_read_the_clipboard() {
-    let mut screen = Screen::new(80, 24);
-    assert!(screen.command(&["set-buffer", "hello"]).status.success());
-    // It asks once told to, when the other pane has taken over.
-    let go = screen.dir.0.join("go");
-    let go = go.display();
-    screen.run(&format!(
-        r"while [ ! -e {go} ]; do sleep 0.01; done; printf '\033]52;c;?\033\\'; cat -v"
-    ));
-    screen.prefix("%");
-    screen.wait_for_text("│");
-    fs::write(go.to_string(), "").unwrap();
-    let lines = screen.wait_for_text("52;c;^[");
-    assert!(!lines.iter().any(|line| line.contains("aGVsbG8=")));
+    // Anything that came back would be in front of this, echoed by the pty.
+    screen.run("typed");
+    let lines = screen.wait_for_line("typed");
+    let lines = screen.lines().into_iter().take(usize::from(lines) + 1);
+    assert!(!lines.into_iter().any(|line| line.contains("^[]52")));
 }
 
 #[test]

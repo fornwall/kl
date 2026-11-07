@@ -38,7 +38,6 @@ pub const OPT_PROGRESS_REPORT: c_int = 31;
 pub const OPT_CONTINUATION_MAX_BYTES: c_int = 32;
 pub const OPT_MODE_DEFAULT: c_int = 34;
 pub const OPT_MODE: c_int = 35;
-pub const OPT_CLIPBOARD_READ: c_int = 39;
 pub const OPT_TERMINFO_NAME: c_int = 38;
 pub const OPT_RENDER_HOLD: c_int = 42;
 
@@ -182,8 +181,6 @@ pub const FORMATTER_OPT_TRIM: c_int = 3;
 pub const FORMATTER_OPT_SELECTION: c_int = 4;
 
 pub const CLIPBOARD_WRITE_SUCCESS: c_int = 0;
-pub const CLIPBOARD_READ_SUCCESS: c_int = 0;
-pub const CLIPBOARD_READ_DENIED: c_int = 1;
 
 pub const PROGRESS_STATE_REMOVE: c_int = 0;
 
@@ -451,30 +448,6 @@ pub struct DesktopNotification {
 pub struct ProgressReport {
     pub state: c_int,
     pub progress: i8,
-}
-
-#[repr(C)]
-pub struct ClipboardRead {
-    pub location: c_int,
-    pub mimes: *const Bytes,
-    pub mimes_len: usize,
-    pub list: bool,
-    pub name: Bytes,
-    pub granted: bool,
-    pub can_remember: bool,
-    pub ctx: *const c_void,
-    pub reply: unsafe extern "C" fn(*const Self, *const ClipboardReadReply),
-}
-
-#[repr(C)]
-pub struct ClipboardReadReply {
-    pub size: usize,
-    pub result: c_int,
-    pub contents: *const ClipboardContent,
-    pub contents_len: usize,
-    pub available: *const Bytes,
-    pub available_len: usize,
-    pub remember: bool,
 }
 
 unsafe extern "C" {

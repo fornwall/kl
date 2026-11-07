@@ -239,9 +239,8 @@ impl Pane {
         }
     }
 
-    /// Feeds the program's output into the terminal. `clipboard` is what the
-    /// program gets if it reads the clipboard.
-    pub fn read(&mut self, clipboard: Option<&[u8]>) -> Activity {
+    /// Feeds the program's output into the terminal.
+    pub fn read(&mut self) -> Activity {
         let mut buf = vec![0; READ_SIZE];
         let mut read = 0;
         match (&self.pty).read(&mut buf) {
@@ -249,9 +248,7 @@ impl Pane {
             Ok(0) => self.exited = true,
             Ok(len) => {
                 read = len;
-                let output = buf.get(..len).unwrap_or(&[]);
-                let clipboard = clipboard.filter(|_| self.pending.len() < MAX_PENDING);
-                self.terminal.write_with_clipboard(output, clipboard);
+                self.terminal.write(buf.get(..len).unwrap_or(&[]));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -390,6 +387,29 @@ fn percent_decode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_to_a_program_that_does_not_read_them_stop_at_a_limit() {
+        let mut command = Command::new("sleep");
+        command.arg("100");
+        let size = WinSize {
+            cols: 10,
+            rows: 2,
+            ..WinSize::default()
+        };
+        let (pty, mut child) = sys::spawn_on_pty(command, size).unwrap();
+        let terminal = Terminal::new(10, 2).unwrap();
+        let mut pane = Pane::adopt(0, child.id(), None, pty, terminal);
+        let reply = vec![b'x'; 16 * 1024 * 1024];
+        for _ in 0..12 {
+            pane.terminal.effects().replies.clone_from(&reply);
+            pane.take_activity();
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(pane.pending.len() >= MAX_PENDING - reply.len());
+        assert!(pane.pending.len() < MAX_PENDING + reply.len());
+    }
 
     fn name_of(program: &[&str]) -> String {
         let words: Vec<String> = program.iter().map(|word| (*word).to_owned()).collect();
