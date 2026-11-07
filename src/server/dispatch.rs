@@ -9,7 +9,7 @@ use super::keys;
 use super::layout::{Divider, PaneId, Rect};
 use super::pane::Pane;
 use super::session::{Monitor, Window};
-use super::ui::{Prompt, PromptAction, PromptOutcome};
+use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
 use super::{COLOR_QUERIES, Lifecycle, Server};
 use crate::command::{self, Command};
 use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
@@ -118,7 +118,8 @@ impl Server {
         if let Some(prompt) = &mut self.ui.prompt {
             prompt.insert(&String::from_utf8_lossy(text));
             self.dirty = true;
-        } else if let Some(pane) = self.session.active_pane_mut()
+        } else if self.ui.list.is_none()
+            && let Some(pane) = self.session.active_pane_mut()
             && pane.copy_mode.is_none()
         {
             let bytes = pane.terminal.encode_paste(text);
@@ -157,7 +158,11 @@ impl Server {
 
     fn handle_key(&mut self, event: &KeyEvent) {
         let repeats = self.repeats(event);
-        let captured = self.ui.prompt.is_some() || self.prefix || repeats || self.in_copy_mode();
+        let captured = self.ui.prompt.is_some()
+            || self.ui.list.is_some()
+            || self.prefix
+            || repeats
+            || self.in_copy_mode();
         if event.action == KeyAction::Release {
             if let Some(position) = self.swallowed.iter().position(|key| *key == event.key) {
                 self.swallowed.swap_remove(position);
@@ -180,6 +185,8 @@ impl Server {
         } else if event.is_ctrl('b') {
             // As in tmux, the prefix goes before the keys of copy mode too.
             self.prefix = true;
+        } else if self.ui.list.is_some() {
+            self.list_key(event);
         } else if self.in_copy_mode() {
             self.copy_mode_key(event);
         } else {
@@ -207,8 +214,99 @@ impl Server {
     fn run_interactive(&mut self, command: Command) {
         match self.execute(command) {
             Ok(text) if text.is_empty() => {}
-            Ok(text) | Err(text) => self.ui.show_message(text),
+            Ok(text) => {
+                let rows = text.lines().map(|line| ListRow::text(line.to_owned()));
+                self.ui.list = Some(List::new(rows.collect(), 0));
+            }
+            Err(text) => self.ui.show_message(text),
         }
+    }
+
+    fn list_height(&self) -> usize {
+        usize::from(self.session.area().height)
+    }
+
+    fn close_list(&mut self) {
+        self.ui.list = None;
+        self.session.repaint = true;
+        self.dirty = true;
+    }
+
+    fn after_list(&mut self, outcome: ListOutcome) {
+        self.dirty = true;
+        match outcome {
+            ListOutcome::Stay => {}
+            ListOutcome::Close => self.close_list(),
+            ListOutcome::Run(command) => {
+                self.close_list();
+                self.run_interactive(command);
+            }
+        }
+    }
+
+    fn list_key(&mut self, event: &KeyEvent) {
+        let height = self.list_height();
+        if let Some(list) = &mut self.ui.list {
+            let outcome = list.handle_key(event, height);
+            self.after_list(outcome);
+        }
+    }
+
+    /// The wheel moves through a list, a click selects a row and a double click
+    /// chooses it, as in tmux's lists.
+    fn list_mouse(&mut self, event: MouseEvent) {
+        if event.action != MouseAction::Press {
+            return;
+        }
+        let height = self.list_height();
+        let clicks = if event.button == Some(MouseButton::Left) {
+            self.click_count(event)
+        } else {
+            0
+        };
+        let Some(list) = &mut self.ui.list else {
+            return;
+        };
+        let outcome = match event.button {
+            Some(MouseButton::WheelUp) => {
+                list.step(false);
+                ListOutcome::Stay
+            }
+            Some(MouseButton::WheelDown) => {
+                list.step(true);
+                ListOutcome::Stay
+            }
+            Some(MouseButton::Left) => {
+                list.select_at(usize::from(event.y), height);
+                if clicks == 2 {
+                    list.choose()
+                } else {
+                    ListOutcome::Stay
+                }
+            }
+            _ => ListOutcome::Stay,
+        };
+        self.after_list(outcome);
+    }
+
+    /// The window chooser, on the row of the current window.
+    fn choose_tree(&mut self) {
+        let session = &self.session;
+        let row = |window: &Window| {
+            let context = Context {
+                session,
+                window: Some(window),
+                pane: session.panes.get(&window.active),
+            };
+            let text = context.expand("#I: #W#F#{?pane_title, \"#T\",}");
+            ListRow::new(text, Command::SelectWindow(window.index))
+        };
+        let rows = session.windows.iter().map(row).collect();
+        let current = session
+            .windows
+            .iter()
+            .position(|w| w.index == session.current);
+        self.ui.list = Some(List::new(rows, current.unwrap_or(0)));
     }
 
     fn prompt_key(&mut self, event: &KeyEvent) {
@@ -307,6 +405,7 @@ impl Server {
         self.dirty = true;
         self.names_may_change();
         match command {
+            Command::ChooseTree => self.choose_tree(),
             Command::Prompt {
                 prompt,
                 initial,
@@ -437,6 +536,10 @@ impl Server {
 
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.dirty = true;
+        if self.ui.list.is_some() {
+            self.list_mouse(event);
+            return;
+        }
         match self.drag.clone() {
             Drag::None => {
                 if event.action == MouseAction::Press {

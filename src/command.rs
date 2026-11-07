@@ -23,6 +23,8 @@ pub enum SplitKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Lets the user pick a window from a list.
+    ChooseTree,
     /// Asks for a line, and runs it or fills it in to a template at `%%`.
     Prompt {
         prompt: Option<String>,
@@ -83,6 +85,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         return Err("no command".to_owned());
     };
     match name.as_str() {
+        "choose-tree" => parse_choose_tree(args),
         "command-prompt" => parse_command_prompt(args),
         "confirm-before" | "confirm" => parse_confirm_before(args),
         "copy-mode" => parse_copy_mode(args),
@@ -210,6 +213,16 @@ fn parse_confirm_before(args: &[String]) -> Result<Command, String> {
         prompt: flags.value('p'),
         command: Box::new(command),
     })
+}
+
+/// With a single session, `-s` and `-w` end up with the same list, and it
+/// always covers the window as with `-Z`.
+fn parse_choose_tree(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "swZ")?;
+    if !flags.rest.is_empty() {
+        return Err("usage: choose-tree [-swZ]".to_owned());
+    }
+    Ok(Command::ChooseTree)
 }
 
 fn parse_list_keys(args: &[String]) -> Result<Command, String> {

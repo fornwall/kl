@@ -624,6 +624,92 @@ fn lists_the_keys() {
 }
 
 #[test]
+fn lists_the_keys_on_screen_and_goes_back_to_the_panes() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("echo still-here");
+    screen.wait_for_line("still-here");
+    screen.prefix("?");
+    screen.wait_for_text("C-b ?");
+    screen.wait_for_no_text("still-here");
+
+    // Keys go to the list and not the shell, until it is left.
+    screen.type_text("G");
+    screen.wait_for_text("Resize the pane right");
+    screen.type_text("q");
+    screen.wait_for_line("still-here");
+    screen.wait_for_no_text("C-b ?");
+}
+
+#[test]
+fn shows_what_a_command_prints_in_a_list() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("c");
+    screen.wait_for_text(" 1:");
+    screen.prefix(":");
+    screen.run("list-windows");
+    screen.wait_for_text("0: ");
+    screen.wait_for_text("1: ");
+    screen.key(key::ESCAPE, 0, "", 0);
+    screen.wait_for_no_text("1 panes");
+}
+
+/// A session of three windows named a, b and c, showing the last one.
+fn three_windows() -> Screen {
+    let mut screen = Screen::new(80, 24);
+    assert!(screen.command(&["rename-window", "a"]).status.success());
+    assert!(screen.command(&["new-window", "-n", "b"]).status.success());
+    assert!(screen.command(&["new-window", "-n", "c"]).status.success());
+    screen.wait_for_text("2:c*");
+    screen
+}
+
+#[test]
+fn chooses_a_window_from_a_list() {
+    let mut screen = three_windows();
+    screen.prefix("w");
+    let lines = screen.wait_for_text("(0) 0: a");
+    assert!(lines[1].contains("(1) 1: b-"), "{lines:?}");
+    assert!(lines[2].contains("(2) 2: c*"), "{lines:?}");
+
+    // It starts on the current window, and goes up from there.
+    screen.type_text("kk");
+    screen.enter();
+    screen.wait_for_text("0:a*");
+    screen.wait_for_no_text("(0) 0: a");
+}
+
+#[test]
+fn chooses_a_window_by_its_number_in_the_list() {
+    let mut screen = three_windows();
+    screen.prefix("w");
+    screen.wait_for_text("(0) 0: a");
+    screen.type_text("1");
+    screen.wait_for_text("1:b*");
+}
+
+#[test]
+fn leaving_the_window_list_chooses_nothing() {
+    let mut screen = three_windows();
+    screen.prefix("w");
+    screen.wait_for_text("(0) 0: a");
+    screen.type_text("k");
+    screen.key(key::ESCAPE, 0, "", 0);
+    screen.wait_for_no_text("(0) 0: a");
+    assert!(screen.lines().last().unwrap().contains("2:c*"));
+}
+
+#[test]
+fn the_mouse_works_in_the_window_list() {
+    let mut screen = three_windows();
+    screen.prefix("w");
+    screen.wait_for_text("(0) 0: a");
+    screen.click(5, 1);
+    screen.click(5, 1);
+    screen.wait_for_text("1:b*");
+    screen.wait_for_no_text("(0) 0: a");
+}
+
+#[test]
 fn renames_a_window() {
     let mut screen = Screen::new(80, 24);
     screen.prefix(",");

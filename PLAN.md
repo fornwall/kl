@@ -62,7 +62,8 @@ Before adding much more, close the gaps in the table above.
 
 What is missing for daily use compared with tmux.
 
-- `C-b ?` listing keys, `C-b w` to choose a window, `C-b q` to show pane numbers.
+- `C-b q` to show pane numbers.
+- A preview in the list of `C-b w`, and going down to panes there, as in tmux.
 - `C-b {` and `}` to swap panes, `C-b !` to break a pane out, `join-pane`.
 - `C-b Space` and layouts such as even-horizontal, tiled and main-vertical.
 - `-t` targets for commands, and format strings for `list-*` and

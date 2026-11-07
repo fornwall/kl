@@ -57,6 +57,7 @@ pub const PREFIX_TABLE: &[Binding] = &[
     bind("9", "select-window -t 9", "Select window 9"),
     bind(":", "command-prompt", "Prompt for a command"),
     bind(";", "last-pane", "Move to the previously active pane"),
+    bind("?", "list-keys -N", "List key bindings"),
     bind("[", "copy-mode", "Enter copy mode"),
     bind("]", "paste-buffer", "Paste the most recent paste buffer"),
     bind("c", "new-window", "Create a new window"),
@@ -65,6 +66,7 @@ pub const PREFIX_TABLE: &[Binding] = &[
     bind("n", "next-window", "Select the next window"),
     bind("o", "select-pane", "Select the next pane"),
     bind("p", "previous-window", "Select the previous window"),
+    bind("w", "choose-tree -Zw", "Choose a window from a list"),
     bind(
         "x",
         "confirm-before -p \"kill-pane #P? (y/n)\" kill-pane",

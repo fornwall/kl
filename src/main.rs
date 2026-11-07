@@ -36,6 +36,7 @@ Windows:
   rename-window (renamew) name                name the window
   kill-window (killw)                         close the window
   list-windows (lsw)                          list windows
+  choose-tree                                 pick a window from a list
   set-window-option (setw) monitor-activity [on|off]  flag output in the window
 
 Panes:
@@ -55,8 +56,9 @@ Other:
   confirm-before [-p prompt] command          run a command after asking
   copy-mode [-u], paste-buffer (pasteb), display-message (display) text
 
-Keys follow tmux, with C-b as the prefix: c n p l 0-9 , & for windows,
-% \" o ; z x arrows for panes, [ ] for copying, : for commands and d to detach.
+Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , & for windows,
+% \" o ; z x arrows for panes, [ ] for copying, : for commands, ? to list the
+keys and d to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a
 second, so that C-b C-Up C-Up resizes twice.
 The mouse selects panes and windows, drags borders, scrolls and copies text.

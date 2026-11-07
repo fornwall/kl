@@ -1,4 +1,5 @@
-//! State of the interface around the panes: the prompt and passing messages.
+//! State of the interface around the panes: the prompt, lists and passing
+//! messages.
 
 use std::time::{Duration, Instant};
 
@@ -95,9 +96,124 @@ impl Prompt {
     }
 }
 
+/// A row of a [`List`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListRow {
+    pub text: String,
+    /// What choosing this row does. Rows without one are only there to read.
+    pub command: Option<Command>,
+}
+
+impl ListRow {
+    pub const fn new(text: String, command: Command) -> Self {
+        Self {
+            text,
+            command: Some(command),
+        }
+    }
+
+    pub const fn text(text: String) -> Self {
+        Self {
+            text,
+            command: None,
+        }
+    }
+}
+
+/// A list over the panes, to read or to choose from. It covers what tmux does
+/// with its view mode and the lists of its choose commands.
+pub struct List {
+    pub rows: Vec<ListRow>,
+    pub selected: usize,
+    top: usize,
+}
+
+/// What came of a key press in a list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListOutcome {
+    Stay,
+    Close,
+    Run(Command),
+}
+
+impl List {
+    pub const fn new(rows: Vec<ListRow>, selected: usize) -> Self {
+        Self {
+            rows,
+            selected,
+            top: 0,
+        }
+    }
+
+    /// The first row on display in a view this high, which keeps the selected
+    /// row in sight.
+    pub fn top(&self, height: usize) -> usize {
+        let last_top = self.rows.len().saturating_sub(height);
+        let lowest = (self.selected + 1).saturating_sub(height);
+        self.top.clamp(lowest, self.selected).min(last_top)
+    }
+
+    /// Moves the selection. Going past either end comes back at the other one.
+    pub fn step(&mut self, down: bool) {
+        let count = self.rows.len().max(1);
+        self.selected = (self.selected + if down { 1 } else { count - 1 }) % count;
+    }
+
+    /// Selects a row given where it is in a view this high.
+    pub fn select_at(&mut self, y: usize, height: usize) {
+        let row = self.top(height) + y;
+        if row < self.rows.len() {
+            self.selected = row;
+            self.top = self.top(height);
+        }
+    }
+
+    fn move_by(&mut self, rows: isize) {
+        let last = self.rows.len().saturating_sub(1);
+        self.selected = self.selected.saturating_add_signed(rows).min(last);
+    }
+
+    /// What choosing the selected row does.
+    pub fn choose(&self) -> ListOutcome {
+        let row = self.rows.get(self.selected);
+        row.and_then(|row| row.command.clone())
+            .map_or(ListOutcome::Close, ListOutcome::Run)
+    }
+
+    /// Handles a key press in a view this high.
+    pub fn handle_key(&mut self, event: &KeyEvent, height: usize) -> ListOutcome {
+        let page = isize::try_from(height.max(1)).unwrap_or(1);
+        match (event.key, event.char()) {
+            _ if event.is_ctrl('c') || event.is_ctrl('g') => return ListOutcome::Close,
+            _ if event.is_ctrl('p') => self.step(false),
+            _ if event.is_ctrl('n') => self.step(true),
+            _ if event.is_ctrl('f') => self.move_by(page),
+            (key::ESCAPE, _) | (_, Some('q')) => return ListOutcome::Close,
+            (key::ENTER, _) => return self.choose(),
+            (key::ARROW_UP, _) | (_, Some('k')) => self.step(false),
+            (key::ARROW_DOWN, _) | (_, Some('j')) => self.step(true),
+            (key::PAGE_UP, _) => self.move_by(-page),
+            (key::PAGE_DOWN, _) => self.move_by(page),
+            (key::HOME, _) | (_, Some('g')) => self.selected = 0,
+            (key::END, _) | (_, Some('G')) => self.move_by(isize::MAX),
+            (_, Some(digit @ '0'..='9')) => {
+                let index = digit.to_digit(10).and_then(|digit| digit.try_into().ok());
+                let row = index.and_then(|index: usize| self.rows.get(index));
+                if let Some(command) = row.and_then(|row| row.command.clone()) {
+                    return ListOutcome::Run(command);
+                }
+            }
+            _ => {}
+        }
+        self.top = self.top(height);
+        ListOutcome::Stay
+    }
+}
+
 #[derive(Default)]
 pub struct Ui {
     pub prompt: Option<Prompt>,
+    pub list: Option<List>,
     message: Option<(String, Instant)>,
 }
 
@@ -199,6 +315,79 @@ mod tests {
             prompt.handle_key(&key(b"y")),
             PromptOutcome::Done(String::new())
         );
+    }
+
+    fn list(rows: usize) -> List {
+        let row = |index: usize| ListRow::new(index.to_string(), Command::SelectWindow(1));
+        List::new((0..rows).map(row).collect(), 0)
+    }
+
+    #[test]
+    fn moves_through_a_list_and_wraps_around() {
+        let mut list = list(3);
+        assert_eq!(list.handle_key(&key(b"j"), 10), ListOutcome::Stay);
+        assert_eq!(list.selected, 1);
+        list.handle_key(&key(b"\x1b[B"), 10);
+        assert_eq!(list.selected, 2);
+        list.handle_key(&key(b"j"), 10);
+        assert_eq!(list.selected, 0);
+        list.handle_key(&key(b"k"), 10);
+        assert_eq!(list.selected, 2);
+        list.handle_key(&key(b"g"), 10);
+        assert_eq!(list.selected, 0);
+        list.handle_key(&key(b"G"), 10);
+        assert_eq!(list.selected, 2);
+    }
+
+    #[test]
+    fn scrolls_a_list_to_keep_the_selection_in_view() {
+        let mut list = list(20);
+        assert_eq!(list.top(5), 0);
+        for _ in 0..7 {
+            list.handle_key(&key(b"j"), 5);
+        }
+        assert_eq!(list.selected, 7);
+        assert_eq!(list.top(5), 3);
+        list.handle_key(&key(b"k"), 5);
+        assert_eq!(list.top(5), 3);
+        list.handle_key(&key(b"\x1b[6~"), 5);
+        assert_eq!(list.selected, 11);
+        assert_eq!(list.top(5), 7);
+        list.handle_key(&key(b"G"), 5);
+        assert_eq!(list.top(5), 15);
+        assert_eq!(list.top(100), 0);
+    }
+
+    #[test]
+    fn a_list_survives_having_no_rows() {
+        let mut list = list(0);
+        assert_eq!(list.handle_key(&key(b"j"), 5), ListOutcome::Stay);
+        assert_eq!(list.handle_key(&key(b"G"), 5), ListOutcome::Stay);
+        assert_eq!(list.handle_key(&key(b"\r"), 5), ListOutcome::Close);
+        assert_eq!(list.top(5), 0);
+    }
+
+    #[test]
+    fn chooses_from_a_list() {
+        let mut rows = list(3);
+        rows.handle_key(&key(b"j"), 5);
+        assert_eq!(
+            rows.handle_key(&key(b"\r"), 5),
+            ListOutcome::Run(Command::SelectWindow(1))
+        );
+        assert_eq!(
+            rows.handle_key(&key(b"2"), 5),
+            ListOutcome::Run(Command::SelectWindow(1))
+        );
+        assert_eq!(rows.handle_key(&key(b"7"), 5), ListOutcome::Stay);
+        assert_eq!(rows.handle_key(&key(b"q"), 5), ListOutcome::Close);
+    }
+
+    #[test]
+    fn rows_without_a_command_are_only_read() {
+        let mut list = List::new(vec![ListRow::text("a".to_owned())], 0);
+        assert_eq!(list.handle_key(&key(b"0"), 5), ListOutcome::Stay);
+        assert_eq!(list.handle_key(&key(b"\r"), 5), ListOutcome::Close);
     }
 
     #[test]

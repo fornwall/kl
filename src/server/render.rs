@@ -3,7 +3,7 @@
 
 use super::layout::{Divider, Rect};
 use super::session::{Session, Window};
-use super::ui::Ui;
+use super::ui::{List, Ui};
 use crate::ghostty::{
     self, Cell, CursorShape, Progress, STYLE_BLINK, STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE,
     STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH, STYLE_UNDERLINE_MASK,
@@ -214,6 +214,9 @@ impl Renderer {
             session.repaint = true;
         }
         self.compose(session);
+        if let Some(list) = &ui.list {
+            self.draw_list(list, session.area());
+        }
         self.draw_status(session, ui);
 
         let mut out = Vec::new();
@@ -261,6 +264,36 @@ impl Renderer {
             let active = visible.iter().find(|(id, _)| *id == window.active);
             let active = active.map(|(_, rect)| *rect).unwrap_or_default();
             self.draw_borders(&window.root.dividers(session.area()), active);
+        }
+    }
+
+    /// Covers the panes, whose rows come back by repainting when the list goes.
+    fn draw_list(&mut self, list: &List, area: Rect) {
+        let height = usize::from(area.height);
+        let top = list.top(height);
+        for (y, index) in (area.y..area.y.saturating_add(area.height)).zip(top..) {
+            let selected = index == list.selected;
+            let style = if selected {
+                mode_style()
+            } else {
+                Style::default()
+            };
+            self.next.fill_row(y, style);
+            if let Some(row) = list.rows.get(index) {
+                let line = match (&row.command, index) {
+                    (Some(_), 0..=9) => format!("({index}) {}", row.text),
+                    (Some(_), _) => format!("    {}", row.text),
+                    (None, _) => row.text.clone(),
+                };
+                self.next.put_str(area.x, y, &line, style, area.width);
+            }
+        }
+        if list.rows.len() > height {
+            let text = format!("[{}/{}]", list.selected + 1, list.rows.len());
+            let x = area.width.saturating_sub(text_width(&text));
+            self.next.split_wide(x, area.y);
+            self.next
+                .put_str(x, area.y, &text, mode_style(), area.width);
         }
     }
 
@@ -494,6 +527,9 @@ fn cursor_target(session: &Session, ui: &Ui) -> CursorTarget {
         let x = text_width(&prompt.label) + text_width(&prompt.text_before_cursor());
         return Some((x, session.size.rows.saturating_sub(1), 2));
     }
+    if ui.list.is_some() {
+        return None;
+    }
     let pane = session.active_pane()?;
     let rect = pane.rect;
     if let Some(mode) = pane.copy_mode {
@@ -588,7 +624,9 @@ fn push_style(out: &mut Vec<u8>, style: &Style) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ui::ListRow;
     use super::*;
+    use crate::command::Command;
     use crate::ghostty::{Rgb, Terminal};
 
     fn sgr(style: &Style) -> String {
@@ -657,6 +695,57 @@ mod tests {
         assert_eq!(border_char([false, false, false, true]), '─');
         assert_eq!(border_char([true, true, true, false]), '┤');
         assert_eq!(border_char([true, true, true, true]), '┼');
+    }
+
+    fn shown_rows(renderer: &Renderer, rows: u16) -> Vec<String> {
+        (0..rows)
+            .map(|y| {
+                let cells = (0..renderer.next.cols).filter_map(|x| {
+                    let index = renderer.next.index(x, y)?;
+                    renderer.next.cells.get(index)
+                });
+                let line: String = cells.map(|cell| cell.text.as_str()).collect();
+                line.trim_end().to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn draws_a_list_over_the_panes() {
+        let mut renderer = Renderer::default();
+        renderer.resize(12, 3);
+        renderer
+            .next
+            .put_str(0, 1, "underneath", Style::default(), 12);
+        let rows = vec![
+            ListRow::new("one".to_owned(), Command::NextWindow),
+            ListRow::text("two".to_owned()),
+        ];
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 3,
+        };
+        renderer.draw_list(&List::new(rows, 1), area);
+        assert_eq!(shown_rows(&renderer, 3), ["(0) one", "two", ""]);
+        assert_eq!(renderer.next.cells[12].style, mode_style());
+        assert_eq!(renderer.next.cells[0].style, Style::default());
+    }
+
+    #[test]
+    fn a_long_list_says_where_it_is() {
+        let mut renderer = Renderer::default();
+        renderer.resize(12, 2);
+        let row = |index: u32| ListRow::text(index.to_string());
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 2,
+        };
+        renderer.draw_list(&List::new((0..5).map(row).collect(), 4), area);
+        assert_eq!(shown_rows(&renderer, 2), ["3      [5/5]", "4"]);
     }
 
     #[test]
