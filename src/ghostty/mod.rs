@@ -1364,6 +1364,16 @@ mod tests {
     }
 
     #[test]
+    fn keeps_erased_direct_background_colors() {
+        let mut terminal = Terminal::new(4, 1).unwrap();
+        terminal.write(b"\x1b[48;2;1;2;3m\x1b[K");
+        terminal.refresh();
+        let mut row = Vec::new();
+        terminal.draw_rows(true, |_, cells| row = cells.to_vec());
+        assert_eq!(row[3].style.bg.as_rgb(), Some([1, 2, 3]));
+    }
+
+    #[test]
     fn answers_queries_through_effects() {
         let mut terminal = Terminal::new(10, 2).unwrap();
         terminal.write(b"\x1b[6n");

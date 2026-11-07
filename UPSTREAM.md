@@ -27,33 +27,23 @@ an optional feature cheap, since the parts kl does not call get dropped.
 When something equivalent lands on `main`: delete the patch and `apply_patch` in
 `build.rs`.
 
-### Cell width and unresolved background in the render state
+### Decoding cells with only the render state
 
-A renderer that re-emits cells, as a multiplexer does, needs two things the
-render state's cell API does not give it:
+`ghostty_cell_get` only decodes a raw cell value, and `render.h` recommends it
+for render state cells, but it is gated behind `grid-introspection`. kl needs it
+for cell width, and for the palette index of erased backgrounds, which
+`GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR` resolves to RGB.
 
-- Whether a cell is wide or a spacer. This is only in the raw cell value.
-- The background of a blank cell as the program set it. Erasing with a background
-  color stores it in the cell rather than in a style, and
-  `GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR` resolves it to RGB. That loses
-  the palette index, so the cell would no longer follow the outer terminal's
-  theme.
-
-Both need `ghostty_cell_get`, which is gated behind `grid-introspection`, a
-feature whose documentation says it is deliberately not built for render loops.
-Without the feature, the calls return `GHOSTTY_UNSUPPORTED`, and wide characters
-and erased backgrounds come out wrong.
-
-Render state getters for these would let kl drop `grid-introspection` and save
-calls for each cell. Today: kl enables the feature and calls `ghostty_cell_get`
-for every cell it draws.
+Today: kl enables the feature, which costs about 370 bytes and nothing at
+runtime. If the gate also accepts `render-state`: drop `+grid-introspection`
+from `VT_FEATURES` in `build.rs`.
 
 ### Hyperlinks in the render state
 
 The render state has no hyperlink data, so passing OSC 8 through would take a
-grid reference lookup for each linked cell, which is the same path that
-documentation warns against using in render loops. A hyperlink getter on the
-render state's cells would fit a renderer better. Not implemented in kl yet.
+grid reference lookup for each linked cell, which the documentation of
+`grid-introspection` warns against using in render loops. A hyperlink getter on
+the render state's cells would fit a renderer better. Not implemented in kl yet.
 
 ### Source tarballs for a commit
 
