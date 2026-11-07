@@ -44,9 +44,9 @@ for the tests, and is not meant as a setting.
 
 Before adding much more, close the gaps in the table above.
 
-- CI on Linux x86-64, Linux aarch64 and macOS aarch64, running clippy and all
-  tests. Linting every target matters: `cfg`-gated code is only linted on its
-  own platform.
+- Get CI running. `.github/workflows/ci.yml` covers Linux x86-64, Linux aarch64
+  and macOS aarch64 with clippy and all tests, but this repository has no remote
+  yet, so it has never run. The first run is what fills in the table above.
 - Try it for real in Ghostty, and fix what that finds.
 - Fuzz the input parser and the protocol decoder.
 
