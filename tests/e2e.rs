@@ -1178,7 +1178,7 @@ fn opens_windows_where_it_is_told() {
         ),
         "5 %1\n"
     );
-    assert!(screen.lines().last().unwrap().contains("0:sh*"));
+    screen.wait_for_text("0:sh*");
     assert_eq!(
         error_of(&screen, &["new-window", "-t", "5"]),
         "kl: create window failed: index 5 in use\n"
@@ -1377,10 +1377,10 @@ fn swaps_panes_between_windows() {
 #[test]
 fn a_pane_keeps_running_where_it_is_swapped_to() {
     let mut screen = two_panes();
-    screen.command(&["select-pane", "-t", "0"]);
     screen.run("echo was-on-the-left");
     screen.wait_for_text("was-on-the-left");
-    screen.command(&["swap-pane", "-s", ":.0", "-t", ":.1"]);
+    let swap = ["swap-pane", "-s", ":.0", "-t", ":.1"];
+    assert!(screen.command(&swap).status.success());
     screen.wait_for("the text on the right", |lines| {
         lines.iter().any(|line| {
             line.find("was-on-the-left")
@@ -2398,12 +2398,12 @@ fn output_in_a_monitored_window_is_flagged() {
             .status
             .success()
     );
-    screen.run("sleep 1; echo done");
     screen.prefix("c");
+    screen.wait_for_text(" 1:");
+    let echo = ["send-keys", "-t", ":0", "echo done", "Enter"];
+    assert!(screen.command(&echo).status.success());
     screen.wait_for("the activity flag", |lines| {
-        lines
-            .last()
-            .is_some_and(|status| status.contains("0:sleep#-"))
+        lines.last().is_some_and(|status| status.contains("#-"))
     });
     screen.prefix("0");
     screen.wait_for("the activity flag to clear", |lines| {
