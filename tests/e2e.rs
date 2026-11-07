@@ -3828,6 +3828,53 @@ fn programs_get_no_answer_when_reading_the_clipboard() {
     assert!(!lines.into_iter().any(|line| line.contains("^[]52")));
 }
 
+/// Three panes: `%0` and `%2` side by side, above `%1`.
+fn two_above_one() -> Screen {
+    let screen = Screen::new(80, 24);
+    for args in [
+        &["split-window", "-v"][..],
+        &["select-pane", "-t", "%0"],
+        &["split-window", "-h"],
+    ] {
+        let output = screen.command(args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    }
+    screen
+}
+
+fn select_pane(screen: &Screen, args: &[&str]) {
+    let output = screen.command(&[&["select-pane"], args].concat());
+    assert!(output.status.success(), "{args:?}: {output:?}");
+}
+
+fn assert_active_pane(screen: &Screen, pane: &str) {
+    wait_for_output(screen, &["display-message", "-p", ACTIVE_PANE], pane);
+}
+
+#[test]
+fn going_back_returns_to_the_pane_it_came_from() {
+    let screen = two_above_one();
+    for pane in ["%0", "%2"] {
+        select_pane(&screen, &["-t", pane]);
+        select_pane(&screen, &["-D"]);
+        assert_active_pane(&screen, "%1");
+        select_pane(&screen, &["-U"]);
+        assert_active_pane(&screen, pane);
+    }
+}
+
+#[test]
+fn a_direction_leads_to_the_pane_there_that_was_used_last() {
+    let screen = two_above_one();
+    // However it got to the pane below, as tmux does.
+    for pane in ["%2", "%0"] {
+        select_pane(&screen, &["-t", pane]);
+        select_pane(&screen, &["-t", "%1"]);
+        select_pane(&screen, &["-U"]);
+        assert_active_pane(&screen, pane);
+    }
+}
+
 #[test]
 fn programs_can_query_the_outer_colors() {
     let mut screen = Screen::new(80, 24);

@@ -248,7 +248,8 @@ impl Session {
             _ => None,
         };
         if let Some(direction) = direction {
-            return layout::neighbor(&panes, window.active, direction, area);
+            let last_used = |id| self.last_used(id);
+            return layout::neighbor(&panes, window.active, direction, area, &last_used);
         }
         if spec == "!" {
             return window.last_active;

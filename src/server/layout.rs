@@ -809,12 +809,15 @@ fn overlap(a_start: u16, a_end: u16, b_start: u16, b_end: u16) -> u16 {
 }
 
 /// The pane next to `from` in a direction, wrapping around the window edge like
-/// tmux. Among several candidates, picks the one sharing the longest edge.
+/// tmux. Among several candidates it picks the one `last_used` rates highest, so
+/// that going back the way you came ends up where you were. Without any history
+/// that is the first of them.
 pub fn neighbor(
     panes: &[(PaneId, Rect)],
     from: PaneId,
     direction: Direction,
     area: Rect,
+    last_used: &dyn Fn(PaneId) -> u64,
 ) -> Option<PaneId> {
     let (_, current) = *panes.iter().find(|(id, _)| *id == from)?;
     let shared_edge = |rect: &Rect| match direction {
@@ -842,7 +845,9 @@ pub fn neighbor(
             .iter()
             .filter(|(id, rect)| *id != from && !rect.is_empty() && matches(rect))
             .filter(|(_, rect)| shared_edge(rect) > 0)
-            .max_by_key(|(_, rect)| shared_edge(rect))
+            // Backwards, as this takes the last of those that tie.
+            .rev()
+            .max_by_key(|(id, _)| last_used(*id))
             .map(|(id, _)| *id)
     };
     best(&touches).or_else(|| best(&at_far_edge))
@@ -1471,17 +1476,31 @@ mod tests {
     }
 
     #[test]
+    fn a_direction_leads_to_the_pane_used_last() {
+        // Pane 1 is on the left, with 2 above 3 on its right.
+        let panes = three_panes().panes(AREA);
+        let used = |recent: PaneId| move |id: PaneId| u64::from(id == recent);
+        let left_of = |pane, last_used: &dyn Fn(PaneId) -> u64| {
+            neighbor(&panes, pane, Direction::Right, AREA, last_used)
+        };
+        assert_eq!(left_of(1, &used(3)), Some(3));
+        assert_eq!(left_of(1, &used(2)), Some(2));
+        // Without any history it is the first one.
+        assert_eq!(left_of(1, &|_| 0), Some(2));
+    }
+
+    #[test]
     fn finds_neighbors_and_wraps_around() {
         let node = three_panes();
         let panes = node.panes(AREA);
-        assert_eq!(neighbor(&panes, 2, Direction::Down, AREA), Some(3));
-        assert_eq!(neighbor(&panes, 3, Direction::Up, AREA), Some(2));
-        assert_eq!(neighbor(&panes, 3, Direction::Left, AREA), Some(1));
+        assert_eq!(neighbor(&panes, 2, Direction::Down, AREA, &|_| 0), Some(3));
+        assert_eq!(neighbor(&panes, 3, Direction::Up, AREA, &|_| 0), Some(2));
+        assert_eq!(neighbor(&panes, 3, Direction::Left, AREA, &|_| 0), Some(1));
         // Wrapping: past the bottom of the right column comes its top.
-        assert_eq!(neighbor(&panes, 3, Direction::Down, AREA), Some(2));
+        assert_eq!(neighbor(&panes, 3, Direction::Down, AREA, &|_| 0), Some(2));
         // Past the right edge comes the left edge.
-        assert_eq!(neighbor(&panes, 2, Direction::Right, AREA), Some(1));
+        assert_eq!(neighbor(&panes, 2, Direction::Right, AREA, &|_| 0), Some(1));
         // No other pane shares a row or column with an unsplit window.
-        assert_eq!(neighbor(&panes, 1, Direction::Up, AREA), None);
+        assert_eq!(neighbor(&panes, 1, Direction::Up, AREA, &|_| 0), None);
     }
 }

@@ -61,6 +61,9 @@ pub struct Pane {
     pub search: Option<String>,
     /// Set when every row must be drawn, not just the changed ones.
     pub redraw: bool,
+    /// For picking among the panes in a direction. It starts over with a restart
+    /// of the server, as that only matters for going back and forth.
+    pub last_used: u64,
     /// The program, which the server reaps along with any other child.
     pub pid: u32,
     /// The line this pane was started with, if a shell had to run it.
@@ -206,6 +209,7 @@ impl Pane {
             copy_mode: None,
             search: None,
             redraw: true,
+            last_used: 0,
             pid,
             start_command,
             exited: false,

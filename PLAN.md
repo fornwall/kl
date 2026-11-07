@@ -201,8 +201,6 @@ unless it says otherwise.
 
 ### Differences from tmux that are bugs
 
-- Directional pane selection ignores which pane was last active, so going down and
-  back up can land on another pane. People will run into this one.
 - `kill-pane` gives the space to the previous pane, where tmux 3.8 gives it to the
   next.
 - `swap-pane -d` with an explicit source moves focus to the other pane.

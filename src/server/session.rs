@@ -160,6 +160,8 @@ pub struct Session {
     pub progress_reports: u64,
     pub socket: String,
     pub next_pane: PaneId,
+    /// For [`Pane::last_used`].
+    next_use: u64,
     pub next_window: u32,
     /// The pane the command being run came from, if it was run from a pane.
     pub origin: Option<PaneId>,
@@ -187,6 +189,7 @@ impl Session {
             progress_reports: 0,
             socket,
             next_pane: 0,
+            next_use: 0,
             next_window: 0,
             origin: None,
             marked: None,
@@ -800,7 +803,9 @@ impl Session {
         }
         if let Some(window) = self.window_at_mut(index) {
             window.last_active = Some(window.active);
-            window.active = id;
+            let left = std::mem::replace(&mut window.active, id);
+            self.mark_used(left);
+            self.mark_used(id);
         }
         if current {
             self.report_focus(true);
@@ -1073,12 +1078,27 @@ impl Session {
         }
     }
 
+    /// Which of two panes was in use last, as the larger number. The pane being
+    /// left counts too, as it may never have been selected to begin with.
+    fn mark_used(&mut self, id: PaneId) {
+        self.next_use += 1;
+        if let Some(pane) = self.panes.get_mut(&id) {
+            pane.last_used = self.next_use;
+        }
+    }
+
+    /// See [`Self::mark_used`].
+    pub fn last_used(&self, id: PaneId) -> u64 {
+        self.panes.get(&id).map_or(0, |pane| pane.last_used)
+    }
+
     pub fn select_direction(&mut self, from: PaneId, direction: Direction) {
         let area = self.area();
         let Some(window) = self.window_of(from) else {
             return;
         };
-        let target = layout::neighbor(&window.root.panes(area), from, direction, area);
+        let panes = window.root.panes(area);
+        let target = layout::neighbor(&panes, from, direction, area, &|id| self.last_used(id));
         if let Some(target) = target {
             self.show_pane(target);
         }
