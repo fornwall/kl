@@ -44,9 +44,6 @@ const LIST_WINDOWS: &str = "#{window_index}: #{window_name}#{window_flags} \
 const LIST_PANES: &str = "#{pane_index}: [#{pane_width}x#{pane_height}] \
      #{pane_id}#{?pane_active, (active),}";
 
-/// Rows moved for each step of the wheel.
-const WHEEL_ROWS: i32 = 3;
-
 /// What dragging the mouse is doing right now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Drag {
@@ -1262,15 +1259,17 @@ impl Server {
         };
         let terminal = &pane.terminal;
         if terminal.alternate_screen() && terminal.mode(MODE_ALTERNATE_SCROLL) {
-            send_arrows(pane, up);
+            send_arrow(pane, up);
         } else {
             scroll_history(pane, up);
         }
     }
 }
 
-/// Full screen programs without mouse support scroll with the arrow keys.
-fn send_arrows(pane: &mut Pane, up: bool) {
+/// Full screen programs without mouse support scroll with the arrow keys, one
+/// for each event, as Ghostty already reports a notch of the wheel as several,
+/// by its `mouse-scroll-multiplier`.
+fn send_arrow(pane: &mut Pane, up: bool) {
     let input = KeyInput {
         action: KeyAction::Press,
         key: if up { key::ARROW_UP } else { key::ARROW_DOWN },
@@ -1279,19 +1278,18 @@ fn send_arrows(pane: &mut Pane, up: bool) {
         text: "",
         unshifted: 0,
     };
-    for _ in 0..WHEEL_ROWS {
-        let bytes = pane.terminal.encode_key(&input);
-        pane.send(&bytes);
-    }
+    let bytes = pane.terminal.encode_key(&input);
+    pane.send(&bytes);
 }
 
-/// The wheel scrolls history, by way of copy mode as in tmux.
+/// The wheel scrolls history, by way of copy mode as in tmux, a row at a time for
+/// the same reason as above.
 fn scroll_history(pane: &mut Pane, up: bool) {
     if up {
         CopyMode::enter(pane, true);
-        copy_mode::scroll_view(pane, -WHEEL_ROWS);
+        copy_mode::scroll_view(pane, -1);
     } else if pane.copy_mode.is_some() {
-        copy_mode::scroll_view(pane, WHEEL_ROWS);
+        copy_mode::scroll_view(pane, 1);
         let at_bottom = pane
             .terminal
             .scrollbar()

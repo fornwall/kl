@@ -3646,9 +3646,14 @@ fn the_wheel_scrolls_history_and_returns() {
     let mut screen = Screen::new(80, 24);
     screen.run("seq 1 100");
     screen.wait_for_line("100");
-    screen.mouse(64, 5, 5, true);
+    // Ghostty reports a notch as three events, which makes for three rows.
+    for _ in 0..3 {
+        screen.mouse(64, 5, 5, true);
+    }
     screen.wait_for("the position indicator", |lines| lines[0].contains("[3/"));
-    screen.mouse(65, 5, 5, true);
+    for _ in 0..3 {
+        screen.mouse(65, 5, 5, true);
+    }
     screen.wait_for("copy mode to end", |lines| !lines[0].contains('/'));
 }
 
@@ -3671,7 +3676,7 @@ fn the_wheel_scrolls_full_screen_programs_with_arrow_keys() {
     screen.run_setup_then_cat(r"printf '\033[?1049h'");
     screen.mouse(65, 5, 5, true);
     screen.enter();
-    screen.wait_for_text("^[[B^[[B^[[B");
+    screen.wait_for_line("^[[B");
 }
 
 #[test]
