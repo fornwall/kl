@@ -56,6 +56,9 @@ each target has been verified.
 - **Not everything programs ask for gets through.** OSC 8 hyperlinks and Kitty
   graphics stop at kl, and SGR-pixels mouse reports give cells rather than real
   pixels.
+- **The terminal's title does not come back in Ghostty.** It has no title stack,
+  so leaving kl clears the title rather than restoring it, until something like
+  the shell's prompt sets it again.
 - **Programs cannot read the clipboard.** They can write to it, but who should be
   allowed to read it is undecided, so OSC 52 queries get no answer.
 - **`restart-server` has some rough edges:**

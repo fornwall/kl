@@ -1191,6 +1191,8 @@ fn leaves_the_terminal_as_it_found_it() {
     ] {
         assert!(raw.contains(sequence), "{sequence:?} missing");
     }
+    // The title stack for terminals that have it, and for Ghostty, no title.
+    assert!(raw.contains("\x1b]2;\x1b\\\x1b[23;2t"));
     // Ghostty has grapheme clustering on by default, and others have it off.
     for setting in ["\x1b[?2027h", "\x1b[?2027l"] {
         let mut outer = Terminal::new(80, 24).unwrap();

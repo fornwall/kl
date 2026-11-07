@@ -86,6 +86,16 @@ Ghostty app would be friendlier. Today: kl sets 10 MB itself.
 
 Found by running kl in the app, version 1.4.0.
 
+### The title stack
+
+`CSI 22 t` and `CSI 23 t` are parsed, but ignored in `stream_handler.zig`, and
+reporting the title is off by default. That leaves a program no way to put back
+the title it found.
+
+Today: kl pushes and pops the title for the terminals that can, and sets an empty
+title when leaving, which Ghostty takes as going back to no title. What was there
+before kl is lost, until something like the shell's prompt sets it again.
+
 ### Replies to long color queries
 
 The reply to an OSC 4 query is built in a 1 KiB buffer. A sequence asking for more

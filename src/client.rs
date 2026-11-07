@@ -25,21 +25,24 @@ const SERVER_START_TIME: Duration = Duration::from_secs(5);
 /// whatever they ask for. Grapheme clustering is saved rather than just turned
 /// off afterwards, since it is on by default in Ghostty. Ghostty keeps shift with
 /// the mouse for itself unless told otherwise (XTSHIFTESCAPE), which would leave
-/// a pane's program holding on to the mouse.
+/// a pane's program holding on to the mouse. The title goes on xterm's stack.
 const ENTER_TERMINAL: &[u8] = b"\x1b[?1049h\
     \x1b[>31u\
     \x1b[?2027s\x1b[?2027h\
     \x1b[?1003h\x1b[?1006h\x1b[>1s\
+    \x1b[22;2t\
     \x1b[?2004h\
     \x1b[?1004h\
     \x1b[?2031h";
 
 /// Undoes [`ENTER_TERMINAL`], in reverse, along with what frames leave behind.
 /// The client does this rather than the server, so that it happens even if the
-/// server dies.
+/// server dies. Ghostty ignores the title stack, but an empty title gives the
+/// title back to whatever it would have shown without one.
 const LEAVE_TERMINAL: &[u8] = b"\x1b[?2031l\
     \x1b[?1004l\
     \x1b[?2004l\
+    \x1b]2;\x1b\\\x1b[23;2t\
     \x1b[>0s\x1b[?1006l\x1b[?1003l\
     \x1b[?2027r\
     \x1b[<u\
