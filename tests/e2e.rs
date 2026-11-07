@@ -3318,6 +3318,76 @@ fn a_huge_count_does_not_hold_up_the_server() {
     assert_eq!(output_of(&screen, &["list-buffers"]), "");
 }
 
+/// `M-x`, to jump to the mark in copy mode.
+fn jump_to_mark(screen: &mut Screen) {
+    screen.key(ghostty_key('x'), MOD_ALT, "", u32::from('x'));
+}
+
+#[test]
+fn copy_mode_goes_back_to_a_mark_and_shows_it() {
+    let (yellow, black) = (3, 0);
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; seq 1 100");
+    screen.wait_for_line("100");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    assert_eq!(background_of(&mut screen, "100"), None);
+
+    screen.type_text("k0lX");
+    screen.wait_for_style("100", |style| style.bg.as_palette() == Some(yellow));
+    let mark = screen.style_of("00");
+    assert_eq!(
+        mark.bg.as_palette(),
+        Some(black),
+        "the mark itself is reversed"
+    );
+    assert_eq!(mark.fg.as_palette(), Some(yellow));
+
+    screen.type_text("g");
+    let lines = screen.wait_for("the top of the history", |lines| lines[0].contains("[78/"));
+    assert!(!lines.iter().any(|line| line.trim() == "100"), "{lines:?}");
+
+    jump_to_mark(&mut screen);
+    screen.wait_for_text("[0/");
+    // The cursor took the place of the mark, which stays behind where it was.
+    screen.type_text("D");
+    screen.wait_for_no_text("[0/");
+    assert_eq!(output_of(&screen, &["show-buffer"]), "00");
+}
+
+#[test]
+fn a_mark_in_the_history_ends_up_on_top_of_the_view() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; seq 1 100");
+    screen.wait_for_line("100");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.key(key::PAGE_UP, 0, "", 0);
+    screen.wait_for_text("[21/");
+    screen.type_text("HjjX");
+    screen.type_text("G");
+    screen.wait_for_text("[0/");
+    jump_to_mark(&mut screen);
+    let lines = screen.wait_for_text("[19/");
+    assert!(lines[0].starts_with("60"), "{lines:?}");
+}
+
+#[test]
+fn the_mark_starts_out_where_copy_mode_did() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; seq 1 100");
+    screen.wait_for_line("100");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("kkk");
+    jump_to_mark(&mut screen);
+    // The mark stays behind where the cursor was.
+    screen.wait_for_style("98", |style| style.bg.as_palette() == Some(3));
+    screen.type_text("q");
+    screen.wait_for_no_text("[0/");
+    assert_eq!(background_of(&mut screen, "98"), None);
+}
+
 #[test]
 fn copy_mode_goes_to_a_line() {
     let mut screen = Screen::new(80, 24);

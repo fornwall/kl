@@ -4,6 +4,7 @@
 
 use super::images::Images;
 use super::layout::{Divider, Rect};
+use super::motion::Position;
 use super::session::{Session, Window};
 use super::ui::{List, Ui};
 use crate::ghostty::{
@@ -59,6 +60,15 @@ fn alert_style() -> Style {
 
 fn mode_style() -> Style {
     colored(BLACK, YELLOW)
+}
+
+/// tmux's `copy-mode-mark-style`, which goes the other way around on the mark.
+fn mark_style(on_mark: bool) -> Style {
+    if on_mark {
+        colored(YELLOW, BLACK)
+    } else {
+        colored(BLACK, YELLOW)
+    }
 }
 
 /// tmux's `copy-mode-match-style` and `copy-mode-current-match-style`.
@@ -242,6 +252,9 @@ impl Canvas {
                     let matches = pane.terminal.visible_matches();
                     let top = position.map_or(0, |bar| bar.offset);
                     let top = u32::try_from(top).unwrap_or(u32::MAX);
+                    if let Some(mark) = mode.mark() {
+                        draw_mark(grid, *rect, top, mark);
+                    }
                     draw_matches(grid, *rect, top, (mode.x, mode.y), &matches);
                     draw_position(grid, *rect, position, pane.terminal.match_count());
                 }
@@ -684,6 +697,17 @@ fn draw_pane_number(grid: &mut Grid, rect: Rect, number: usize, color: u8) {
         let x = rect.x + rect.width - width;
         grid.split_wide(x, rect.y);
         grid.put_str(x, rect.y, &size, foreground, rect.x + rect.width);
+    }
+}
+
+/// Shows the row of the mark, if it is in view. `top` is the row of the screen at
+/// the top of the pane.
+fn draw_mark(grid: &mut Grid, rect: Rect, top: u32, mark: Position) {
+    let y = mark.y.checked_sub(top).and_then(|y| u16::try_from(y).ok());
+    if let Some(y) = y.filter(|y| *y < rect.height) {
+        for x in 0..rect.width {
+            grid.highlight(rect.x + x, rect.y + y, mark_style(x == mark.x));
+        }
     }
 }
 

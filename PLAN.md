@@ -121,7 +121,6 @@ What is missing for daily use compared with tmux.
 
 What is left of tmux's `copy-mode-vi` table, and the differences that remain:
 
-- Marks, on `X` and `M-x`.
 - `send-keys -X`, for scripts to run the commands of copy mode.
 - `-o` for going to the output of a command rather than its prompt.
 - Copy mode shows the live screen where tmux shows a copy of it. At the bottom of

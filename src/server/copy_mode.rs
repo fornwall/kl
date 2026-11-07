@@ -49,6 +49,14 @@ struct LineSelection {
     forward: bool,
 }
 
+/// Where `M-x` goes, which starts out as where copy mode did.
+#[derive(Clone, Copy, Debug)]
+struct Mark {
+    at: Position,
+    /// It has come up, which is when it starts to show.
+    shown: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct CopyMode {
     /// The cursor, relative to the viewport.
@@ -69,6 +77,7 @@ pub struct CopyMode {
     repeat: u32,
     /// The way `n` goes.
     search_forward: bool,
+    mark: Mark,
 }
 
 /// What should happen after a command.
@@ -124,6 +133,8 @@ pub enum Action {
     RectangleToggle,
     SelectLine,
     OtherEnd,
+    SetMark,
+    JumpToMark,
     Cancel,
     CopySelection,
     AppendSelection,
@@ -140,6 +151,8 @@ impl Action {
                 | Self::RectangleToggle
                 | Self::SelectLine
                 | Self::OtherEnd
+                | Self::SetMark
+                | Self::JumpToMark
                 | Self::GotoLine(_)
                 | Self::Cancel
                 | Self::CopySelection
@@ -256,6 +269,7 @@ fn char_binding(c: char) -> Option<Binding> {
         'T' => jump(Jump::ToBackward),
         'V' => run(Action::SelectLine),
         'W' => go(Motion::NextWord(NO_SEPARATORS)),
+        'X' => run(Action::SetMark),
         // Free in tmux, and the usual choice of those who bind these commands.
         '[' => run(Action::PreviousPrompt),
         ']' => run(Action::NextPrompt),
@@ -289,6 +303,7 @@ pub fn binding(event: &KeyEvent) -> Option<Binding> {
         return Some(Binding::Run(action));
     }
     match event.binding_mods() {
+        MOD_ALT if event.char() == Some('x') => Some(Binding::Run(Action::JumpToMark)),
         MOD_CTRL => control_binding(event).map(Binding::Run),
         0 | MOD_SHIFT => char_binding(event.char()?),
         _ => None,
@@ -304,6 +319,7 @@ impl CopyMode {
         pane.terminal.refresh();
         let position = pane.terminal.cursor().and_then(|cursor| cursor.position);
         let (x, y) = position.unwrap_or_else(|| (0, pane.rect.height.saturating_sub(1)));
+        let at = Position::new(x, top(pane).saturating_add(u32::from(y)));
         pane.copy_mode = Some(Self {
             x,
             y,
@@ -315,6 +331,7 @@ impl CopyMode {
             last_jump: None,
             repeat: 1,
             search_forward: false,
+            mark: Mark { at, shown: false },
         });
         pane.redraw = true;
     }
@@ -330,6 +347,15 @@ impl CopyMode {
     /// Runs the next command this many times.
     pub const fn set_repeat(&mut self, repeat: u32) {
         self.repeat = repeat;
+    }
+
+    /// The mark, with the row counted from the top of the history, once it shows.
+    pub const fn mark(&self) -> Option<Position> {
+        if self.mark.shown {
+            Some(self.mark.at)
+        } else {
+            None
+        }
     }
 
     const fn rectangle_selection(&self) -> bool {
@@ -552,6 +578,22 @@ fn jump(pane: &mut Pane, mode: &mut CopyMode, kind: Jump, c: char) {
     if let Some(found) = motion::jump(&pane.terminal, at, kind, c) {
         go_to(pane, mode, found);
     }
+}
+
+fn set_mark(pane: &Pane, mode: &mut CopyMode) {
+    let at = cursor(pane, mode);
+    mode.mark = Mark { at, shown: true };
+}
+
+/// Swaps the cursor and the mark. A mark in the history ends up at the top of the
+/// view, and the view goes all the way down for one on the screen, as in tmux.
+fn jump_to_mark(pane: &mut Pane, mode: &mut CopyMode) {
+    let at = mode.mark.at;
+    set_mark(pane, mode);
+    let history = pane.terminal.rows().saturating_sub(u32::from(height(pane)));
+    pane.terminal.scroll_to_row(at.y.min(history));
+    go_to(pane, mode, at);
+    mode.x = at.x.min(pane.terminal.width().saturating_sub(1));
 }
 
 /// Goes to the closest prompt in a direction, with the semantic prompts of shells
@@ -834,6 +876,8 @@ fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) ->
         Action::RectangleToggle => toggle_rectangle(pane, mode),
         Action::SelectLine => select_line(pane, mode),
         Action::OtherEnd => other_end(pane, mode),
+        Action::SetMark => set_mark(pane, mode),
+        Action::JumpToMark => jump_to_mark(pane, mode),
         Action::Cancel => return Outcome::Cancel,
         Action::CopySelection => {
             select_match(pane, mode);
