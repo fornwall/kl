@@ -375,11 +375,41 @@ pub fn foreground_cwd(master: BorrowedFd<'_>) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{group}/cwd")).ok()
 }
 
-/// macOS needs `proc_pidinfo` for this, so until then new panes there rely on
-/// the directory that shell integration reports.
+/// The working directory of the program in the foreground of a pty.
 #[cfg(target_os = "macos")]
-pub const fn foreground_cwd(_master: BorrowedFd<'_>) -> Option<PathBuf> {
-    None
+pub fn foreground_cwd(master: BorrowedFd<'_>) -> Option<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let group = foreground_group(master)?;
+    let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let size = c_int::try_from(size_of::<libc::proc_vnodepathinfo>()).ok()?;
+    // SAFETY: Writes at most `size` bytes to the valid buffer it gets.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            group,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: Filled in by the successful call above, and every bit pattern is
+    // valid for this plain C struct.
+    let info = unsafe { info.assume_init() };
+    // libc declares the path as an array of arrays, which is one C string.
+    let path: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .map(|c| c.to_ne_bytes()[0])
+        .take_while(|byte| *byte != 0)
+        .collect();
+    (!path.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(&path)))
 }
 
 /// The current local time, as `strftime` formats it.
