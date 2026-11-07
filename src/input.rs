@@ -27,6 +27,8 @@ pub struct KeyEvent {
     pub text: String,
     /// The key's character without shift, or 0.
     pub unshifted: u32,
+    /// What the key would produce on a US layout, or 0 if that is not known.
+    base: u32,
 }
 
 impl KeyEvent {
@@ -37,6 +39,7 @@ impl KeyEvent {
             mods,
             text: String::new(),
             unshifted: 0,
+            base: 0,
         }
     }
 
@@ -48,6 +51,7 @@ impl KeyEvent {
             mods: 0,
             text,
             unshifted,
+            base: 0,
         }
     }
 
@@ -73,15 +77,33 @@ impl KeyEvent {
         self.mods & !(MOD_CAPS_LOCK | MOD_NUM_LOCK)
     }
 
+    /// The key on a US layout, for when this one has no Latin letter to match
+    /// a binding by. A layout that does have one keeps its own place for it, so
+    /// that `C-b` stays on the key labeled B on a Dvorak keyboard.
+    fn latin_base(&self, c: char) -> Option<char> {
+        (!c.is_ascii() && self.base != 0)
+            .then(|| char::from_u32(self.base))
+            .flatten()
+    }
+
     /// Whether this is the given character with control held.
     pub fn is_ctrl(&self, c: char) -> bool {
-        self.binding_mods() == MOD_CTRL && self.unshifted == u32::from(c)
+        let unshifted = char::from_u32(self.unshifted);
+        self.binding_mods() == MOD_CTRL
+            && unshifted.is_some_and(|own| self.latin_base(own).unwrap_or(own) == c)
     }
 
     /// The character a binding should see: the produced text if there is any,
     /// otherwise the bare key, which makes control keys match their letter.
     pub fn char(&self) -> Option<char> {
-        single_char(&self.text).or_else(|| char::from_u32(self.unshifted))
+        let own = single_char(&self.text).or_else(|| char::from_u32(self.unshifted))?;
+        Some(self.latin_base(own).map_or(own, |base| {
+            if self.mods & MOD_SHIFT == 0 {
+                base
+            } else {
+                key::shifted(base)
+            }
+        }))
     }
 }
 
@@ -446,16 +468,18 @@ fn parse_kitty_key(params: &str) -> Option<KeyEvent> {
             mods,
             text,
             unshifted: 0,
+            base: 0,
         });
     }
     // The physical key, from the base layout code when the terminal knows it.
-    let base = codes.get(2).copied().flatten().unwrap_or(code);
+    let base = codes.get(2).copied().flatten().unwrap_or(0);
     Some(KeyEvent {
         action,
-        key: key::from_codepoint(base),
+        key: key::from_codepoint(if base == 0 { code } else { base }),
         mods,
         text,
         unshifted: code,
+        base,
     })
 }
 
@@ -664,6 +688,25 @@ mod tests {
         let event = only_key(b"\x1b[1092::97;1;1092u");
         assert_eq!(event.key, key::from_codepoint(u32::from('a')));
         assert_eq!(event.unshifted, 1092);
+    }
+
+    #[test]
+    fn bindings_work_on_layouts_without_latin_letters() {
+        // Control with the Cyrillic и on the physical B key.
+        assert!(only_key(b"\x1b[1080::98;5u").is_ctrl('b'));
+        // The Cyrillic с on the physical C key, and Х with shift on [.
+        assert_eq!(only_key(b"\x1b[1089::99;1;1089u").char(), Some('c'));
+        assert_eq!(only_key(b"\x1b[1093:1061:91;2;1061u").char(), Some('{'),);
+    }
+
+    #[test]
+    fn bindings_stay_with_the_letter_on_latin_layouts() {
+        // Dvorak, where b is on the physical N key.
+        let event = only_key(b"\x1b[98::110;5u");
+        assert!(event.is_ctrl('b'));
+        assert!(!event.is_ctrl('n'));
+        // Text from the layout wins over the key it happens to be on.
+        assert_eq!(only_key(b"\x1b[98::110;1;98u").char(), Some('b'));
     }
 
     #[test]

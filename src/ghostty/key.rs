@@ -99,6 +99,34 @@ pub fn from_codepoint(codepoint: u32) -> c_int {
     }
 }
 
+/// What shift turns a character into on a US layout.
+pub const fn shifted(c: char) -> char {
+    match c {
+        '`' => '~',
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        c => c.to_ascii_uppercase(),
+    }
+}
+
 /// The key that a `CSI code u` sequence names. `None` means the code stands for
 /// a character, which [`from_codepoint`] handles.
 pub const fn from_kitty_code(code: u32) -> Option<c_int> {

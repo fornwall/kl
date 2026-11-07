@@ -48,14 +48,7 @@ Before adding much more, close the gaps in the table above.
   tests. Linting every target matters: `cfg`-gated code is only linted on its
   own platform.
 - Try it for real in Ghostty, and fix what that finds.
-- `foreground_cwd` on macOS, with `proc_pidinfo`. Until then, new panes there
-  only follow directories that shell integration reports through OSC 7.
 - Fuzz the input parser and the protocol decoder.
-- Keys on non-Latin layouts. Bindings compare the character a key produces, so
-  `C-b` does nothing on a Cyrillic layout. The kitty protocol's base layout key is
-  already parsed, and should be the fallback.
-- The position shown in copy mode can cover half of a wide character, which then
-  stays damaged until the next repaint.
 
 ### 3. Getting around
 

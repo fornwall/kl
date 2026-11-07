@@ -725,6 +725,16 @@ fn follows_the_outer_terminal_size() {
 }
 
 #[test]
+fn bindings_work_on_a_cyrillic_layout() {
+    let mut screen = Screen::new(80, 24);
+    let (c_key, es) = (ghostty_key('c'), '\u{441}');
+    // What the outer terminal sends for the keys labeled B and C on that layout.
+    screen.key(ghostty_key('b'), MOD_CTRL, "", u32::from('\u{438}'));
+    screen.key(c_key, 0, &es.to_string(), u32::from(es));
+    screen.wait_for_text("1:");
+}
+
+#[test]
 fn control_keys_reach_programs() {
     let mut screen = Screen::new(80, 24);
     screen.run("sleep 100");
