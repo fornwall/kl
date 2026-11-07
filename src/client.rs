@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 use crate::proto::{self, AttachMode, ClientInfo, ClientMessage, ServerMessage};
 use crate::sys::{self, SIGHUP, SIGTERM, SIGWINCH, Selector};
 
+/// What to tell the user when the server is gone without a word.
+const LOST_SERVER: &str = "[lost server]";
+
 /// How long to wait for a newly started server to come up.
 const SERVER_START_TIME: Duration = Duration::from_secs(5);
 
@@ -209,7 +212,7 @@ pub fn attach(socket: &Path, mut mode: AttachMode) -> Result<String, Box<dyn Err
                 stdout.flush()?;
                 match UnixStream::connect(socket) {
                     Ok(next) => stream = next,
-                    Err(error) => break Err(error.into()),
+                    Err(_) => break Ok(LOST_SERVER.to_owned()),
                 }
             }
             Err(error) => break Err(error),
@@ -228,7 +231,10 @@ fn environment_entry(name: &str) -> String {
 }
 
 /// Shows the session until it is over, returning what to tell the user, or
-/// `None` if the server asked to be attached to again.
+/// `None` if it may go on with another server. That is when the server asked for
+/// it, or when one went away that was talking to this client: a terminal that was
+/// not being read through a restart missed the word, and there may be a new
+/// server. One that closes a new connection is not going to get any better.
 fn attached_loop(
     stream: &UnixStream,
     signals: &File,
@@ -239,6 +245,7 @@ fn attached_loop(
     let mut input = File::from(terminal.try_clone_to_owned()?);
     let mut stdout = io::stdout();
     let mut receiver = Receiver::default();
+    let mut heard_from_server = false;
 
     let attach = ClientMessage::Attach {
         version: proto::VERSION,
@@ -281,9 +288,10 @@ fn attached_loop(
         }
         if selector.readable(stream.as_raw_fd()) {
             if !receiver.read(stream)? {
-                return Ok(Some("[lost server]".to_owned()));
+                return Ok((!heard_from_server).then(|| LOST_SERVER.to_owned()));
             }
             while let Some(message) = receiver.next_message()? {
+                heard_from_server = true;
                 match message {
                     ServerMessage::Output(bytes) => {
                         stdout.write_all(&bytes)?;

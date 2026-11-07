@@ -3076,6 +3076,52 @@ fn getting_the_keyboard_takes_the_window_and_losing_it_does_not() {
 }
 
 #[test]
+fn a_client_that_stopped_reading_does_not_hold_up_a_restart() {
+    let mut stopped = Screen::new(200, 50);
+    let mut reading = Screen::attach(Rc::clone(&stopped.dir), 200, 50);
+    stopped.pump();
+    let start = reading.raw.len();
+    let deadline = Instant::now() + TIMEOUT;
+    let mut round = 0;
+    while reading.raw.len() - start < 2_000_000 {
+        round += 1;
+        reading.run(&format!(
+            "awk 'BEGIN {{ for (i = 0; i < 30; i++) s = s \"0123456789\"; \
+             for (i = 0; i < 5000; i++) print substr(s, i % 10 + 1, 190); \
+             print \"round-\" {round} \"-done\" }}'"
+        ));
+        reading.wait_for_line(&format!("round-{round}-done"));
+        assert!(Instant::now() < deadline, "too little output");
+    }
+
+    let before = stopped.raw.len();
+    let started = Instant::now();
+    reading.restart_server();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    reading.run("echo back-again");
+    reading.wait_for_line("back-again");
+
+    // It cannot have heard of the restart, and finds out once it looks.
+    stopped.wait_for_new_server(before);
+    stopped.wait_for_line("back-again");
+    stopped.run("echo typed-after-all");
+    reading.wait_for_line("typed-after-all");
+}
+
+#[test]
+fn a_client_says_so_when_the_server_is_gone_for_good() {
+    let mut screen = Screen::new(80, 24);
+    let server = output_of(&screen, &["display-message", "-p", "#{pid}"]);
+    let status = Command::new("kill")
+        .args(["-KILL", server.trim()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    screen.wait_for_exit();
+    assert!(screen.raw_text().contains("[lost server]"));
+}
+
+#[test]
 fn programs_hear_the_colors_of_the_client_active_last() {
     let light = OuterColors {
         foreground: Some(OUTER_BACKGROUND),
