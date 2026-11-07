@@ -74,14 +74,28 @@ fn main() -> Result<(), String> {
     let packages = fetch_packages(&root, &src)?;
     let inputs = format!("{VT_FEATURES}\n{patches}");
     let prefix = build_library(&root, &src, &packages, zig_target, &inputs)?;
+    remove_shared_libraries(&prefix.join("lib"))?;
 
     println!(
         "cargo:rustc-link-search=native={}",
         prefix.join("lib").display()
     );
-    // By its exact name, since zig installs a shared library next to it, and
-    // given the choice the linker on macOS takes that one.
-    println!("cargo:rustc-link-lib=static:+verbatim=libghostty-vt.a");
+    println!("cargo:rustc-link-lib=static=ghostty-vt");
+    Ok(())
+}
+
+/// Zig installs shared libraries next to the static one, and given the choice,
+/// the linker on macOS takes a shared one whatever rustc asked for. There is no
+/// way to name the file through `-l` there, so this leaves it no choice.
+fn remove_shared_libraries(lib: &Path) -> Result<(), String> {
+    let entries = context(fs::read_dir(lib), "listing the libghostty-vt build")?;
+    for entry in entries {
+        let path = context(entry, "listing the libghostty-vt build")?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name.contains(".dylib") || name.contains(".so") {
+            context(fs::remove_file(&path), "removing a shared library")?;
+        }
+    }
     Ok(())
 }
 
