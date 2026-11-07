@@ -19,6 +19,7 @@ pub const OPT_XTVERSION: c_int = 5;
 pub const OPT_TITLE_CHANGED: c_int = 6;
 pub const OPT_SIZE: c_int = 7;
 pub const OPT_COLOR_SCHEME: c_int = 8;
+pub const OPT_DEVICE_ATTRIBUTES: c_int = 9;
 pub const OPT_COLOR_FOREGROUND: c_int = 12;
 pub const OPT_COLOR_BACKGROUND: c_int = 13;
 pub const OPT_COLOR_PALETTE: c_int = 15;
@@ -28,6 +29,7 @@ pub const OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
 pub const OPT_DESKTOP_NOTIFICATION: c_int = 30;
 pub const OPT_PROGRESS_REPORT: c_int = 31;
 pub const OPT_CONTINUATION_MAX_BYTES: c_int = 32;
+pub const OPT_MODE_DEFAULT: c_int = 34;
 pub const OPT_MODE: c_int = 35;
 pub const OPT_RENDER_HOLD: c_int = 42;
 
@@ -329,6 +331,32 @@ pub struct ClipboardWrite {
     pub can_remember: bool,
     pub ctx: *const c_void,
     pub reply: unsafe extern "C" fn(*const Self, *const ClipboardWriteReply),
+}
+
+#[repr(C)]
+pub struct DeviceAttributesPrimary {
+    pub conformance_level: u16,
+    pub features: [u16; 64],
+    pub num_features: usize,
+}
+
+#[repr(C)]
+pub struct DeviceAttributesSecondary {
+    pub device_type: u16,
+    pub firmware_version: u16,
+    pub rom_cartridge: u16,
+}
+
+#[repr(C)]
+pub struct DeviceAttributesTertiary {
+    pub unit_id: u32,
+}
+
+#[repr(C)]
+pub struct DeviceAttributes {
+    pub primary: DeviceAttributesPrimary,
+    pub secondary: DeviceAttributesSecondary,
+    pub tertiary: DeviceAttributesTertiary,
 }
 
 #[repr(C)]

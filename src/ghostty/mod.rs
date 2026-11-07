@@ -48,6 +48,7 @@ pub const MODE_ALTERNATE_SCROLL: u16 = 1007;
 pub const MODE_SGR_PIXELS: u16 = 1016;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
+const MODE_GRAPHEME_CLUSTER: u16 = 2027;
 const MODE_REPORT_COLOR_SCHEME: u16 = 2031;
 
 /// The names OSC 22 knows pointer shapes by, in the order of `GhosttyMouseShape`.
@@ -443,6 +444,23 @@ unsafe extern "C" fn on_write_pty(
     effects.replies.extend_from_slice(data);
 }
 
+/// What the Ghostty app says: a VT220 with color and clipboard access, the last
+/// of which some programs look for before they use OSC 52.
+unsafe extern "C" fn on_device_attributes(
+    _terminal: ffi::Handle,
+    _userdata: *mut c_void,
+    attributes: *mut ffi::DeviceAttributes,
+) -> bool {
+    // SAFETY: libghostty-vt passes zeroed attributes for this call to fill in.
+    let attributes = unsafe { &mut *attributes };
+    attributes.primary.conformance_level = 62;
+    attributes.primary.features[..2].copy_from_slice(&[22, 52]);
+    attributes.primary.num_features = 2;
+    attributes.secondary.device_type = 1;
+    attributes.secondary.firmware_version = 10;
+    true
+}
+
 unsafe extern "C" fn on_bell(_terminal: ffi::Handle, userdata: *mut c_void) {
     // SAFETY: Called by libghostty-vt with the registered userdata.
     let effects = unsafe { effects_of(userdata) };
@@ -695,7 +713,9 @@ impl Terminal {
         check(unsafe {
             ffi::ghostty_terminal_new(ptr::null(), &raw mut handles.terminal, cols, rows)
         })?;
-        Self::around(handles, cols, rows)
+        let mut terminal = Self::around(handles, cols, rows)?;
+        terminal.default_to_grapheme_clustering(true)?;
+        Ok(terminal)
     }
 
     /// Brings back a terminal from [`Self::snapshot`]. It holds what the original
@@ -707,7 +727,20 @@ impl Terminal {
         let cols = restored.get(ffi::DATA_COLS).unwrap_or(1);
         let rows = restored.get(ffi::DATA_ROWS).unwrap_or(1);
         restored.effects().size = (cols, rows, 1, 1);
+        let clustering = restored.mode(MODE_GRAPHEME_CLUSTER);
+        restored.default_to_grapheme_clustering(clustering)?;
         Ok(restored)
+    }
+
+    /// Unlike the library, the Ghostty app has grapheme clustering on unless
+    /// configured otherwise, which decides the width of emoji such as keycaps.
+    /// This is about what a reset goes back to, and `on` about how it is now.
+    fn default_to_grapheme_clustering(&mut self, on: bool) -> Result<(), Error> {
+        let mode = MODE_GRAPHEME_CLUSTER;
+        let default = ffi::ModeConfig { mode, value: true };
+        self.set(ffi::OPT_MODE_DEFAULT, (&raw const default).cast())?;
+        let current = ffi::ModeConfig { mode, value: on };
+        self.set(ffi::OPT_MODE, (&raw const current).cast())
     }
 
     /// Everything about the terminal that is not part of a snapshot. Takes the
@@ -774,6 +807,10 @@ impl Terminal {
         self.set(ffi::OPT_XTVERSION, on_xtversion as *const c_void)?;
         self.set(ffi::OPT_SIZE, on_size as *const c_void)?;
         self.set(ffi::OPT_COLOR_SCHEME, on_color_scheme as *const c_void)?;
+        self.set(
+            ffi::OPT_DEVICE_ATTRIBUTES,
+            on_device_attributes as *const c_void,
+        )?;
         self.set(
             ffi::OPT_CLIPBOARD_WRITE,
             on_clipboard_write as *const c_void,
@@ -1916,6 +1953,35 @@ mod tests {
         lines
     }
 
+    #[test]
+    fn reports_device_attributes_like_the_app() {
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        terminal.write(b"\x1b[c\x1b[>c");
+        assert_eq!(
+            terminal.effects().replies.escape_ascii().to_string(),
+            b"\x1b[?62;22;52c\x1b[>1;10;0c".escape_ascii().to_string()
+        );
+    }
+
+    #[test]
+    fn clusters_graphemes_by_default_like_the_app() {
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        assert!(terminal.mode(MODE_GRAPHEME_CLUSTER));
+        // A keycap is one cluster, of a wide character.
+        terminal.write("1\u{fe0f}\u{20e3}".as_bytes());
+        terminal.refresh();
+        assert_eq!(terminal.cursor().unwrap().position, Some((2, 0)));
+
+        terminal.write(b"\x1b[?2027l");
+        assert!(!terminal.mode(MODE_GRAPHEME_CLUSTER));
+        let restored = Terminal::restore(&terminal.snapshot().unwrap());
+        let mut restored = restored.unwrap();
+        assert!(!restored.mode(MODE_GRAPHEME_CLUSTER));
+
+        restored.write(b"\x1bc");
+        assert!(restored.mode(MODE_GRAPHEME_CLUSTER));
+    }
+
     /// The library's description of its types, with whitespace removed.
     fn manifest() -> String {
         // SAFETY: Returns a static NUL-terminated string.
@@ -2002,6 +2068,16 @@ mod tests {
             "semantic_prompt_boundary" => semantic_prompt_boundary);
         assert_layout!(m, "GhosttyTerminalModeConfig", ffi::ModeConfig,
             "mode" => mode, "value" => value);
+        assert_layout!(m, "GhosttyDeviceAttributesPrimary", ffi::DeviceAttributesPrimary,
+            "conformance_level" => conformance_level, "features" => features,
+            "num_features" => num_features);
+        assert_layout!(m, "GhosttyDeviceAttributesSecondary", ffi::DeviceAttributesSecondary,
+            "device_type" => device_type, "firmware_version" => firmware_version,
+            "rom_cartridge" => rom_cartridge);
+        assert_layout!(m, "GhosttyDeviceAttributesTertiary", ffi::DeviceAttributesTertiary,
+            "unit_id" => unit_id);
+        assert_layout!(m, "GhosttyDeviceAttributes", ffi::DeviceAttributes,
+            "primary" => primary, "secondary" => secondary, "tertiary" => tertiary);
         assert_layout!(m, "GhosttyRenderStateRowSelection", ffi::RowSelection,
             "size" => size, "start_x" => start_x, "end_x" => end_x);
         assert_layout!(m, "GhosttyRenderStateCursor", ffi::RenderCursor,
