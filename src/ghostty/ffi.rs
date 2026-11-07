@@ -146,6 +146,9 @@ pub const STYLE_COLOR_NONE: u8 = 0;
 pub const STYLE_COLOR_PALETTE: u8 = 1;
 pub const STYLE_COLOR_RGB: u8 = 2;
 
+pub const KEY_OPT_MACOS_OPTION_AS_ALT: c_int = 7;
+pub const OPTION_AS_ALT_TRUE: c_int = 1;
+
 pub const MOUSE_OPT_SIZE: c_int = 3;
 pub const MOUSE_OPT_ANY_BUTTON_PRESSED: c_int = 4;
 
@@ -584,6 +587,7 @@ unsafe extern "C" {
 
     pub fn ghostty_key_encoder_new(allocator: *const c_void, encoder: *mut Handle) -> c_int;
     pub fn ghostty_key_encoder_free(encoder: Handle);
+    pub fn ghostty_key_encoder_set(encoder: Handle, option: c_int, value: *const c_void) -> c_int;
     pub fn ghostty_key_encoder_set_from_terminal(encoder: Handle, terminal: Handle) -> c_int;
     pub fn ghostty_key_encoder_encode(
         encoder: Handle,

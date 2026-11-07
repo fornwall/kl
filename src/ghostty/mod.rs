@@ -1569,6 +1569,15 @@ impl Terminal {
         if synced != ffi::SUCCESS {
             return Vec::new();
         }
+        // The outer terminal already decided what option means on macOS, so alt
+        // that gets this far is alt. The call above resets this each time.
+        let alt = ffi::OPTION_AS_ALT_TRUE;
+        let option = ffi::KEY_OPT_MACOS_OPTION_AS_ALT;
+        // SAFETY: The encoder is live, and the value matches the option's type.
+        let set = unsafe { ffi::ghostty_key_encoder_set(encoder, option, (&raw const alt).cast()) };
+        if set != ffi::SUCCESS {
+            return Vec::new();
+        }
         encode_into(|buf, len, written| {
             // SAFETY: `buf` is valid for `len` bytes, and `written` for a write.
             unsafe { ffi::ghostty_key_encoder_encode(encoder, event, buf, len, written) }
