@@ -4,7 +4,7 @@
 //! stays behind during a hold. Taking a copy whenever the render state is updated
 //! keeps text and links from different moments from being paired up.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -46,7 +46,8 @@ pub struct Links {
     /// The runs of each row of the viewport, from left to right.
     rows: Vec<Vec<Run>>,
     by_uri: BTreeMap<Rc<[u8]>, Link>,
-    by_link: BTreeMap<Link, Rc<[u8]>>,
+    /// Sorted, as each new link has the highest number yet.
+    by_link: Vec<(Link, Rc<[u8]>)>,
     /// How many links to know before looking for ones to forget.
     limit: usize,
 }
@@ -54,12 +55,13 @@ pub struct Links {
 impl Links {
     /// How many links are kept.
     #[cfg(test)]
-    pub fn known(&self) -> usize {
+    pub const fn known(&self) -> usize {
         self.by_link.len()
     }
 
     pub fn uri(&self, link: Link) -> Option<&[u8]> {
-        self.by_link.get(&link).map(|uri| &**uri)
+        let index = self.by_link.binary_search_by_key(&link, |(link, _)| *link);
+        self.by_link.get(index.ok()?).map(|(_, uri)| &**uri)
     }
 
     /// Forgets the links of a row that is about to be read again.
@@ -98,7 +100,7 @@ impl Links {
         }
         let (link, uri) = (Link::new(), Rc::<[u8]>::from(uri));
         self.by_uri.insert(Rc::clone(&uri), link);
-        self.by_link.insert(link, Rc::clone(&uri));
+        self.by_link.push((link, Rc::clone(&uri)));
         (link, uri)
     }
 
@@ -109,9 +111,12 @@ impl Links {
         if self.by_link.len() < self.limit.max(MIN_LIMIT) {
             return;
         }
-        let used: BTreeSet<Link> = self.rows.iter().flatten().map(|run| run.link).collect();
-        self.by_uri.retain(|_, link| used.contains(link));
-        self.by_link.retain(|link, _| used.contains(link));
+        let mut used: Vec<Link> = self.rows.iter().flatten().map(|run| run.link).collect();
+        used.sort_unstable();
+        used.dedup();
+        let used_link = |link: &Link| used.binary_search(link).is_ok();
+        self.by_uri.retain(|_, link| used_link(link));
+        self.by_link.retain(|(link, _)| used_link(link));
         self.limit = 2 * used.len();
     }
 
