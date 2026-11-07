@@ -32,6 +32,7 @@ Windows:
   rename-window (renamew) name                name the window
   kill-window (killw)                         close the window
   list-windows (lsw)                          list windows
+  set-window-option (setw) monitor-activity [on|off]  flag output in the window
 
 Panes:
   split-window (splitw) [-h|-v] [command]     split the active pane

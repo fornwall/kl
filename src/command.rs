@@ -49,6 +49,8 @@ pub enum Command {
     SelectPane(Direction),
     SelectWindow(u32),
     SendKeys(Vec<String>),
+    /// Turns a window's `monitor-activity` option on or off, or toggles it.
+    SetMonitorActivity(Option<bool>),
     SplitWindow {
         kind: SplitKind,
         program: Vec<String>,
@@ -81,6 +83,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "select-pane" | "selectp" => parse_select_pane(args),
         "select-window" | "selectw" => parse_select_window(args),
         "send-keys" | "send" => Ok(Command::SendKeys(args.to_vec())),
+        "set-option" | "set" | "set-window-option" | "setw" => parse_set_option(args),
         "split-window" | "splitw" => Ok(parse_split_window(args)),
         other => Err(format!("unknown command: {other}")),
     }
@@ -173,6 +176,24 @@ fn parse_select_window(args: &[String]) -> Result<Command, String> {
         [flag] if flag == "-n" => Ok(Command::NextWindow),
         [flag] if flag == "-p" => Ok(Command::PreviousWindow),
         _ => Err("usage: select-window -t index | -l | -n | -p".to_owned()),
+    }
+}
+
+/// The only option so far is the one tmux makes it impossible to do without.
+fn parse_set_option(args: &[String]) -> Result<Command, String> {
+    let args = match args {
+        [flag, rest @ ..] if flag == "-w" => rest,
+        args => args,
+    };
+    match args {
+        [name] if name == "monitor-activity" => Ok(Command::SetMonitorActivity(None)),
+        [name, value] if name == "monitor-activity" => match value.as_str() {
+            "on" | "yes" | "1" => Ok(Command::SetMonitorActivity(Some(true))),
+            "off" | "no" | "0" => Ok(Command::SetMonitorActivity(Some(false))),
+            _ => Err(format!("bad value: {value}")),
+        },
+        [name, ..] => Err(format!("invalid option: {name}")),
+        [] => Err("usage: set-option [-w] option [value]".to_owned()),
     }
 }
 
@@ -310,6 +331,27 @@ mod tests {
             command("rename-window my logs"),
             Command::RenameWindow("my logs".to_owned())
         );
+    }
+
+    #[test]
+    fn parses_options() {
+        assert_eq!(
+            command("setw monitor-activity on"),
+            Command::SetMonitorActivity(Some(true))
+        );
+        assert_eq!(
+            command("set -w monitor-activity off"),
+            Command::SetMonitorActivity(Some(false))
+        );
+        assert_eq!(
+            command("set-window-option monitor-activity"),
+            Command::SetMonitorActivity(None)
+        );
+        assert_eq!(
+            parse(&words("set status off")).unwrap_err(),
+            "invalid option: status"
+        );
+        assert!(parse(&words("setw monitor-activity maybe")).is_err());
     }
 
     #[test]

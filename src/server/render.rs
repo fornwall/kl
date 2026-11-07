@@ -2,7 +2,7 @@
 //! outer terminal only what changed since the last frame.
 
 use super::layout::{Divider, Rect};
-use super::session::{Session, Window};
+use super::session::{Monitor, Session, Window};
 use super::ui::Ui;
 use crate::ghostty::{
     self, Cell, CursorShape, Progress, STYLE_BLINK, STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE,
@@ -26,6 +26,14 @@ fn colored(fg: u8, bg: u8) -> Style {
 /// tmux's defaults for the status line, and for copy mode and messages.
 fn status_style() -> Style {
     colored(BLACK, GREEN)
+}
+
+/// tmux's `window-status-bell-style` and `window-status-activity-style`.
+fn alert_style() -> Style {
+    Style {
+        flags: STYLE_INVERSE,
+        ..status_style()
+    }
 }
 
 fn mode_style() -> Style {
@@ -311,7 +319,9 @@ impl Renderer {
         for window in &session.windows {
             let label = window_label(session, window);
             let start = x;
-            x = self.next.put_str(x, y, &label, style, right_start);
+            let alert = window.bell || window.monitor == Monitor::Flagged;
+            let label_style = if alert { alert_style() } else { style };
+            x = self.next.put_str(x, y, &label, label_style, right_start);
             self.status_entries.push(StatusEntry {
                 start,
                 end: x,
@@ -464,13 +474,16 @@ fn draw_position(grid: &mut Grid, rect: Rect, scrollbar: Option<ghostty::Scrollb
 
 fn window_label(session: &Session, window: &Window) -> String {
     let mut flags = String::new();
+    if window.monitor == Monitor::Flagged {
+        flags.push('#');
+    }
+    if window.bell {
+        flags.push('!');
+    }
     if window.index == session.current {
         flags.push('*');
     } else if session.last == Some(window.index) {
         flags.push('-');
-    }
-    if window.bell {
-        flags.push('!');
     }
     if window.zoomed {
         flags.push('Z');

@@ -19,6 +19,16 @@ pub struct Window {
     pub zoomed: bool,
     /// A pane rang the bell while this window was not being looked at.
     pub bell: bool,
+    pub monitor: Monitor,
+}
+
+/// Whether output in a window is flagged, as tmux's `monitor-activity`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Monitor {
+    Off,
+    Watching,
+    /// A pane wrote something while this window was not being looked at.
+    Flagged,
 }
 
 impl Window {
@@ -100,6 +110,11 @@ impl Session {
     pub fn window_mut(&mut self) -> Option<&mut Window> {
         let current = self.current;
         self.windows.iter_mut().find(|w| w.index == current)
+    }
+
+    /// The window a pane is in.
+    pub fn window_of_mut(&mut self, pane: PaneId) -> Option<&mut Window> {
+        self.windows.iter_mut().find(|w| w.root.contains(pane))
     }
 
     pub fn active_id(&self) -> Option<PaneId> {
@@ -204,6 +219,7 @@ impl Session {
             last_active: None,
             zoomed: false,
             bell: false,
+            monitor: Monitor::Off,
         };
         let position = self.windows.partition_point(|w| w.index < index);
         self.windows.insert(position, window);
@@ -318,6 +334,9 @@ impl Session {
         }
         if let Some(window) = self.window_mut() {
             window.bell = false;
+            if window.monitor == Monitor::Flagged {
+                window.monitor = Monitor::Watching;
+            }
         }
         self.repaint = true;
         true

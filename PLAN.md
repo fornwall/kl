@@ -61,7 +61,6 @@ What is missing for daily use compared with tmux.
 - Repeatable keys, so that `C-b C-Up C-Up` resizes twice.
 - `-t` targets for commands, and format strings for `list-*` and
   `display-message`.
-- Activity monitoring for windows, next to the bell flag.
 
 ### 4. Copy mode
 

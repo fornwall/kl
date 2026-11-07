@@ -36,6 +36,8 @@ pub struct Spawn<'a> {
 /// Things a program did in the last read, for the caller to act on.
 #[derive(Default)]
 pub struct Activity {
+    /// How much the program wrote.
+    pub output: usize,
     pub bell: bool,
     pub title_changed: bool,
     pub clipboard: Vec<Vec<u8>>,
@@ -205,21 +207,29 @@ impl Pane {
     /// Feeds the program's output into the terminal.
     pub fn read(&mut self) -> Activity {
         let mut buf = vec![0; READ_SIZE];
+        let mut output = 0;
         match (&self.pty).read(&mut buf) {
             // On Linux, the master reports EIO once the slave side is closed.
             Ok(0) => self.exited = true,
-            Ok(len) => self.terminal.write(buf.get(..len).unwrap_or(&[])),
+            Ok(len) => {
+                output = len;
+                self.terminal.write(buf.get(..len).unwrap_or(&[]));
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => self.exited = true,
         }
-        self.take_activity()
+        Activity {
+            output,
+            ..self.take_activity()
+        }
     }
 
     fn take_activity(&mut self) -> Activity {
         let effects = self.terminal.effects();
         let replies = std::mem::take(&mut effects.replies);
         let activity = Activity {
+            output: 0,
             bell: std::mem::take(&mut effects.bell),
             title_changed: std::mem::take(&mut effects.title_changed),
             clipboard: std::mem::take(&mut effects.clipboard),

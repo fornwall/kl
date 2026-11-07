@@ -27,7 +27,7 @@ use dispatch::{Click, Drag};
 use layout::PaneId;
 use pane::Activity;
 use render::{Renderer, osc_text};
-use session::Session;
+use session::{Monitor, Session};
 use ui::Ui;
 
 /// The shortest time between frames, to coalesce heavy output.
@@ -477,15 +477,19 @@ impl Server {
         if activity.bell {
             if visible {
                 self.send_output(b"\x07");
-            } else if let Some(window) = self
-                .session
-                .windows
-                .iter_mut()
-                .find(|window| window.root.contains(id))
-            {
+            } else if let Some(window) = self.session.window_of_mut(id) {
                 window.bell = true;
                 self.dirty = true;
             }
+        }
+        let current = self.session.current;
+        if activity.output > 0
+            && let Some(window) = self.session.window_of_mut(id)
+            && window.monitor == Monitor::Watching
+            && window.index != current
+        {
+            window.monitor = Monitor::Flagged;
+            self.dirty = true;
         }
     }
 

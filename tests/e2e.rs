@@ -1016,6 +1016,28 @@ fn progress_follows_what_can_be_seen() {
 }
 
 #[test]
+fn output_in_a_monitored_window_is_flagged() {
+    let mut screen = Screen::new(80, 24);
+    assert!(
+        screen
+            .command(&["set-window-option", "monitor-activity", "on"])
+            .status
+            .success()
+    );
+    screen.run("sleep 1; echo done");
+    screen.prefix("c");
+    screen.wait_for("the activity flag", |lines| {
+        lines
+            .last()
+            .is_some_and(|status| status.contains("0:sleep#-"))
+    });
+    screen.prefix("0");
+    screen.wait_for("the activity flag to clear", |lines| {
+        lines.last().is_some_and(|status| !status.contains('#'))
+    });
+}
+
+#[test]
 fn the_window_taking_over_from_a_closed_one_loses_its_bell_flag() {
     let mut screen = Screen::new(80, 24);
     screen.run(r"sleep 1; printf '\007'");

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use super::copy_mode::{self, CopyMode, Outcome};
 use super::layout::{Divider, PaneId, Rect};
 use super::pane::Pane;
-use super::session::Window;
+use super::session::{Monitor, Window};
 use super::ui::{Prompt, PromptAction, PromptOutcome};
 use super::{COLOR_QUERIES, Lifecycle, Server};
 use crate::command::{self, Command, Direction, SplitKind};
@@ -373,6 +373,12 @@ impl Server {
                     .collect();
                 if let Some(pane) = self.session.active_pane_mut() {
                     pane.send(&bytes);
+                }
+            }
+            Command::SetMonitorActivity(value) => {
+                if let Some(window) = self.session.window_mut() {
+                    let on = value.unwrap_or(window.monitor == Monitor::Off);
+                    window.monitor = if on { Monitor::Watching } else { Monitor::Off };
                 }
             }
             Command::SplitWindow { kind, program } => self.session.split(kind, &program)?,
