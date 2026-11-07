@@ -82,6 +82,17 @@ page. It is documented, but easy to miss: a program using the defaults gets
 next to no history without any sign of why. A default nearer to the 10 MB of the
 Ghostty app would be friendlier. Today: kl sets 10 MB itself.
 
+## Ghostty
+
+Found by running kl in the app, version 1.4.0.
+
+### Replies to long color queries
+
+The reply to an OSC 4 query is built in a 1 KiB buffer. A sequence asking for more
+than a few dozen colors logs `error.WriteFailed`, and no reply is sent at all.
+
+Today: kl asks for each palette entry in a sequence of its own.
+
 ## Zig
 
 ### Fetching dependencies of dependencies

@@ -163,13 +163,13 @@ enum Lifecycle {
 
 /// Asks the outer terminal about its colors, for programs that want to know.
 /// The server does this rather than the client, since it needs to ask again
-/// when the color scheme changes.
+/// when the color scheme changes. Each palette entry gets a sequence of its own,
+/// as the Ghostty app gives up on a reply that does not fit in 1 KiB.
 fn color_queries() -> Vec<u8> {
-    let mut queries = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b]4".to_vec();
+    let mut queries = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n".to_vec();
     for index in 0..=u8::MAX {
-        queries.extend_from_slice(format!(";{index};?").as_bytes());
+        queries.extend_from_slice(format!("\x1b]4;{index};?\x1b\\").as_bytes());
     }
-    queries.extend_from_slice(b"\x1b\\");
     queries
 }
 
@@ -672,6 +672,14 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asks_for_palette_entries_one_by_one() {
+        let queries = color_queries();
+        let text = String::from_utf8_lossy(&queries);
+        assert_eq!(text.matches("\x1b]4;").count(), 256);
+        assert!(text.contains("\x1b]4;255;?\x1b\\"));
+    }
 
     fn sequence(title: &str, body: &str) -> String {
         let notification = Notification {
