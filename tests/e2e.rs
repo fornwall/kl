@@ -1627,8 +1627,9 @@ fn full_screen_programs_get_their_own_screen() {
     let mut screen = Screen::new(80, 24);
     screen.run("echo before");
     screen.wait_for_text("before");
-    screen.run(r"printf '\033[?1049h\033[Halt''-screen'; sleep 0.3; printf '\033[?1049l'");
+    screen.run(r"printf '\033[?1049h\033[Halt''-screen'; read x; printf '\033[?1049l'");
     screen.wait_for_text("alt-screen");
+    screen.enter();
     screen.wait_for_no_text("alt-screen");
     screen.wait_for_line("before");
 }
