@@ -33,6 +33,7 @@ const fn repeat(key: &'static str, command: &'static str, note: &'static str) ->
 
 /// tmux's default key table, or the part of it that exists here, in its order.
 pub const PREFIX_TABLE: &[Binding] = &[
+    bind("Space", "next-layout", "Select next layout"),
     bind("!", "break-pane", "Break pane to a new window"),
     bind("\"", "split-window", "Split window vertically"),
     bind("#", "list-buffers", "List all paste buffers"),
@@ -62,6 +63,7 @@ pub const PREFIX_TABLE: &[Binding] = &[
     bind(";", "last-pane", "Move to the previously active pane"),
     bind("=", "choose-buffer -Z", "Choose a paste buffer from a list"),
     bind("?", "list-keys -N", "List key bindings"),
+    bind("E", "select-layout -E", "Spread panes out evenly"),
     bind("M", "select-pane -M", "Clear the marked pane"),
     bind("[", "copy-mode", "Enter copy mode"),
     bind("]", "paste-buffer -p", "Paste the most recent paste buffer"),
@@ -113,6 +115,37 @@ pub const PREFIX_TABLE: &[Binding] = &[
         "Select the pane to the right of the active pane",
     ),
     bind(
+        "M-1",
+        "select-layout even-horizontal",
+        "Set the even-horizontal layout",
+    ),
+    bind(
+        "M-2",
+        "select-layout even-vertical",
+        "Set the even-vertical layout",
+    ),
+    bind(
+        "M-3",
+        "select-layout main-horizontal",
+        "Set the main-horizontal layout",
+    ),
+    bind(
+        "M-4",
+        "select-layout main-vertical",
+        "Set the main-vertical layout",
+    ),
+    bind("M-5", "select-layout tiled", "Select the tiled layout"),
+    bind(
+        "M-6",
+        "select-layout main-horizontal-mirrored",
+        "Set the main-horizontal-mirrored layout",
+    ),
+    bind(
+        "M-7",
+        "select-layout main-vertical-mirrored",
+        "Set the main-vertical-mirrored layout",
+    ),
+    bind(
         "M-n",
         "next-window -a",
         "Select the next window with an alert",
@@ -122,11 +155,17 @@ pub const PREFIX_TABLE: &[Binding] = &[
         "previous-window -a",
         "Select the previous window with an alert",
     ),
+    bind(
+        "M-o",
+        "rotate-window -D",
+        "Rotate through the panes in reverse",
+    ),
     repeat("M-Up", "resize-pane -U 5", "Resize the pane up by 5"),
     repeat("M-Down", "resize-pane -D 5", "Resize the pane down by 5"),
     repeat("M-Left", "resize-pane -L 5", "Resize the pane left by 5"),
     repeat("M-Right", "resize-pane -R 5", "Resize the pane right by 5"),
     bind("C-b", "send-prefix", "Send the prefix key"),
+    bind("C-o", "rotate-window", "Rotate through the panes"),
     repeat("C-Up", "resize-pane -U", "Resize the pane up"),
     repeat("C-Down", "resize-pane -D", "Resize the pane down"),
     repeat("C-Left", "resize-pane -L", "Resize the pane left"),

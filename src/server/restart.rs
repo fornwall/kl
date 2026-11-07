@@ -18,7 +18,7 @@ use std::process::Command;
 use super::Server;
 use super::buffers::{Buffer, Buffers};
 use super::copy_mode::CopyMode;
-use super::layout::{Node, PaneId};
+use super::layout::{Layout, Node, PaneId};
 use super::pane::Pane;
 use super::session::{Monitor, Session, Window};
 use crate::command::SplitKind;
@@ -28,7 +28,7 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 7;
+pub const STATE_VERSION: u32 = 8;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
@@ -208,6 +208,10 @@ fn put_window(out: &mut Vec<u8>, window: &Window) {
     put_bool(out, window.zoomed);
     put_bool(out, window.bell);
     out.push(monitor_byte(window.monitor));
+    let layout = window
+        .layout
+        .and_then(|layout| Layout::ALL.iter().position(|other| *other == layout));
+    put_optional_u32(out, layout.and_then(|index| u32::try_from(index).ok()));
 }
 
 fn take_window(reader: &mut Reader<'_>) -> Result<Window, Malformed> {
@@ -222,6 +226,9 @@ fn take_window(reader: &mut Reader<'_>) -> Result<Window, Malformed> {
         zoomed: reader.take_bool()?,
         bell: reader.take_bool()?,
         monitor: take_monitor(reader)?,
+        layout: take_optional_u32(reader)?
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| Layout::ALL.get(index).copied()),
     })
 }
 

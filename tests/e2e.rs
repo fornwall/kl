@@ -1352,8 +1352,9 @@ fn breaks_a_pane_out_to_its_own_window() {
     screen.prefix("!");
     screen.wait_for_text("1:sh*");
     assert_eq!(pane_list(&screen), "0.0 %0 0.1 %1* 1.0 %2* ");
-    let windows = output_of(&screen, &["list-windows", "-F", "#I:#W#F"]);
-    assert_eq!(windows, "0:sh-\n1:sh*\n");
+    // Without names, which change while the shells are starting up.
+    let windows = output_of(&screen, &["list-windows", "-F", "#I#F"]);
+    assert_eq!(windows, "0-\n1*\n");
 }
 
 #[test]
@@ -1362,8 +1363,12 @@ fn break_pane_can_name_the_window_and_stay() {
     let args = ["break-pane", "-d", "-n", "logs", "-s", ":.1", "-t", "7"];
     assert!(screen.command(&args).status.success());
     assert_eq!(
-        output_of(&screen, &["list-windows", "-F", "#I:#W#F"]),
-        "0:sh*\n7:logs\n"
+        output_of(&screen, &["list-windows", "-F", "#I#F"]),
+        "0*\n7\n"
+    );
+    assert_eq!(
+        output_of(&screen, &["display-message", "-t", ":7", "-p", "#W"]),
+        "logs\n"
     );
 }
 
@@ -1491,6 +1496,150 @@ fn the_mark_goes_with_its_pane() {
     screen.wait_for_text("0:sh*M");
     assert!(screen.command(&["kill-pane"]).status.success());
     screen.wait_for_no_text("*M");
+}
+
+/// Where each pane is and how big it is.
+fn pane_rects(screen: &Screen) -> String {
+    let format = "#D #{pane_left},#{pane_top} #{pane_width}x#{pane_height}";
+    output_of(screen, &["list-panes", "-F", format]).replace('\n', " ")
+}
+
+fn wait_for_pane_rects(screen: &Screen, wanted: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    while pane_rects(screen) != wanted {
+        assert!(Instant::now() < deadline, "{}", pane_rects(screen));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn space_goes_through_the_layouts_like_tmux() {
+    let mut screen = three_panes();
+    screen.prefix(" ");
+    wait_for_pane_rects(&screen, "%0 0,0 26x24 %1 27,0 26x24 %2 54,0 26x24 ");
+    screen.prefix(" ");
+    wait_for_pane_rects(&screen, "%0 0,0 80x8 %1 0,9 80x7 %2 0,17 80x7 ");
+    screen.prefix(" ");
+    wait_for_pane_rects(&screen, "%0 0,0 80x22 %1 0,23 40x1 %2 41,23 39x1 ");
+}
+
+#[test]
+fn the_pane_that_is_main_stays_main_past_a_mirrored_layout() {
+    let screen = three_panes();
+    screen.command(&["select-layout", "main-vertical-mirrored"]);
+    assert_eq!(
+        pane_rects(&screen),
+        "%1 0,0 1x12 %2 0,13 1x11 %0 2,0 78x24 "
+    );
+    screen.command(&["select-layout", "main-horizontal"]);
+    assert_eq!(
+        pane_rects(&screen),
+        "%0 0,0 80x22 %1 0,23 40x1 %2 41,23 39x1 "
+    );
+}
+
+#[test]
+fn alt_keys_pick_layouts() {
+    let mut screen = three_panes();
+    let alt_2 = screen.key_bytes(ghostty_key('2'), MOD_ALT, "", u32::from('2'));
+    let mut keys = screen.ctrl_b_bytes();
+    keys.extend_from_slice(&alt_2);
+    screen.send_bytes(&keys);
+    wait_for_pane_rects(&screen, "%0 0,0 80x8 %1 0,9 80x7 %2 0,17 80x7 ");
+}
+
+#[test]
+fn previous_layout_goes_back_and_wraps_around() {
+    let screen = three_panes();
+    assert!(screen.command(&["previous-layout"]).status.success());
+    assert_eq!(
+        pane_rects(&screen),
+        "%0 0,0 39x11 %1 40,0 40x11 %2 0,12 80x12 "
+    );
+}
+
+#[test]
+fn select_layout_goes_by_the_start_of_a_name_and_applies_again() {
+    let screen = three_panes();
+    assert!(
+        screen
+            .command(&["select-layout", "even-v"])
+            .status
+            .success()
+    );
+    let even = pane_rects(&screen);
+    assert!(screen.command(&["resize-pane", "-U", "2"]).status.success());
+    assert_ne!(pane_rects(&screen), even);
+    assert!(screen.command(&["select-layout"]).status.success());
+    assert_eq!(pane_rects(&screen), even);
+    assert_eq!(
+        error_of(&screen, &["select-layout", "main"]),
+        "kl: malformed layout header: main\n"
+    );
+}
+
+#[test]
+fn a_layout_keeps_its_proportions_when_the_window_changes_size() {
+    let mut screen = three_panes();
+    screen.command(&["select-layout", "even-horizontal"]);
+    screen.resize(160, 25);
+    wait_for_pane_rects(&screen, "%0 0,0 52x24 %1 53,0 53x24 %2 107,0 53x24 ");
+}
+
+#[test]
+fn a_layout_ends_a_zoom() {
+    let mut screen = three_panes();
+    screen.prefix("z");
+    screen.wait_for_text("*Z");
+    screen.command(&["select-layout", "tiled"]);
+    screen.wait_for_no_text("*Z");
+}
+
+#[test]
+fn layouts_survive_a_restart() {
+    let screen = three_panes();
+    screen.command(&["select-layout", "tiled"]);
+    let before = pane_rects(&screen);
+    assert!(screen.command(&["restart-server"]).status.success());
+    assert_eq!(pane_rects(&screen), before);
+    // It still knows which one it is at.
+    assert!(screen.command(&["next-layout"]).status.success());
+    assert_eq!(
+        pane_rects(&screen),
+        "%0 0,0 26x24 %1 27,0 26x24 %2 54,0 26x24 "
+    );
+}
+
+#[test]
+fn spreads_panes_out_evenly() {
+    let mut screen = Screen::new(80, 25);
+    screen.command(&["split-window", "-h"]);
+    screen.command(&["split-window", "-h"]);
+    assert_eq!(
+        pane_rects(&screen),
+        "%0 0,0 40x24 %1 41,0 19x24 %2 61,0 19x24 "
+    );
+    screen.prefix("E");
+    wait_for_pane_rects(&screen, "%0 0,0 26x24 %1 27,0 26x24 %2 54,0 26x24 ");
+}
+
+#[test]
+fn rotates_panes_through_their_places() {
+    let screen = three_panes();
+    screen.command(&["select-pane", "-t", "1"]);
+    assert!(screen.command(&["rotate-window"]).status.success());
+    assert_eq!(pane_list(&screen), "0.0 %1 0.1 %2* 0.2 %0 ");
+    assert!(screen.command(&["rotate-window", "-D"]).status.success());
+    assert!(screen.command(&["rotate-window", "-D"]).status.success());
+    assert_eq!(pane_list(&screen), "0.0 %2 0.1 %0* 0.2 %1 ");
+}
+
+#[test]
+fn control_o_rotates() {
+    let mut screen = three_panes();
+    screen.ctrl('b');
+    screen.ctrl('o');
+    wait_for_pane_list(&screen, "0.0 %1 0.1 %2 0.2 %0* ");
 }
 
 #[test]

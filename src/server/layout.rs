@@ -55,6 +55,191 @@ pub enum Node {
     },
 }
 
+/// tmux's preset layouts, in the order `next-layout` goes through them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    EvenHorizontal,
+    EvenVertical,
+    MainHorizontal,
+    MainHorizontalMirrored,
+    MainVertical,
+    MainVerticalMirrored,
+    Tiled,
+}
+
+/// What the main pane gets, which are tmux's defaults for `main-pane-width` and
+/// `main-pane-height`.
+const MAIN_PANE_WIDTH: u16 = 80;
+const MAIN_PANE_HEIGHT: u16 = 24;
+
+impl Layout {
+    pub const ALL: [Self; 7] = [
+        Self::EvenHorizontal,
+        Self::EvenVertical,
+        Self::MainHorizontal,
+        Self::MainHorizontalMirrored,
+        Self::MainVertical,
+        Self::MainVerticalMirrored,
+        Self::Tiled,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::EvenHorizontal => "even-horizontal",
+            Self::EvenVertical => "even-vertical",
+            Self::MainHorizontal => "main-horizontal",
+            Self::MainHorizontalMirrored => "main-horizontal-mirrored",
+            Self::MainVertical => "main-vertical",
+            Self::MainVerticalMirrored => "main-vertical-mirrored",
+            Self::Tiled => "tiled",
+        }
+    }
+
+    /// The layout of a name, or of the start of only one name.
+    pub fn find(name: &str) -> Option<Self> {
+        let exact = Self::ALL.into_iter().find(|layout| layout.name() == name);
+        let mut started = Self::ALL
+            .iter()
+            .filter(|layout| layout.name().starts_with(name));
+        exact.or_else(|| {
+            let first = started.next().copied();
+            first.filter(|_| started.next().is_none())
+        })
+    }
+
+    /// The layout after this one, or before it, which wraps around.
+    pub fn step(self, forward: bool) -> Self {
+        let count = Self::ALL.len();
+        let position = Self::ALL.iter().position(|layout| *layout == self);
+        let step = if forward { 1 } else { count - 1 };
+        let position = position.map_or(0, |position| (position + step) % count);
+        Self::ALL.get(position).copied().unwrap_or(self)
+    }
+
+    /// Whether the pane that tmux keeps first ends up last here.
+    pub const fn is_mirrored(self) -> bool {
+        matches!(
+            self,
+            Self::MainHorizontalMirrored | Self::MainVerticalMirrored
+        )
+    }
+
+    /// Arranges panes in this layout. There has to be at least one.
+    pub fn arrange(self, panes: &[PaneId], area: Rect) -> Option<Node> {
+        let (horizontal, vertical) = (SplitKind::Horizontal, SplitKind::Vertical);
+        match self {
+            Self::EvenHorizontal => line_of_panes(panes, horizontal, area),
+            Self::EvenVertical => line_of_panes(panes, vertical, area),
+            Self::MainHorizontal => main_and_others(panes, vertical, area, false),
+            Self::MainHorizontalMirrored => main_and_others(panes, vertical, area, true),
+            Self::MainVertical => main_and_others(panes, horizontal, area, false),
+            Self::MainVerticalMirrored => main_and_others(panes, horizontal, area, true),
+            Self::Tiled => tiled(panes, area),
+        }
+    }
+}
+
+/// The sizes of children of the same size, where the first ones get what does
+/// not divide evenly.
+fn even_shares(length: u16, count: usize) -> Vec<u32> {
+    let count = u32::try_from(count).unwrap_or(u32::MAX);
+    let space = u32::from(length).saturating_sub(count.saturating_sub(1));
+    let each = space.checked_div(count).unwrap_or(0);
+    let extra = space.checked_rem(count).unwrap_or(0);
+    (0..count)
+        .map(|index| (each + u32::from(index < extra)).max(1))
+        .collect()
+}
+
+/// Panes one after the other, of even sizes.
+fn line_of_panes(panes: &[PaneId], kind: SplitKind, area: Rect) -> Option<Node> {
+    match panes {
+        [] => None,
+        [only] => Some(Node::Leaf(*only)),
+        panes => Some(Node::Split {
+            kind,
+            shares: even_shares(area.extent(kind), panes.len()),
+            children: panes.iter().copied().map(Node::Leaf).collect(),
+        }),
+    }
+}
+
+/// The first pane with the others in a line next to it, which comes first when
+/// mirrored. The main pane gets what it wants, leaving a cell for the others.
+fn main_and_others(panes: &[PaneId], kind: SplitKind, area: Rect, mirrored: bool) -> Option<Node> {
+    let (main, others) = panes.split_first()?;
+    let (wanted, others_kind) = match kind {
+        SplitKind::Horizontal => (MAIN_PANE_WIDTH, SplitKind::Vertical),
+        SplitKind::Vertical => (MAIN_PANE_HEIGHT, SplitKind::Horizontal),
+    };
+    let Some(others) = line_of_panes(others, others_kind, area) else {
+        return Some(Node::Leaf(*main));
+    };
+    let length = area.extent(kind);
+    let main_size = wanted.min(length.saturating_sub(2));
+    let others_size = length.saturating_sub(main_size).saturating_sub(1);
+    let (main_size, others_size) = (u32::from(main_size), u32::from(others_size));
+    let main = Node::Leaf(*main);
+    Some(if mirrored {
+        Node::Split {
+            kind,
+            shares: vec![others_size, main_size],
+            children: vec![others, main],
+        }
+    } else {
+        Node::Split {
+            kind,
+            shares: vec![main_size, others_size],
+            children: vec![main, others],
+        }
+    })
+}
+
+/// How long the cells of a grid are along a line of `length` cells, for `count`
+/// of them. What does not divide evenly goes to the last one.
+fn grid_shares(length: u16, count: usize, cells: usize) -> Vec<u32> {
+    let columns = u32::try_from(cells).unwrap_or(u32::MAX).max(1);
+    let length = u32::from(length);
+    let size = (length.saturating_sub(columns - 1) / columns).max(1);
+    let mut shares = vec![size; count];
+    let used = u32::try_from(count).unwrap_or(0) * (size + 1) - 1;
+    if let Some(last) = shares.last_mut() {
+        *last += length.saturating_sub(used);
+    }
+    shares
+}
+
+/// A grid, filled up row by row. A single pane in a row gets all of it.
+fn tiled(panes: &[PaneId], area: Rect) -> Option<Node> {
+    if panes.len() < 2 {
+        return panes.first().copied().map(Node::Leaf);
+    }
+    let (mut rows, mut columns) = (1, 1);
+    while rows * columns < panes.len() {
+        rows += 1;
+        if rows * columns < panes.len() {
+            columns += 1;
+        }
+    }
+    let row = |panes: &[PaneId]| match panes {
+        [only] => Node::Leaf(*only),
+        panes => Node::Split {
+            kind: SplitKind::Horizontal,
+            shares: grid_shares(area.width, panes.len(), columns),
+            children: panes.iter().copied().map(Node::Leaf).collect(),
+        },
+    };
+    let mut children: Vec<Node> = panes.chunks(columns).map(row).collect();
+    if let [only] = children.as_mut_slice() {
+        return Some(std::mem::replace(only, Node::Leaf(0)));
+    }
+    Some(Node::Split {
+        kind: SplitKind::Vertical,
+        shares: grid_shares(area.height, children.len(), rows),
+        children,
+    })
+}
+
 /// A line between two children of a split.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Divider {
@@ -345,6 +530,52 @@ impl Node {
                     .iter_mut()
                     .zip(areas)
                     .any(|(child, area)| child.split(target, new, place, area))
+            }
+        }
+    }
+
+    /// Evens out the split a pane is in, or the nearest one above it that this
+    /// makes a difference for. Returns whether it made one anywhere.
+    pub fn spread(&mut self, pane: PaneId, area: Rect) -> bool {
+        let Self::Split {
+            kind,
+            shares,
+            children,
+        } = self
+        else {
+            return false;
+        };
+        let Some(position) = children.iter().position(|child| child.contains(pane)) else {
+            return false;
+        };
+        let areas = child_areas(area, *kind, shares);
+        let child_area = areas.get(position).copied().unwrap_or(area);
+        if children
+            .get_mut(position)
+            .is_some_and(|child| child.spread(pane, child_area))
+        {
+            return true;
+        }
+        let length = area.extent(*kind);
+        let even = even_shares(length, children.len());
+        let sizes = divide(length, shares);
+        let changed = sizes
+            .iter()
+            .copied()
+            .map(u32::from)
+            .ne(even.iter().copied());
+        *shares = even;
+        changed
+    }
+
+    /// Puts panes in the place of what is here, in order.
+    pub fn fill(&mut self, panes: &mut impl Iterator<Item = PaneId>) {
+        match self {
+            Self::Leaf(id) => *id = panes.next().unwrap_or(*id),
+            Self::Split { children, .. } => {
+                for child in children {
+                    child.fill(panes);
+                }
             }
         }
     }
@@ -727,6 +958,244 @@ mod tests {
         node.place(2, 3, place, area);
         assert_eq!(node.dividers(area).len(), 2);
         assert_eq!(node.panes(area)[0], (3, rect(0, 0, 40, 24)));
+    }
+
+    const FIVE: [PaneId; 5] = [1, 2, 3, 4, 5];
+
+    fn arranged(layout: Layout, area: Rect) -> Vec<Rect> {
+        let node = layout.arrange(&FIVE, area).unwrap();
+        let panes = node.panes(area);
+        // The main pane is last in a mirrored layout, and first in tmux's list.
+        let ids: Vec<PaneId> = panes.iter().map(|(id, _)| *id).collect();
+        let main_first = if layout.is_mirrored() {
+            [2, 3, 4, 5, 1]
+        } else {
+            FIVE
+        };
+        assert_eq!(ids, main_first);
+        panes.iter().map(|(_, rect)| *rect).collect()
+    }
+
+    /// These are what tmux makes of five panes in windows of these sizes.
+    #[test]
+    fn layouts_match_tmux_in_a_small_window() {
+        let area = rect(0, 0, 80, 24);
+        assert_eq!(
+            arranged(Layout::EvenHorizontal, area),
+            [
+                rect(0, 0, 16, 24),
+                rect(17, 0, 15, 24),
+                rect(33, 0, 15, 24),
+                rect(49, 0, 15, 24),
+                rect(65, 0, 15, 24),
+            ]
+        );
+        assert_eq!(
+            arranged(Layout::EvenVertical, area),
+            [
+                rect(0, 0, 80, 4),
+                rect(0, 5, 80, 4),
+                rect(0, 10, 80, 4),
+                rect(0, 15, 80, 4),
+                rect(0, 20, 80, 4),
+            ]
+        );
+        assert_eq!(
+            arranged(Layout::MainHorizontal, area),
+            [
+                rect(0, 0, 80, 22),
+                rect(0, 23, 20, 1),
+                rect(21, 23, 19, 1),
+                rect(41, 23, 19, 1),
+                rect(61, 23, 19, 1),
+            ]
+        );
+        assert_eq!(
+            arranged(Layout::MainVertical, area),
+            [
+                rect(0, 0, 78, 24),
+                rect(79, 0, 1, 6),
+                rect(79, 7, 1, 5),
+                rect(79, 13, 1, 5),
+                rect(79, 19, 1, 5),
+            ]
+        );
+        assert_eq!(
+            arranged(Layout::Tiled, area),
+            [
+                rect(0, 0, 39, 7),
+                rect(40, 0, 40, 7),
+                rect(0, 8, 39, 7),
+                rect(40, 8, 40, 7),
+                rect(0, 16, 80, 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn layouts_match_tmux_in_a_large_window() {
+        let area = rect(0, 0, 200, 50);
+        assert_eq!(
+            arranged(Layout::EvenVertical, area),
+            [
+                rect(0, 0, 200, 10),
+                rect(0, 11, 200, 9),
+                rect(0, 21, 200, 9),
+                rect(0, 31, 200, 9),
+                rect(0, 41, 200, 9),
+            ]
+        );
+        assert_eq!(
+            arranged(Layout::MainHorizontal, area),
+            [
+                rect(0, 0, 200, 24),
+                rect(0, 25, 50, 25),
+                rect(51, 25, 49, 25),
+                rect(101, 25, 49, 25),
+                rect(151, 25, 49, 25),
+            ]
+        );
+        assert_eq!(
+            arranged(Layout::MainVertical, area),
+            [
+                rect(0, 0, 80, 50),
+                rect(81, 0, 119, 12),
+                rect(81, 13, 119, 12),
+                rect(81, 26, 119, 12),
+                rect(81, 39, 119, 11),
+            ]
+        );
+        assert_eq!(
+            arranged(Layout::Tiled, area),
+            [
+                rect(0, 0, 99, 16),
+                rect(100, 0, 100, 16),
+                rect(0, 17, 99, 16),
+                rect(100, 17, 100, 16),
+                rect(0, 34, 200, 16),
+            ]
+        );
+    }
+
+    #[test]
+    fn mirrored_layouts_have_the_main_pane_on_the_other_side() {
+        let area = rect(0, 0, 200, 50);
+        assert_eq!(
+            arranged(Layout::MainHorizontalMirrored, area),
+            [
+                rect(0, 0, 50, 25),
+                rect(51, 0, 49, 25),
+                rect(101, 0, 49, 25),
+                rect(151, 0, 49, 25),
+                rect(0, 26, 200, 24),
+            ]
+        );
+        assert_eq!(
+            arranged(Layout::MainVerticalMirrored, area),
+            [
+                rect(0, 0, 119, 12),
+                rect(0, 13, 119, 12),
+                rect(0, 26, 119, 12),
+                rect(0, 39, 119, 11),
+                rect(120, 0, 80, 50),
+            ]
+        );
+    }
+
+    #[test]
+    fn tiles_a_full_grid() {
+        let area = rect(0, 0, 80, 24);
+        let node = Layout::Tiled.arrange(&[1, 2, 3, 4], area).unwrap();
+        assert_eq!(
+            node.panes(area),
+            [
+                (1, rect(0, 0, 39, 11)),
+                (2, rect(40, 0, 40, 11)),
+                (3, rect(0, 12, 39, 12)),
+                (4, rect(40, 12, 40, 12)),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_layout_works_for_any_number_of_panes_in_any_window() {
+        let panes: Vec<PaneId> = (0..12).collect();
+        for layout in Layout::ALL {
+            assert_eq!(layout.arrange(&[], AREA), None);
+            assert_eq!(layout.arrange(&[7], AREA), Some(Node::Leaf(7)));
+            for count in 2..panes.len() {
+                for area in [AREA, rect(0, 0, 3, 3), rect(0, 0, 0, 0), rect(0, 0, 1, 40)] {
+                    let node = layout.arrange(&panes[..count], area).unwrap();
+                    assert_eq!(node.panes(area).len(), count, "{layout:?}");
+                }
+                let node = layout.arrange(&panes[..count], AREA).unwrap();
+                // Every cell belongs to exactly one pane or divider.
+                let rects = node.panes(AREA);
+                let dividers = node.dividers(AREA);
+                for y in 0..AREA.height {
+                    for x in 0..AREA.width {
+                        let owners = rects.iter().filter(|(_, r)| r.contains(x, y)).count()
+                            + dividers.iter().filter(|d| d.line.contains(x, y)).count();
+                        assert!(owners >= 1, "({x},{y}) of {layout:?} with {count} panes");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finds_layouts_by_the_start_of_their_names() {
+        assert_eq!(Layout::find("tiled"), Some(Layout::Tiled));
+        assert_eq!(Layout::find("even-v"), Some(Layout::EvenVertical));
+        assert_eq!(Layout::find("main-vertical"), Some(Layout::MainVertical));
+        assert_eq!(Layout::find("main-v"), None);
+        assert_eq!(Layout::find("main"), None);
+        assert_eq!(Layout::find("foo"), None);
+    }
+
+    #[test]
+    fn steps_through_layouts_in_the_order_of_tmux() {
+        assert_eq!(Layout::EvenHorizontal.step(true), Layout::EvenVertical);
+        assert_eq!(Layout::Tiled.step(true), Layout::EvenHorizontal);
+        assert_eq!(Layout::EvenHorizontal.step(false), Layout::Tiled);
+    }
+
+    #[test]
+    fn spreading_evens_out_the_split_of_a_pane() {
+        let mut node = row();
+        assert!(node.spread(2, AREA));
+        assert_eq!(widths(&node), [27, 26, 26]);
+        assert!(!node.spread(2, AREA));
+    }
+
+    #[test]
+    fn spreading_goes_up_when_there_is_nothing_to_do_where_it_starts() {
+        let area = rect(0, 0, 80, 24);
+        let mut node = Node::Split {
+            kind: SplitKind::Horizontal,
+            shares: vec![10, 69],
+            children: vec![
+                Node::Split {
+                    kind: SplitKind::Vertical,
+                    shares: vec![12, 11],
+                    children: vec![Node::Leaf(1), Node::Leaf(2)],
+                },
+                Node::Leaf(3),
+            ],
+        };
+        assert!(node.spread(1, area));
+        assert_eq!(node.panes(area)[2].1.width, 39);
+    }
+
+    #[test]
+    fn fills_the_places_in_a_layout() {
+        let mut node = three_panes();
+        let before = node.panes(AREA);
+        node.fill(&mut [3, 1, 2].into_iter());
+        let after = node.panes(AREA);
+        assert_eq!(after[0], (3, before[0].1));
+        assert_eq!(after[1], (1, before[1].1));
+        assert_eq!(after[2], (2, before[2].1));
     }
 
     #[test]

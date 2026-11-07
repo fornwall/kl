@@ -67,6 +67,12 @@ each target has been verified.
   under the cursor. Searching ignores case and takes the text literally, where
   tmux takes a regular expression. Relative paths for `save-buffer` and
   `load-buffer` go by the active pane's directory, not the client's.
+- **Panes are numbered by where they are.** tmux keeps its own order, which
+  matters in the mirrored layouts: the main pane is number 0 there, and the last
+  one here. Which pane is the main one still carries over between layouts.
+- **Formats cover what people actually use.** That is variables, conditions,
+  comparisons and common modifiers. `s/from/to/` replaces plain text rather than
+  a regular expression, and there is no `#()`, `#[]` or looping over windows.
 - **Programs cannot read the clipboard.** They can write to it, but who should be
   allowed to read it is undecided, so OSC 52 queries get no answer.
 - **`restart-server` has some rough edges:**

@@ -221,6 +221,11 @@ pub enum Command {
         print: Option<String>,
         program: Vec<String>,
     },
+    /// Goes to the next or previous preset layout.
+    NextLayout {
+        target: Target,
+        forward: bool,
+    },
     NextWindow {
         /// The next one with a bell or activity.
         alert: bool,
@@ -237,8 +242,18 @@ pub enum Command {
         direction: Direction,
         cells: u16,
     },
+    /// Moves every pane to the place of the next one, or the previous with `down`.
+    RotateWindow {
+        target: Target,
+        down: bool,
+    },
     /// Replaces the server with this binary, or the one it is running from.
     RestartServer(Option<PathBuf>),
+    /// Applies a layout, or again the one applied last.
+    SelectLayout {
+        target: Target,
+        name: Option<String>,
+    },
     SelectPane {
         target: Target,
         /// Go from the target this way, rather than to the target itself.
@@ -270,6 +285,10 @@ pub enum Command {
         /// A format for telling about the new pane.
         print: Option<String>,
         program: Vec<String>,
+    },
+    /// Evens out the split a pane is in.
+    SpreadLayout {
+        target: Target,
     },
     /// Puts two panes in each other's place. With a direction, that is the
     /// target and the pane before or after it.
@@ -317,13 +336,17 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "list-windows" | "lsw" => parse_list_windows(args),
         "load-buffer" | "loadb" => parse_load_buffer(args),
         "new-window" | "neww" => parse_new_window(args),
+        "next-layout" | "nextl" => parse_step_layout("next-layout", args, true),
         "next-window" | "next" => parse_next_window(args),
         "paste-buffer" | "pasteb" => parse_paste_buffer(args),
+        "previous-layout" | "prevl" => parse_step_layout("previous-layout", args, false),
         "previous-window" | "prev" => parse_previous_window(args),
         "rename-window" | "renamew" => parse_rename_window(args),
         "resize-pane" | "resizep" => parse_resize_pane(args),
         "restart-server" => parse_restart_server(args),
+        "rotate-window" | "rotatew" => parse_rotate_window(args),
         "save-buffer" | "saveb" => parse_save_buffer(args),
+        "select-layout" | "selectl" => parse_select_layout(args),
         "select-pane" | "selectp" => parse_select_pane(args),
         "select-window" | "selectw" => parse_select_window(args),
         "send-keys" | "send" => parse_send_keys(args),
@@ -695,6 +718,47 @@ fn parse_new_window(args: &[String]) -> Result<Command, String> {
     })
 }
 
+fn parse_step_layout(
+    name: &'static str,
+    args: &[String],
+    forward: bool,
+) -> Result<Command, String> {
+    let flags = Flags::parse(name, args, "t:")?;
+    flags.at_most(0)?;
+    Ok(Command::NextLayout {
+        target: flags.value('t'),
+        forward,
+    })
+}
+
+fn parse_rotate_window(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("rotate-window", args, "Dt:UZ")?;
+    flags.at_most(0)?;
+    Ok(Command::RotateWindow {
+        target: flags.value('t'),
+        down: flags.has('D'),
+    })
+}
+
+fn parse_select_layout(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("select-layout", args, "Enpt:")?;
+    flags.at_most(1)?;
+    let target = flags.value('t');
+    Ok(if flags.has('E') {
+        Command::SpreadLayout { target }
+    } else if flags.has('n') || flags.has('p') {
+        Command::NextLayout {
+            target,
+            forward: flags.has('n'),
+        }
+    } else {
+        Command::SelectLayout {
+            target,
+            name: flags.rest.first().cloned(),
+        }
+    })
+}
+
 fn parse_next_window(args: &[String]) -> Result<Command, String> {
     let flags = Flags::parse("next-window", args, "a")?;
     flags.at_most(0)?;
@@ -965,6 +1029,39 @@ mod tests {
         assert_eq!(Size::Percent(30).cells(10), 3);
         assert_eq!(Size::Percent(100).cells(80), 80);
         assert_eq!(Size::Percent(u16::MAX).cells(u16::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn parses_layouts() {
+        assert_eq!(
+            command("select-layout -t 1 tiled"),
+            Command::SelectLayout {
+                target: Some("1".to_owned()),
+                name: Some("tiled".to_owned()),
+            }
+        );
+        assert_eq!(
+            command("selectl"),
+            Command::SelectLayout {
+                target: None,
+                name: None,
+            }
+        );
+        assert_eq!(
+            command("select-layout -E"),
+            Command::SpreadLayout { target: None }
+        );
+        assert_eq!(command("select-layout -n"), command("next-layout"));
+        assert_eq!(command("selectl -p"), command("previous-layout"));
+        assert_eq!(command("nextl"), command("next-layout"));
+        assert_eq!(command("prevl"), command("previous-layout"));
+        assert_eq!(
+            command("rotate-window -D -t 2"),
+            Command::RotateWindow {
+                target: Some("2".to_owned()),
+                down: true,
+            }
+        );
     }
 
     #[test]

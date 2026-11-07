@@ -9,7 +9,7 @@ use super::copy_mode::{
 };
 use super::format::Context;
 use super::keys;
-use super::layout::{Divider, PaneId};
+use super::layout::{Divider, Layout, PaneId};
 use super::pane::Pane;
 use super::session::{Monitor, Window};
 use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
@@ -713,6 +713,10 @@ impl Server {
                 )?;
                 return Ok(self.tell_about(id, print.as_deref()));
             }
+            Command::NextLayout { target, forward } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.step_layout(id, forward);
+            }
             Command::NextWindow { alert } => {
                 if !self.session.next_window(alert) {
                     return Err("no next window".to_owned());
@@ -739,6 +743,14 @@ impl Server {
                 self.session.resize_pane(id, direction, cells);
             }
             Command::RestartServer(binary) => self.restart(binary)?,
+            Command::RotateWindow { target, down } => {
+                let index = self.session.find_window(target.as_deref())?;
+                self.session.rotate_window(index, down);
+            }
+            Command::SelectLayout { target, name } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.select_layout(id, name.as_deref())?;
+            }
             Command::SelectPane { target, direction } => {
                 let id = self.session.find_pane(target.as_deref())?;
                 match direction {
@@ -796,6 +808,15 @@ impl Server {
                         .split(target, place, &program, directory.as_deref(), detached)?;
                 return Ok(self.tell_about(id, print.as_deref()));
             }
+            Command::SpreadLayout { target } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                let area = self.session.area();
+                if let Some(window) = self.session.window_of_mut(id) {
+                    window.zoomed = false;
+                    window.root.spread(id, area);
+                    self.session.relayout();
+                }
+            }
             Command::SwapPane {
                 source,
                 target,
@@ -820,6 +841,37 @@ impl Server {
             }
         }
         Ok(String::new())
+    }
+
+    fn step_layout(&mut self, id: PaneId, forward: bool) {
+        if let Some(window) = self.session.window_of(id) {
+            let index = window.index;
+            let last = Layout::ALL.last().copied();
+            let first = Layout::ALL.first().copied();
+            let from_nothing = if forward { first } else { last };
+            let layout = window.layout.map(|layout| layout.step(forward));
+            if let Some(layout) = layout.or(from_nothing) {
+                self.session.select_layout(index, layout);
+            }
+        }
+    }
+
+    /// Applies the layout of a name, or else the one applied last.
+    fn select_layout(&mut self, id: PaneId, name: Option<&str>) -> Result<(), String> {
+        let Some(window) = self.session.window_of(id) else {
+            return Ok(());
+        };
+        let index = window.index;
+        let layout = match name {
+            Some(name) => {
+                Some(Layout::find(name).ok_or_else(|| format!("malformed layout header: {name}"))?)
+            }
+            None => window.layout,
+        };
+        if let Some(layout) = layout {
+            self.session.select_layout(index, layout);
+        }
+        Ok(())
     }
 
     /// What `-c` says, which is a format.

@@ -11,7 +11,9 @@ The first iteration has the core of tmux, with no configuration:
 - A background server that keeps panes running, with a client that attaches to
   it. Starting `kl` attaches, creating the session if needed.
 - Windows and panes: creating, closing, switching, renaming, splitting, zooming,
-  resizing, with the status line and tmux's default keys on the `C-b` prefix.
+  resizing, swapping, moving between windows and tmux's layouts, with the status
+  line and tmux's default keys on the `C-b` prefix.
+- tmux's `-t` targets and formats, for scripts as much as for people.
 - Copy mode with tmux's vi keys, search and paste buffers, the `:` prompt, and
   the same commands from the command line.
 - Upgrading without losing anything: `restart-server` turns the server into a new
@@ -66,7 +68,9 @@ Before adding much more, close the gaps in the table above.
 What is missing for daily use compared with tmux.
 
 - A preview in the list of `C-b w`, and going down to panes there, as in tmux.
-- `C-b Space` and layouts such as even-horizontal, tiled and main-vertical.
+- `select-layout -o` and layouts in tmux's own notation, including
+  `#{window_layout}`. `main-pane-width` and the like are fixed at their defaults
+  for lack of settings.
 
 ### 4. Copy mode
 

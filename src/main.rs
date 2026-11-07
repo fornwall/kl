@@ -49,6 +49,12 @@ Panes:
   swap-pane (swapp) [-dDU] [-s pane] [-t pane]  swap two panes
   break-pane (breakp) [-d] [-n name] [-P [-F format]] [-s pane] [-t index]
   join-pane (joinp, move-pane, movep) [-bdfhv] [-l size] [-s pane] [-t pane]
+  select-layout (selectl) [-Enp] [-t pane] [layout]  even-horizontal,
+                                              even-vertical, main-horizontal,
+                                              main-vertical, tiled and the
+                                              -mirrored main ones
+  next-layout (nextl), previous-layout (prevl) [-t pane]
+  rotate-window (rotatew) [-D] [-t window]    move every pane on one place
   kill-pane (killp) [-a] [-t pane]
   list-panes (lsp) [-as] [-F format] [-f filter] [-t window]
   display-panes (displayp) [-d ms]            show the number of each pane
@@ -75,7 +81,7 @@ Commands run in a pane are about that pane by default. Formats are tmux's, such
 as #{window_name} or #W, with conditions, comparisons and the usual modifiers.
 
 Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , & for windows,
-% \" o ; q z x { } ! m M arrows for panes, [ ] # = - for copying and paste buffers, : for
+% \" o ; q z x { } ! m M Space E C-o M-o M-1..7 arrows for panes, [ ] # = - for copying and paste buffers, : for
 commands, ? to list the keys and d to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a
 second, so that C-b C-Up C-Up resizes twice.

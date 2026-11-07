@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::layout::{self, Node, PaneId, Rect};
+use super::layout::{self, Layout, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
 use crate::command::{Direction, Place};
 use crate::ghostty::{DEFAULT_POINTER_SHAPE, Link, MODE_SGR_PIXELS, OuterColors, Progress};
@@ -26,6 +26,8 @@ pub struct Window {
     /// A pane rang the bell while this window was not being looked at.
     pub bell: bool,
     pub monitor: Monitor,
+    /// The preset layout applied last.
+    pub layout: Option<Layout>,
 }
 
 /// Whether output in a window is flagged, as tmux's `monitor-activity`.
@@ -40,6 +42,19 @@ pub enum Monitor {
 impl Window {
     pub fn has_activity(&self) -> bool {
         self.monitor == Monitor::Flagged
+    }
+
+    /// The panes in the order that layouts place them. A mirrored layout has the
+    /// main pane at the end, where tmux keeps it in front wherever it is drawn.
+    fn layout_order(&self, area: Rect) -> Vec<PaneId> {
+        let mut panes: Vec<PaneId> = self.root.panes(area).iter().map(|pane| pane.0).collect();
+        if self.layout.is_some_and(Layout::is_mirrored)
+            && let Node::Split { children, .. } = &self.root
+            && let Some(main) = children.last()
+        {
+            panes.rotate_right(main.panes(area).len());
+        }
+        panes
     }
 
     /// The panes on display in the given area.
@@ -363,6 +378,7 @@ impl Session {
             zoomed: false,
             bell: false,
             monitor: Monitor::Off,
+            layout: None,
         };
         self.next_window += 1;
         let position = self.windows.partition_point(|w| w.index < index);
@@ -628,6 +644,7 @@ impl Session {
                 zoomed: false,
                 bell: false,
                 monitor: Monitor::Off,
+                layout: None,
             };
             self.next_window += 1;
             window
@@ -679,6 +696,43 @@ impl Session {
         }
         self.relayout();
         Ok(())
+    }
+
+    /// Applies a preset layout to a window.
+    pub fn select_layout(&mut self, index: u32, layout: Layout) {
+        let area = self.area();
+        if let Some(window) = self.window_at_mut(index) {
+            let panes = window.layout_order(area);
+            if let Some(root) = layout.arrange(&panes, area) {
+                window.root = root;
+                window.layout = Some(layout);
+                window.zoomed = false;
+                self.relayout();
+            }
+        }
+    }
+
+    /// Moves every pane on to the next place in its window, where the active
+    /// place stays the active one.
+    pub fn rotate_window(&mut self, index: u32, down: bool) {
+        let area = self.area();
+        let before = self.active_id();
+        if let Some(window) = self.window_at_mut(index) {
+            let mut panes: Vec<PaneId> = window.root.panes(area).iter().map(|p| p.0).collect();
+            let active = panes.iter().position(|id| *id == window.active);
+            if down {
+                panes.rotate_right(1);
+            } else {
+                panes.rotate_left(1);
+            }
+            window.root.fill(&mut panes.iter().copied());
+            window.active = active
+                .and_then(|active| panes.get(active).copied())
+                .unwrap_or(window.active);
+            window.zoomed = false;
+        }
+        self.report_focus_change(before);
+        self.relayout();
     }
 
     /// Makes a pane active, showing it if its window is zoomed in on another.
