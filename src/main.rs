@@ -47,6 +47,7 @@ Panes:
   resize-pane (resizep) -Z                    toggle zoom
   kill-pane (killp)                           close the active pane
   list-panes (lsp)                            list panes in the window
+  display-panes (displayp) [-d ms]            show the number of each pane
 
 Other:
   list-keys (lsk) [-N]                        list the keys after the prefix
@@ -57,7 +58,7 @@ Other:
   copy-mode [-u], paste-buffer (pasteb), display-message (display) text
 
 Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , & for windows,
-% \" o ; z x arrows for panes, [ ] for copying, : for commands, ? to list the
+% \" o ; q z x arrows for panes, [ ] for copying, : for commands, ? to list the
 keys and d to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a
 second, so that C-b C-Up C-Up resizes twice.

@@ -12,8 +12,24 @@ use crate::ghostty::{
 use crate::sys;
 
 const BLACK: u8 = 0;
+const RED: u8 = 1;
 const GREEN: u8 = 2;
 const YELLOW: u8 = 3;
+const BLUE: u8 = 4;
+
+/// The digits of tmux's clock and `display-panes`, five bits for each row.
+const BIG_DIGITS: [[u8; 5]; 10] = [
+    [0b11111, 0b10001, 0b10001, 0b10001, 0b11111],
+    [0b00001, 0b00001, 0b00001, 0b00001, 0b00001],
+    [0b11111, 0b00001, 0b11111, 0b10000, 0b11111],
+    [0b11111, 0b00001, 0b11111, 0b00001, 0b11111],
+    [0b10001, 0b10001, 0b11111, 0b00001, 0b00001],
+    [0b11111, 0b10000, 0b11111, 0b00001, 0b11111],
+    [0b11111, 0b10000, 0b11111, 0b10001, 0b11111],
+    [0b11111, 0b00001, 0b00001, 0b00001, 0b00001],
+    [0b11111, 0b10001, 0b11111, 0b10001, 0b11111],
+    [0b11111, 0b10001, 0b11111, 0b00001, 0b11111],
+];
 
 fn colored(fg: u8, bg: u8) -> Style {
     Style {
@@ -214,6 +230,9 @@ impl Renderer {
             session.repaint = true;
         }
         self.compose(session);
+        if ui.pane_numbers.is_some() {
+            self.draw_pane_numbers(session);
+        }
         if let Some(list) = &ui.list {
             self.draw_list(list, session.area());
         }
@@ -264,6 +283,20 @@ impl Renderer {
             let active = visible.iter().find(|(id, _)| *id == window.active);
             let active = active.map(|(_, rect)| *rect).unwrap_or_default();
             self.draw_borders(&window.root.dividers(session.area()), active);
+        }
+    }
+
+    /// tmux's `display-panes`. The rows come back by repainting when it ends.
+    fn draw_pane_numbers(&mut self, session: &Session) {
+        let Some(window) = session.window() else {
+            return;
+        };
+        let all = window.root.panes(session.area());
+        for (id, rect) in session.visible_panes() {
+            if let Some(number) = all.iter().position(|(pane, _)| *pane == id) {
+                let color = if id == window.active { RED } else { BLUE };
+                draw_pane_number(&mut self.next, rect, number, color);
+            }
         }
     }
 
@@ -493,6 +526,50 @@ fn draw_row(grid: &mut Grid, rect: Rect, y: u16, cells: &[Cell]) {
     }
 }
 
+/// A pane's number in its middle, in big digits if they fit, and its size.
+fn draw_pane_number(grid: &mut Grid, rect: Rect, number: usize, color: u8) {
+    let text = number.to_string();
+    let len = text_width(&text);
+    let (middle_x, middle_y) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+    let foreground = Style {
+        fg: StyleColor::palette(color),
+        ..Style::default()
+    };
+    if rect.width < len * 6 || rect.height < 5 {
+        let x = middle_x.saturating_sub(len / 2);
+        grid.split_wide(x, middle_y);
+        grid.put_str(x, middle_y, &text, foreground, rect.x + rect.width);
+        return;
+    }
+    let block = Cell {
+        style: Style {
+            bg: StyleColor::palette(color),
+            ..Style::default()
+        },
+        ..Cell::default()
+    };
+    let digits = text.chars().filter_map(|c| c.to_digit(10));
+    let (left, top) = (middle_x - len * 3, middle_y - 2);
+    for (digit, digit_x) in digits.zip((left..).step_by(6)) {
+        let rows = usize::try_from(digit).ok().and_then(|d| BIG_DIGITS.get(d));
+        for (bits, y) in rows.into_iter().flatten().zip(top..) {
+            for column in 0..5 {
+                if bits & (0b10000 >> column) != 0 {
+                    grid.split_wide(digit_x + column, y);
+                    grid.set(digit_x + column, y, block.clone());
+                }
+            }
+        }
+    }
+    let size = format!("{}x{}", rect.width, rect.height);
+    let width = text_width(&size);
+    if rect.height > 6 && rect.width >= width {
+        let x = rect.x + rect.width - width;
+        grid.split_wide(x, rect.y);
+        grid.put_str(x, rect.y, &size, foreground, rect.x + rect.width);
+    }
+}
+
 /// tmux's `[offset/history]` in the corner of a pane in copy mode.
 fn draw_position(grid: &mut Grid, rect: Rect, scrollbar: Option<ghostty::Scrollbar>) {
     let Some(scrollbar) = scrollbar else {
@@ -695,6 +772,69 @@ mod tests {
         assert_eq!(border_char([false, false, false, true]), '─');
         assert_eq!(border_char([true, true, true, false]), '┤');
         assert_eq!(border_char([true, true, true, true]), '┼');
+    }
+
+    /// Where a grid has a background color, as text.
+    fn blocks(grid: &Grid) -> Vec<String> {
+        let row = |cells: &[Cell]| {
+            let is_block = |cell: &Cell| cell.style.bg != StyleColor::default();
+            cells
+                .iter()
+                .map(|cell| if is_block(cell) { '#' } else { '.' })
+                .collect()
+        };
+        grid.cells.chunks(usize::from(grid.cols)).map(row).collect()
+    }
+
+    #[test]
+    fn draws_big_pane_numbers_in_the_middle() {
+        let mut grid = Grid::new(11, 5);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 11,
+            height: 5,
+        };
+        draw_pane_number(&mut grid, rect, 2, BLUE);
+        assert_eq!(
+            blocks(&grid),
+            [
+                "..#####....",
+                "......#....",
+                "..#####....",
+                "..#........",
+                "..#####....",
+            ]
+        );
+    }
+
+    #[test]
+    fn small_panes_get_their_number_as_text() {
+        let mut grid = Grid::new(4, 3);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 3,
+        };
+        draw_pane_number(&mut grid, rect, 12, RED);
+        assert_eq!(grid.cells[5].text.as_str(), "1");
+        assert_eq!(grid.cells[6].text.as_str(), "2");
+    }
+
+    #[test]
+    fn tall_enough_panes_show_their_size() {
+        let mut grid = Grid::new(10, 7);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 7,
+        };
+        draw_pane_number(&mut grid, rect, 1, RED);
+        assert_eq!(grid.cells[6].text.as_str(), "1");
+        assert_eq!(grid.cells[7].text.as_str(), "0");
+        assert_eq!(grid.cells[8].text.as_str(), "x");
     }
 
     fn shown_rows(renderer: &Renderer, rows: u16) -> Vec<String> {

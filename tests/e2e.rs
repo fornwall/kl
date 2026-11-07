@@ -757,6 +757,67 @@ fn the_mouse_works_in_the_window_list() {
     screen.wait_for_no_text("(0) 0: a");
 }
 
+/// Two panes side by side, numbered 0 and 1, with the second one active.
+fn numbered_panes() -> Screen {
+    let mut screen = Screen::new(81, 24);
+    screen.prefix("%");
+    screen.wait_for("a border", |lines| lines[5].contains('│'));
+    screen.wait_for("the second prompt", |lines| lines[0].ends_with('$'));
+    screen
+}
+
+#[test]
+fn shows_pane_numbers_and_picks_a_pane_by_one() {
+    let mut screen = numbered_panes();
+    screen.command(&["display-panes", "-d", "0"]);
+    screen.wait_for_text("40x23");
+    screen.type_text("0");
+    screen.wait_for_no_text("40x23");
+    screen.type_text("left");
+    screen.wait_for("the key in the left pane", |lines| {
+        lines[0].starts_with("$ left")
+    });
+}
+
+#[test]
+fn other_keys_end_the_pane_numbers_and_do_what_they_usually_do() {
+    let mut screen = numbered_panes();
+    screen.command(&["display-panes", "-d", "0"]);
+    screen.wait_for_text("40x23");
+    screen.type_text("z");
+    screen.wait_for_no_text("40x23");
+    screen.wait_for("the key in the right pane", |lines| {
+        lines[0].ends_with("$ z")
+    });
+}
+
+#[test]
+fn pane_numbers_go_away_on_their_own() {
+    let mut screen = numbered_panes();
+    screen.prefix("q");
+    let deadline = Instant::now() + TIMEOUT;
+    while !screen.raw_text().contains("40x23") {
+        screen.pump();
+        assert!(Instant::now() < deadline, "no pane numbers");
+    }
+    screen.wait_for_no_text("40x23");
+}
+
+#[test]
+fn picking_a_hidden_pane_by_number_ends_the_zoom() {
+    let mut screen = numbered_panes();
+    screen.prefix("z");
+    screen.wait_for_text("*Z");
+    screen.command(&["display-panes", "-d", "0"]);
+    screen.wait_for_text("81x23");
+    screen.type_text("0");
+    screen.wait_for("the zoom to end", |lines| lines[5].contains('│'));
+    screen.type_text("left");
+    screen.wait_for("the key in the left pane", |lines| {
+        lines[0].starts_with("$ left")
+    });
+}
+
 #[test]
 fn renames_a_window() {
     let mut screen = Screen::new(80, 24);

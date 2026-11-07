@@ -10,6 +10,9 @@ use crate::input::KeyEvent;
 /// How long a message stays on the status line.
 const MESSAGE_TIME: Duration = Duration::from_secs(3);
 
+/// How long pane numbers stay on display, which is tmux's `display-panes-time`.
+const PANE_NUMBERS_TIME: Duration = Duration::from_secs(1);
+
 /// What to do with the text of a finished prompt.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PromptAction {
@@ -210,10 +213,17 @@ impl List {
     }
 }
 
+/// The numbers of `display-panes` on top of the panes.
+pub struct PaneNumbers {
+    /// None if they stay on until a key is pressed.
+    until: Option<Instant>,
+}
+
 #[derive(Default)]
 pub struct Ui {
     pub prompt: Option<Prompt>,
     pub list: Option<List>,
+    pub pane_numbers: Option<PaneNumbers>,
     message: Option<(String, Instant)>,
 }
 
@@ -224,6 +234,28 @@ impl Ui {
 
     pub fn message(&self) -> Option<&str> {
         self.message.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    pub fn show_pane_numbers(&mut self, time: Option<Duration>) {
+        let time = time.unwrap_or(PANE_NUMBERS_TIME);
+        let until = (!time.is_zero()).then(|| Instant::now() + time);
+        self.pane_numbers = Some(PaneNumbers { until });
+    }
+
+    /// When the pane numbers on display go away.
+    pub fn pane_numbers_deadline(&self) -> Option<Instant> {
+        self.pane_numbers.as_ref()?.until
+    }
+
+    /// Forgets pane numbers past their time. Returns whether there were any.
+    pub fn expire_pane_numbers(&mut self) -> bool {
+        let expired = self
+            .pane_numbers_deadline()
+            .is_some_and(|until| Instant::now() >= until);
+        if expired {
+            self.pane_numbers = None;
+        }
+        expired
     }
 
     /// When the message on display goes away.
@@ -388,6 +420,24 @@ mod tests {
         let mut list = List::new(vec![ListRow::text("a".to_owned())], 0);
         assert_eq!(list.handle_key(&key(b"0"), 5), ListOutcome::Stay);
         assert_eq!(list.handle_key(&key(b"\r"), 5), ListOutcome::Close);
+    }
+
+    #[test]
+    fn pane_numbers_expire_unless_they_wait_for_a_key() {
+        let mut ui = Ui::default();
+        ui.show_pane_numbers(Some(Duration::ZERO));
+        assert_eq!(ui.pane_numbers_deadline(), None);
+        assert!(!ui.expire_pane_numbers());
+        assert!(ui.pane_numbers.is_some());
+
+        ui.show_pane_numbers(None);
+        assert!(!ui.expire_pane_numbers());
+
+        ui.pane_numbers = Some(PaneNumbers {
+            until: Some(Instant::now()),
+        });
+        assert!(ui.expire_pane_numbers());
+        assert!(ui.pane_numbers.is_none());
     }
 
     #[test]

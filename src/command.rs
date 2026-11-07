@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use std::time::Duration;
+
 /// A direction to move focus or a pane border in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -40,6 +42,8 @@ pub enum Command {
     },
     DetachClient,
     DisplayMessage(String),
+    /// Shows the number of each pane for a while, or until a key if zero.
+    DisplayPanes(Option<Duration>),
     KillPane,
     KillServer,
     KillWindow,
@@ -91,6 +95,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "copy-mode" => parse_copy_mode(args),
         "detach-client" | "detach" => no_args(name, args, Command::DetachClient),
         "display-message" | "display" => Ok(Command::DisplayMessage(args.join(" "))),
+        "display-panes" | "displayp" => parse_display_panes(args),
         "kill-pane" | "killp" => no_args(name, args, Command::KillPane),
         "kill-server" => no_args(name, args, Command::KillServer),
         "kill-window" | "killw" => no_args(name, args, Command::KillWindow),
@@ -223,6 +228,19 @@ fn parse_choose_tree(args: &[String]) -> Result<Command, String> {
         return Err("usage: choose-tree [-swZ]".to_owned());
     }
     Ok(Command::ChooseTree)
+}
+
+fn parse_display_panes(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "d:")?;
+    if !flags.rest.is_empty() {
+        return Err("usage: display-panes [-d milliseconds]".to_owned());
+    }
+    let millis = flags.value('d').map(|text| {
+        text.parse()
+            .map(Duration::from_millis)
+            .map_err(|error| format!("{text}: {error}"))
+    });
+    millis.transpose().map(Command::DisplayPanes)
 }
 
 fn parse_list_keys(args: &[String]) -> Result<Command, String> {
@@ -498,6 +516,16 @@ mod tests {
             "invalid option: status"
         );
         assert!(parse(&words("setw monitor-activity maybe")).is_err());
+    }
+
+    #[test]
+    fn parses_display_panes() {
+        assert_eq!(command("display-panes"), Command::DisplayPanes(None));
+        assert_eq!(
+            command("displayp -d 250"),
+            Command::DisplayPanes(Some(Duration::from_millis(250)))
+        );
+        assert!(parse(&words("display-panes -d soon")).is_err());
     }
 
     #[test]

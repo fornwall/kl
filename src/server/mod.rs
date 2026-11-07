@@ -310,6 +310,9 @@ impl Server {
         if let Some(deadline) = self.ui.message_deadline() {
             next = next.min(deadline);
         }
+        if let Some(deadline) = self.ui.pane_numbers_deadline() {
+            next = next.min(deadline);
+        }
         if let Some(due) = self.names_due {
             next = next.min(due);
         }
@@ -563,6 +566,9 @@ impl Server {
             }
         }
         self.dirty |= self.ui.expire_message();
+        if self.ui.expire_pane_numbers() {
+            self.hide_pane_numbers();
+        }
         self.dirty |= self.hold_deadline().is_some_and(|deadline| now >= deadline);
         if self.names_due.is_some_and(|due| now >= due) {
             self.refresh_window_names();

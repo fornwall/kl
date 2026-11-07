@@ -181,6 +181,10 @@ impl Server {
         if captured || event.is_ctrl('b') {
             self.swallow(event.key);
         }
+        if self.pane_numbers_key(event) {
+            self.swallow(event.key);
+            return;
+        }
         if self.ui.prompt.is_some() {
             self.prompt_key(event);
         } else if std::mem::take(&mut self.prefix) || repeats {
@@ -195,6 +199,27 @@ impl Server {
         } else {
             self.forward_key(event);
         }
+    }
+
+    pub const fn hide_pane_numbers(&mut self) {
+        self.ui.pane_numbers = None;
+        self.session.repaint = true;
+        self.dirty = true;
+    }
+
+    /// Any key ends `display-panes`. A digit is for picking a pane, while the
+    /// others go on to do what they usually do. Returns whether this was a digit.
+    fn pane_numbers_key(&mut self, event: &KeyEvent) -> bool {
+        if self.ui.pane_numbers.is_none() || key::is_modifier(event.key) {
+            return false;
+        }
+        self.hide_pane_numbers();
+        let index = event.char().and_then(|c| c.to_digit(10));
+        let Some(index) = index.and_then(|index| usize::try_from(index).ok()) else {
+            return false;
+        };
+        self.session.select_pane_at(index);
+        true
     }
 
     fn forward_key(&mut self, event: &KeyEvent) {
@@ -420,6 +445,7 @@ impl Server {
             Command::CopyMode { page_up } => self.start_copy_mode(page_up),
             Command::DetachClient => self.detach(),
             Command::DisplayMessage(text) => self.ui.show_message(text),
+            Command::DisplayPanes(time) => self.ui.show_pane_numbers(time),
             Command::KillPane => {
                 if let Some(id) = self.session.active_id() {
                     self.session.remove_pane(id);

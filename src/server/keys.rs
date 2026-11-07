@@ -66,6 +66,7 @@ pub const PREFIX_TABLE: &[Binding] = &[
     bind("n", "next-window", "Select the next window"),
     bind("o", "select-pane", "Select the next pane"),
     bind("p", "previous-window", "Select the previous window"),
+    bind("q", "display-panes", "Display pane numbers"),
     bind("w", "choose-tree -Zw", "Choose a window from a list"),
     bind(
         "x",

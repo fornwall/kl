@@ -403,6 +403,16 @@ impl Session {
         self.repaint = true;
     }
 
+    /// Selects a pane of the current window by its number, showing it if the
+    /// window is zoomed in on another one.
+    pub fn select_pane_at(&mut self, index: usize) {
+        let panes = self.window().map(|w| w.root.panes(self.area()));
+        if let Some((id, _)) = panes.and_then(|panes| panes.get(index).copied()) {
+            self.unzoom();
+            self.select_pane(id);
+        }
+    }
+
     pub fn select_direction(&mut self, direction: Direction) {
         let area = self.area();
         let Some(window) = self.window() else {
