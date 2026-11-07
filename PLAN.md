@@ -146,6 +146,9 @@ for the tests, and is not meant as a setting.
   one. This has not been confirmed. If it is so, it happens outside the tests too,
   and asking for a few entries at a time would be the fix. It may be behind some
   of the failures below.
+- Find out why `typing_through_a_detach_does_not_lose_the_goodbye` can hang on
+  macOS. In one run it did until the job ran out of time, which hides the results
+  of every test after it.
 - Get the end-to-end tests passing on macOS. What is known of the 30 or so that
   fail, which is not always the same 30:
   - Those waiting for a window called `sh`, which `/bin/sh` is not on macOS: it
