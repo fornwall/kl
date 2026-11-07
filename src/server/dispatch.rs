@@ -183,7 +183,7 @@ fn pixels_in_pane(
 
 impl Server {
     pub fn handle_input(&mut self, bytes: &[u8]) {
-        let events = self.parser.feed(bytes);
+        let events = self.client().parser.feed(bytes);
         let colors = events.iter().any(Event::is_about_colors);
         for event in events {
             self.handle_event(event);
@@ -193,7 +193,8 @@ impl Server {
             self.session.apply_colors();
             self.dirty = true;
         }
-        self.escape_since = self.parser.has_pending_escape().then(Instant::now);
+        let client = self.client();
+        client.escape_since = client.parser.has_pending_escape().then(Instant::now);
     }
 
     pub fn handle_event(&mut self, event: Event) {
@@ -203,7 +204,7 @@ impl Server {
             Event::Mouse(event) => self.handle_mouse(self.in_cells(event)),
             Event::Paste(text) => self.handle_paste(&text),
             Event::Focus(focused) => self.session.report_focus(focused),
-            Event::PixelMouse(pixels) => self.session.pixel_mouse = pixels,
+            Event::PixelMouse(pixels) => self.client().pixel_mouse = pixels,
             Event::Foreground(rgb) => self.session.colors.foreground = Some(rgb),
             Event::Background(rgb) => self.session.colors.background = Some(rgb),
             Event::Palette(index, rgb) => {
@@ -221,10 +222,11 @@ impl Server {
     }
 
     fn handle_paste(&mut self, text: &[u8]) {
-        if let Some(prompt) = &mut self.ui.prompt {
+        let ui = &mut self.client().ui;
+        if let Some(prompt) = &mut ui.prompt {
             prompt.insert(&String::from_utf8_lossy(text));
             self.dirty = true;
-        } else if self.ui.list.is_none()
+        } else if ui.list.is_none()
             && let Some(pane) = self.session.active_pane_mut()
             && pane.copy_mode.is_none()
         {
@@ -234,8 +236,9 @@ impl Server {
     }
 
     fn swallow(&mut self, key: c_int) {
-        if !self.swallowed.contains(&key) {
-            self.swallowed.push(key);
+        let swallowed = &mut self.client().swallowed;
+        if !swallowed.contains(&key) {
+            swallowed.push(key);
         }
     }
 
@@ -251,27 +254,30 @@ impl Server {
         if event.action == KeyAction::Release {
             return false;
         }
-        let in_time = self
+        let client = self.client();
+        let in_time = client
             .repeat_until
             .is_some_and(|until| Instant::now() < until);
         let repeatable = || keys::binding(event).is_some_and(|binding| binding.repeat);
         let repeats = in_time && (key::is_modifier(event.key) || repeatable());
         if !repeats {
-            self.repeat_until = None;
+            client.repeat_until = None;
         }
         repeats
     }
 
     fn handle_key(&mut self, event: &KeyEvent) {
         let repeats = self.repeats(event);
-        let captured = self.ui.prompt.is_some()
-            || self.ui.list.is_some()
-            || self.prefix
+        let in_copy_mode = self.in_copy_mode();
+        let client = self.client();
+        let captured = client.ui.prompt.is_some()
+            || client.ui.list.is_some()
+            || client.prefix
             || repeats
-            || self.in_copy_mode();
+            || in_copy_mode;
         if event.action == KeyAction::Release {
-            if let Some(position) = self.swallowed.iter().position(|key| *key == event.key) {
-                self.swallowed.swap_remove(position);
+            if let Some(position) = client.swallowed.iter().position(|key| *key == event.key) {
+                client.swallowed.swap_remove(position);
             } else if !captured {
                 self.forward_key(event);
             }
@@ -288,14 +294,15 @@ impl Server {
             self.swallow(event.key);
             return;
         }
-        if self.ui.prompt.is_some() {
+        let client = self.client();
+        if client.ui.prompt.is_some() {
             self.prompt_key(event);
-        } else if std::mem::take(&mut self.prefix) || repeats {
+        } else if std::mem::take(&mut client.prefix) || repeats {
             self.run_binding(event);
         } else if event.is_ctrl('b') {
             // As in tmux, the prefix goes before the keys of copy mode too.
-            self.prefix = true;
-        } else if self.ui.list.is_some() {
+            client.prefix = true;
+        } else if client.ui.list.is_some() {
             self.list_key(event);
         } else if self.in_copy_mode() {
             self.copy_mode_key(event);
@@ -304,8 +311,8 @@ impl Server {
         }
     }
 
-    pub const fn hide_pane_numbers(&mut self) {
-        self.ui.pane_numbers = None;
+    pub fn hide_pane_numbers(&mut self) {
+        self.client().ui.pane_numbers = None;
         self.session.repaint = true;
         self.dirty = true;
     }
@@ -313,7 +320,7 @@ impl Server {
     /// Any key ends `display-panes`. A digit is for picking a pane, while the
     /// others go on to do what they usually do. Returns whether this was a digit.
     fn pane_numbers_key(&mut self, event: &KeyEvent) -> bool {
-        if self.ui.pane_numbers.is_none() || key::is_modifier(event.key) {
+        if self.client().ui.pane_numbers.is_none() || key::is_modifier(event.key) {
             return false;
         }
         self.hide_pane_numbers();
@@ -337,7 +344,7 @@ impl Server {
         let Some(binding) = keys::binding(event) else {
             return;
         };
-        self.repeat_until = binding.repeat.then(|| Instant::now() + REPEAT_TIME);
+        self.client().repeat_until = binding.repeat.then(|| Instant::now() + REPEAT_TIME);
         self.run_line(binding.command);
     }
 
@@ -347,9 +354,9 @@ impl Server {
             Ok(text) if text.is_empty() => {}
             Ok(text) => {
                 let rows = text.lines().map(|line| ListRow::text(line.to_owned()));
-                self.ui.list = Some(List::new(rows.collect(), 0));
+                self.client().ui.list = Some(List::new(rows.collect(), 0));
             }
-            Err(text) => self.ui.show_message(text),
+            Err(text) => self.client().ui.show_message(text),
         }
     }
 
@@ -358,7 +365,7 @@ impl Server {
     }
 
     fn close_list(&mut self) {
-        self.ui.list = None;
+        self.client().ui.list = None;
         self.session.repaint = true;
         self.dirty = true;
     }
@@ -382,7 +389,7 @@ impl Server {
 
     fn list_key(&mut self, event: &KeyEvent) {
         let height = self.list_height();
-        if let Some(list) = &mut self.ui.list {
+        if let Some(list) = &mut self.client().ui.list {
             let outcome = list.handle_key(event, height);
             self.after_list(outcome);
         }
@@ -400,7 +407,7 @@ impl Server {
         } else {
             0
         };
-        let Some(list) = &mut self.ui.list else {
+        let Some(list) = &mut self.client().ui.list else {
             return;
         };
         let outcome = match event.button {
@@ -443,16 +450,17 @@ impl Server {
             .windows
             .iter()
             .position(|w| w.index == session.current);
-        self.ui.list = Some(List::new(rows, current.unwrap_or(0)));
+        let list = List::new(rows, current.unwrap_or(0));
+        self.client().ui.list = Some(list);
     }
 
     fn prompt_key(&mut self, event: &KeyEvent) {
-        let Some(mut prompt) = self.ui.prompt.take() else {
+        let Some(mut prompt) = self.client().ui.prompt.take() else {
             return;
         };
         self.dirty = true;
         match prompt.handle_key(event) {
-            PromptOutcome::Editing => self.ui.prompt = Some(prompt),
+            PromptOutcome::Editing => self.client().ui.prompt = Some(prompt),
             PromptOutcome::Cancelled => {}
             PromptOutcome::Done(text) => match prompt.action {
                 PromptAction::Command(Some(template)) => {
@@ -510,7 +518,7 @@ impl Server {
         }
         match words.and_then(|words| command::parse(&words)) {
             Ok(command) => self.run_interactive(command),
-            Err(error) => self.ui.show_message(error),
+            Err(error) => self.client().ui.show_message(error),
         }
     }
 
@@ -530,7 +538,7 @@ impl Server {
         };
         let initial = initial.map_or_else(String::new, |initial| context.expand(initial));
         let action = PromptAction::Command(template);
-        self.ui.prompt = Some(Prompt::new(&label, &initial, action));
+        self.client().ui.prompt = Some(Prompt::new(&label, &initial, action));
     }
 
     fn confirm_before(&mut self, prompt: Option<&str>, command: Box<Command>) {
@@ -539,7 +547,7 @@ impl Server {
             |prompt| format!("{} ", Context::current(&self.session).expand(prompt)),
         );
         let action = PromptAction::Confirm(command);
-        self.ui.prompt = Some(Prompt::new(&label, "", action));
+        self.client().ui.prompt = Some(Prompt::new(&label, "", action));
     }
 
     fn send_prefix(&mut self, id: PaneId) {
@@ -564,7 +572,7 @@ impl Server {
             Some(CopyBinding::Prompt(prompt, typed)) => {
                 let typed = typed.map(String::from).unwrap_or_default();
                 let action = PromptAction::CopyMode(prompt);
-                self.ui.prompt = Some(Prompt::new(prompt.label(), &typed, action));
+                self.client().ui.prompt = Some(Prompt::new(prompt.label(), &typed, action));
             }
             None => {}
         }
@@ -630,7 +638,7 @@ impl Server {
                 print,
                 format,
             } => return self.display_message(target.as_deref(), print, format.as_deref()),
-            Command::DisplayPanes(time) => self.ui.show_pane_numbers(time),
+            Command::DisplayPanes(time) => self.client().ui.show_pane_numbers(time),
             Command::JoinPane {
                 source,
                 target,
@@ -932,13 +940,14 @@ impl Server {
         if print {
             return Ok(format!("{text}\n"));
         }
-        self.ui.show_message(text);
+        self.client().ui.show_message(text);
         Ok(String::new())
     }
 
     fn detach(&mut self) {
-        if let Some(id) = self.attached.take()
+        if let Some(id) = self.acting
             && let Some(connection) = self.connection_mut(id)
+            && connection.client.take().is_some()
         {
             connection.finish(&ServerMessage::Exit("[detached]".to_owned()));
         }
@@ -991,7 +1000,7 @@ impl Server {
     /// A report in pixels as the cell it is in, for everything but the program
     /// that asked for them. Pixels can lie in the padding beyond the last cell.
     fn in_cells(&self, event: MouseEvent) -> MouseEvent {
-        if !self.session.pixel_mouse {
+        if !self.client_ref().pixel_mouse {
             return event;
         }
         let (width, height) = self.session.cell_size();
@@ -1010,12 +1019,13 @@ impl Server {
 
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.dirty = true;
-        self.session.pointer = Some((event.x, event.y));
-        if self.ui.list.is_some() {
+        let client = self.client();
+        client.pointer = Some((event.x, event.y));
+        if client.ui.list.is_some() {
             self.list_mouse(event);
             return;
         }
-        match self.drag.clone() {
+        match client.drag.clone() {
             Drag::None => {
                 if event.action == MouseAction::Press {
                     self.mouse_press(event);
@@ -1028,7 +1038,7 @@ impl Server {
             Drag::Forwarding(pane) => {
                 self.forward_mouse(pane, event);
                 if event.action == MouseAction::Release {
-                    self.drag = Drag::None;
+                    self.client().drag = Drag::None;
                 }
             }
         }
@@ -1061,7 +1071,7 @@ impl Server {
 
     fn forward_mouse(&mut self, id: PaneId, event: MouseEvent) {
         let cell_size = self.session.cell_size();
-        let pixels = self.session.pixel_mouse.then_some(event.report);
+        let pixels = self.client().pixel_mouse.then_some(event.report);
         let Some(pane) = self.session.panes.get_mut(&id) else {
             return;
         };
@@ -1088,7 +1098,7 @@ impl Server {
             self.click_status(event);
         } else if let Some(divider) = self.divider_at(event.x, event.y) {
             if event.button == Some(MouseButton::Left) {
-                self.drag = Drag::Divider(divider);
+                self.client().drag = Drag::Divider(divider);
             }
         } else if let Some(id) = self.session.pane_at(event.x, event.y) {
             self.press_in_pane(id, event);
@@ -1098,7 +1108,7 @@ impl Server {
     fn click_status(&mut self, event: MouseEvent) {
         match event.button {
             Some(MouseButton::Left) => {
-                let entries = &self.renderer.status_entries;
+                let entries = &self.client().renderer.status_entries;
                 let entry = entries
                     .iter()
                     .find(|entry| (entry.start..entry.end).contains(&event.x));
@@ -1124,7 +1134,7 @@ impl Server {
         self.session.select_pane(id);
         if self.pane_takes_mouse(id, event) {
             self.forward_mouse(id, event);
-            self.drag = Drag::Forwarding(id);
+            self.client().drag = Drag::Forwarding(id);
             return;
         }
         match event.button {
@@ -1142,7 +1152,8 @@ impl Server {
 
     fn click_count(&mut self, event: MouseEvent) -> u8 {
         let now = Instant::now();
-        let count = match self.last_click {
+        let client = self.client();
+        let count = match client.last_click {
             Some(click)
                 if click.x == event.x
                     && click.y == event.y
@@ -1152,7 +1163,7 @@ impl Server {
             }
             _ => 1,
         };
-        self.last_click = Some(Click {
+        client.last_click = Some(Click {
             at: now,
             x: event.x,
             y: event.y,
@@ -1169,7 +1180,7 @@ impl Server {
         copy_mode::forget_selection(pane);
         pane.terminal.press_selection(x, y);
         pane.redraw = true;
-        self.drag = Drag::Selecting(Selecting {
+        self.client().drag = Drag::Selecting(Selecting {
             pane: id,
             x,
             y,
@@ -1185,17 +1196,19 @@ impl Server {
                 }
                 self.session.relayout();
             }
-            MouseAction::Release | MouseAction::Press => self.drag = Drag::None,
+            MouseAction::Release | MouseAction::Press => self.client().drag = Drag::None,
         }
     }
 
     fn drag_selection(&mut self, selecting: Selecting, event: MouseEvent) {
+        if event.action != MouseAction::Motion {
+            self.client().drag = Drag::None;
+        }
         let Some(pane) = self.session.panes.get_mut(&selecting.pane) else {
-            self.drag = Drag::None;
+            self.client().drag = Drag::None;
             return;
         };
         if event.action != MouseAction::Motion {
-            self.drag = Drag::None;
             pane.terminal.release_selection();
             let Some(text) = pane.terminal.selected_text() else {
                 return;
@@ -1221,7 +1234,7 @@ impl Server {
             Some((current, at)) if current == edge => (edge, at),
             _ => (edge, Instant::now()),
         });
-        self.drag = Drag::Selecting(Selecting {
+        self.client().drag = Drag::Selecting(Selecting {
             x,
             y,
             scroll,
@@ -1231,14 +1244,14 @@ impl Server {
 
     /// Moves the text along with a pointer that stays at the edge of a pane.
     pub fn autoscroll(&mut self) {
-        let Drag::Selecting(selecting) = self.drag else {
+        let Drag::Selecting(selecting) = self.client().drag else {
             return;
         };
         let Some((edge, _)) = selecting.scroll else {
             return;
         };
         let Some(pane) = self.session.panes.get_mut(&selecting.pane) else {
-            self.drag = Drag::None;
+            self.client().drag = Drag::None;
             return;
         };
         let (x, y) = (selecting.x, selecting.y);
@@ -1246,7 +1259,7 @@ impl Server {
         copy_mode::follow_pointer(pane, x, y);
         self.dirty = true;
         let next = Instant::now() + AUTOSCROLL_TIME;
-        self.drag = Drag::Selecting(Selecting {
+        self.client().drag = Drag::Selecting(Selecting {
             scroll: goes_on.then_some((edge, next)),
             ..selecting
         });

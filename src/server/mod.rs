@@ -2,6 +2,7 @@
 //! independently of any client, so that panes outlive detaching.
 
 mod buffers;
+mod client;
 mod copy_mode;
 mod dispatch;
 mod format;
@@ -17,7 +18,6 @@ mod target;
 mod ui;
 
 use std::error::Error;
-use std::ffi::c_int;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -27,17 +27,15 @@ use std::time::{Duration, Instant};
 
 use crate::base64;
 use crate::ghostty::Notification;
-use crate::input::Parser;
 use crate::proto::{self, ClientMessage, ServerMessage};
 use crate::sys::{self, SIGCHLD, SIGHUP, SIGINT, SIGTERM, Selector, WinSize};
 use buffers::Buffers;
-use dispatch::{Click, Drag};
+use client::Client;
 use layout::PaneId;
 use pane::Activity;
-use render::{Renderer, osc_text};
+use render::osc_text;
 pub use restart::STATE_VERSION;
 use session::{Monitor, NameCheck, Session};
-use ui::Ui;
 
 /// The shortest time between frames, to coalesce heavy output.
 const FRAME_TIME: Duration = Duration::from_millis(8);
@@ -73,6 +71,9 @@ struct Connection {
     /// Close once the output is written.
     closing: bool,
     closed: bool,
+    /// The terminal at the other end, if this connection is showing the session
+    /// rather than running a command.
+    client: Option<Client>,
 }
 
 impl Connection {
@@ -132,27 +133,17 @@ pub struct Server {
     signals: File,
     connections: Vec<Connection>,
     next_connection: u64,
-    /// The connection showing the session.
-    attached: Option<u64>,
+    /// The connection of the client that what is being handled came from.
+    acting: Option<u64>,
+    /// What [`Server::client`] gives without a client, which nobody gets to see.
+    nobody: Client,
     session: Session,
-    ui: Ui,
-    renderer: Renderer,
-    parser: Parser,
-    /// The prefix key was pressed, so the next key is a command.
-    prefix: bool,
-    /// Until when a repeatable binding works without the prefix.
-    repeat_until: Option<Instant>,
-    /// Keys kl acted on, whose release programs should not see either.
-    swallowed: Vec<c_int>,
-    drag: Drag,
-    last_click: Option<Click>,
     buffers: Buffers,
     /// Something changed that may need a new frame.
     dirty: bool,
     last_frame: Instant,
     last_tick: Instant,
     started_at: Instant,
-    escape_since: Option<Instant>,
     /// When to next look at what runs in each window, ahead of the tick.
     names_due: Option<Instant>,
     lifecycle: Lifecycle,
@@ -237,22 +228,14 @@ pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
         signals,
         connections: Vec::new(),
         next_connection: 0,
-        attached: None,
+        acting: None,
+        nobody: Client::default(),
         session,
-        ui: Ui::default(),
-        renderer: Renderer::default(),
-        parser: Parser::default(),
-        prefix: false,
-        repeat_until: None,
-        swallowed: Vec::new(),
-        drag: Drag::None,
-        last_click: None,
         buffers,
         dirty: false,
         last_frame: now,
         last_tick: now,
         started_at: now,
-        escape_since: None,
         names_due: None,
         lifecycle,
         exit_message: "[exited]",
@@ -313,17 +296,15 @@ impl Server {
                 next = next.min(deadline);
             }
         }
-        if let Some(since) = self.escape_since {
-            next = next.min(since + ESCAPE_TIME);
-        }
-        if let Some(at) = self.drag.next_scroll() {
-            next = next.min(at);
-        }
-        if let Some(deadline) = self.ui.message_deadline() {
-            next = next.min(deadline);
-        }
-        if let Some(deadline) = self.ui.pane_numbers_deadline() {
-            next = next.min(deadline);
+        for client in self.clients() {
+            let escape = client.escape_since.map(|since| since + ESCAPE_TIME);
+            let deadlines = [
+                escape,
+                client.drag.next_scroll(),
+                client.ui.message_deadline(),
+                client.ui.pane_numbers_deadline(),
+            ];
+            next = deadlines.into_iter().flatten().fold(next, Instant::min);
         }
         if let Some(due) = self.names_due {
             next = next.min(due);
@@ -374,6 +355,7 @@ impl Server {
                 output: Vec::new(),
                 closing: false,
                 closed: false,
+                client: None,
             });
             self.next_connection += 1;
         }
@@ -395,16 +377,40 @@ impl Server {
             self.handle_message(id, message);
         }
         self.connections.retain(|connection| !connection.closed);
-        if self
-            .attached
-            .is_some_and(|id| self.connection(id).is_none())
-        {
-            self.attached = None;
-        }
     }
 
-    fn connection(&self, id: u64) -> Option<&Connection> {
-        self.connections.iter().find(|c| c.id == id)
+    /// The clients attached right now.
+    fn clients(&self) -> impl Iterator<Item = &Client> {
+        let connections = self.connections.iter();
+        connections.filter_map(|connection| connection.client.as_ref())
+    }
+
+    /// The connections of the clients attached right now.
+    fn client_ids(&self) -> Vec<u64> {
+        let connections = self.connections.iter();
+        let attached = connections.filter(|connection| connection.client.is_some());
+        attached.map(|connection| connection.id).collect()
+    }
+
+    /// The client that what is being handled came from. Commands can come from
+    /// the command line with no client attached, and then this is a stand-in, as
+    /// what they leave for a client is not meant for anyone else.
+    pub fn client(&mut self) -> &mut Client {
+        let acting = self.acting;
+        let connections = self.connections.iter_mut();
+        let connection = connections
+            .filter(|connection| Some(connection.id) == acting)
+            .find_map(|connection| connection.client.as_mut());
+        connection.unwrap_or(&mut self.nobody)
+    }
+
+    /// See [`Server::client`].
+    pub fn client_ref(&self) -> &Client {
+        let connections = self.connections.iter();
+        let connection = connections
+            .filter(|connection| Some(connection.id) == self.acting)
+            .find_map(|connection| connection.client.as_ref());
+        connection.unwrap_or(&self.nobody)
     }
 
     fn connection_mut(&mut self, id: u64) -> Option<&mut Connection> {
@@ -412,14 +418,16 @@ impl Server {
     }
 
     fn handle_message(&mut self, id: u64, message: ClientMessage) {
+        self.acting = Some(id);
+        let attached = self.client_ids().contains(&id);
         match message {
             ClientMessage::Attach {
                 version,
                 size,
                 environment,
             } => self.attach(id, version, size, environment),
-            ClientMessage::Input(bytes) if self.attached == Some(id) => self.handle_input(&bytes),
-            ClientMessage::Resize(size) if self.attached == Some(id) => {
+            ClientMessage::Input(bytes) if attached => self.handle_input(&bytes),
+            ClientMessage::Resize(size) if attached => {
                 self.session.resize(size);
                 self.dirty = true;
             }
@@ -429,11 +437,13 @@ impl Server {
                 pane,
                 args,
             } => {
+                self.acting = self.client_ids().first().copied();
                 self.session.origin = pane;
                 self.run_client_command(id, version, &args);
                 self.session.origin = None;
             }
         }
+        self.acting = None;
     }
 
     fn version_error(version: u32) -> Option<String> {
@@ -453,18 +463,16 @@ impl Server {
             }
             return;
         }
-        if let Some(previous) = self.attached.replace(id)
-            && let Some(connection) = self.connection_mut(previous)
-        {
-            connection.finish(&ServerMessage::Exit(
-                "[detached (from another client)]".to_owned(),
-            ));
+        for connection in &mut self.connections {
+            if connection.client.take().is_some() {
+                connection.finish(&ServerMessage::Exit(
+                    "[detached (from another client)]".to_owned(),
+                ));
+            }
         }
-        self.parser = Parser::default();
-        self.prefix = false;
-        self.repeat_until = None;
-        self.swallowed.clear();
-        self.drag = Drag::None;
+        if let Some(connection) = self.connection_mut(id) {
+            connection.client = Some(Client::default());
+        }
         self.session.environment = environment;
         self.session.resize(size);
         if self.lifecycle == Lifecycle::Starting {
@@ -477,9 +485,6 @@ impl Server {
                 return;
             }
         }
-        self.renderer.invalidate();
-        self.session.pixel_mouse = false;
-        self.session.pointer = None;
         self.dirty = true;
         self.send_output(&color_queries());
     }
@@ -554,10 +559,10 @@ impl Server {
     }
 
     fn send_output(&mut self, bytes: &[u8]) {
-        if let Some(id) = self.attached
-            && let Some(connection) = self.connection_mut(id)
-        {
-            connection.send(&ServerMessage::Output(bytes.to_vec()));
+        for connection in &mut self.connections {
+            if connection.client.is_some() {
+                connection.send(&ServerMessage::Output(bytes.to_vec()));
+            }
         }
     }
 
@@ -571,22 +576,11 @@ impl Server {
 
     fn handle_timers(&mut self) {
         let now = Instant::now();
-        if self
-            .escape_since
-            .is_some_and(|since| now >= since + ESCAPE_TIME)
-        {
-            self.escape_since = None;
-            if let Some(event) = self.parser.flush_escape() {
-                self.handle_event(event);
-            }
+        for id in self.client_ids() {
+            self.acting = Some(id);
+            self.handle_client_timers(now);
         }
-        if self.drag.next_scroll().is_some_and(|at| now >= at) {
-            self.autoscroll();
-        }
-        self.dirty |= self.ui.expire_message();
-        if self.ui.expire_pane_numbers() {
-            self.hide_pane_numbers();
-        }
+        self.acting = None;
         self.dirty |= self.hold_deadline().is_some_and(|deadline| now >= deadline);
         if self.names_due.is_some_and(|due| now >= due) {
             self.refresh_window_names();
@@ -598,6 +592,24 @@ impl Server {
                 pane.terminal.compress_idle_scrollback();
             }
             self.dirty = true;
+        }
+    }
+
+    fn handle_client_timers(&mut self, now: Instant) {
+        let client = self.client();
+        let escape_over = |since| now >= since + ESCAPE_TIME;
+        if client.escape_since.is_some_and(escape_over) {
+            client.escape_since = None;
+            if let Some(event) = client.parser.flush_escape() {
+                self.handle_event(event);
+            }
+        }
+        if self.client().drag.next_scroll().is_some_and(|at| now >= at) {
+            self.autoscroll();
+        }
+        self.dirty |= self.client().ui.expire_message();
+        if self.client().ui.expire_pane_numbers() {
+            self.hide_pane_numbers();
         }
     }
 
@@ -643,8 +655,9 @@ impl Server {
     fn can_draw(&self) -> bool {
         // Holding off while the client catches up is the flow control: what it
         // misses never gets sent, since each frame is a diff of the latest state.
-        let connection = self.attached.and_then(|id| self.connection(id));
-        connection.is_some_and(|connection| connection.output.is_empty())
+        let connections = self.connections.iter();
+        let mut attached = connections.filter(|connection| connection.client.is_some());
+        attached.any(|connection| connection.output.is_empty())
     }
 
     fn render(&mut self) {
@@ -653,9 +666,15 @@ impl Server {
         }
         self.dirty = false;
         self.last_frame = Instant::now();
-        let frame = self.renderer.frame(&mut self.session, &self.ui);
-        for part in frame.chunks(OUTPUT_PIECE) {
-            self.send_output(part);
+        for connection in &mut self.connections {
+            if let Some(client) = &mut connection.client {
+                let frame = client
+                    .renderer
+                    .frame(&mut self.session, &client.ui, client.pointer);
+                for part in frame.chunks(OUTPUT_PIECE) {
+                    connection.send(&ServerMessage::Output(part.to_vec()));
+                }
+            }
         }
     }
 

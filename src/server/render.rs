@@ -229,19 +229,6 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Forgets what the terminal shows, so the next frame draws everything.
-    pub fn invalidate(&mut self) {
-        self.reset = true;
-        self.cursor = None;
-        self.title.clear();
-        // The client undid these on leaving.
-        self.cursor_color = None;
-        self.progress = None;
-        self.pointer_shape = None;
-        self.pixel_mouse = false;
-        self.images = Images::default();
-    }
-
     fn resize(&mut self, cols: u16, rows: u16) -> bool {
         if self.next.cols == cols && self.next.rows == rows {
             return false;
@@ -253,7 +240,12 @@ impl Renderer {
     }
 
     /// Produces the bytes that bring the terminal up to date.
-    pub fn frame(&mut self, session: &mut Session, ui: &Ui) -> Vec<u8> {
+    pub fn frame(
+        &mut self,
+        session: &mut Session,
+        ui: &Ui,
+        pointer: Option<(u16, u16)>,
+    ) -> Vec<u8> {
         let (cols, rows) = (session.size.cols, session.size.rows);
         if self.resize(cols, rows) || self.reset {
             session.repaint = true;
@@ -285,7 +277,7 @@ impl Renderer {
         self.emit_title(session, &mut out);
         self.emit_progress(session, &mut out);
         self.emit_cursor_color(session, &mut out);
-        self.emit_pointer_shape(session, &mut out);
+        self.emit_pointer_shape(session, pointer, &mut out);
         self.emit_mouse_format(session, &mut out);
         let mut frame = transfers;
         if !out.is_empty() {
@@ -532,8 +524,13 @@ impl Renderer {
         }
     }
 
-    fn emit_pointer_shape(&mut self, session: &Session, out: &mut Vec<u8>) {
-        let wanted = session.pointer_shape();
+    fn emit_pointer_shape(
+        &mut self,
+        session: &Session,
+        pointer: Option<(u16, u16)>,
+        out: &mut Vec<u8>,
+    ) {
+        let wanted = session.pointer_shape(pointer);
         if wanted != self.pointer_shape.unwrap_or(DEFAULT_POINTER_SHAPE) {
             out.extend_from_slice(format!("\x1b]22;{wanted}\x1b\\").as_bytes());
             self.pointer_shape = Some(wanted);
