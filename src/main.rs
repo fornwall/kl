@@ -62,6 +62,7 @@ Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , & for windows,
 keys and d to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a
 second, so that C-b C-Up C-Up resizes twice.
+Copy mode has the keys of tmux's copy-mode-vi table, and y to copy as well.
 The mouse selects panes and windows, drags borders, scrolls and copies text.
 ";
 

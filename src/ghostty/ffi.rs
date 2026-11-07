@@ -56,8 +56,10 @@ pub const COMPRESSION_RESULT_PENDING: c_int = 1;
 pub const SCROLL_BOTTOM: c_int = 1;
 pub const SCROLL_DELTA: c_int = 2;
 pub const SCROLL_TOP: c_int = 0;
+pub const SCROLL_ROW: c_int = 3;
 
 pub const POINT_VIEWPORT: c_int = 1;
+pub const POINT_SCREEN: c_int = 2;
 
 pub const RENDER_DATA_DIRTY: c_int = 3;
 pub const RENDER_DATA_ROW_ITERATOR: c_int = 4;
@@ -75,10 +77,16 @@ pub const CELLS_DATA_STYLE: c_int = 2;
 pub const CELLS_DATA_HAS_STYLING: c_int = 8;
 pub const CELLS_DATA_GRAPHEMES_UTF8: c_int = 9;
 
+pub const CELL_DATA_CODEPOINT: c_int = 1;
 pub const CELL_DATA_CONTENT_TAG: c_int = 2;
 pub const CELL_DATA_WIDE: c_int = 3;
 pub const CELL_DATA_COLOR_PALETTE: c_int = 10;
 pub const CELL_DATA_COLOR_RGB: c_int = 11;
+
+pub const SCREEN_ROW_DATA_WRAP: c_int = 1;
+pub const SCREEN_ROW_DATA_SEMANTIC_PROMPT: c_int = 6;
+
+pub const ROW_SEMANTIC_PROMPT: c_int = 1;
 
 pub const CELL_CONTENT_BG_PALETTE: c_int = 2;
 pub const CELL_CONTENT_BG_RGB: c_int = 3;
@@ -94,6 +102,7 @@ pub const MOUSE_OPT_SIZE: c_int = 3;
 pub const MOUSE_OPT_ANY_BUTTON_PRESSED: c_int = 4;
 
 pub const FORMATTER_OPT_UNWRAP: c_int = 2;
+pub const FORMATTER_OPT_TRIM: c_int = 3;
 pub const FORMATTER_OPT_SELECTION: c_int = 4;
 
 pub const CLIPBOARD_WRITE_SUCCESS: c_int = 0;
@@ -173,6 +182,7 @@ pub struct PointValue {
     pub padding: u64,
 }
 
+#[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct PointCoordinate {
     pub x: u16,
@@ -349,6 +359,15 @@ unsafe extern "C" {
     pub fn ghostty_terminal_compress(terminal: Handle, mode: c_int, result: *mut c_int) -> c_int;
     pub fn ghostty_terminal_scroll_viewport(terminal: Handle, behavior: ScrollViewport) -> c_int;
     pub fn ghostty_terminal_grid_ref(terminal: Handle, point: Point, out: *mut GridRef) -> c_int;
+    pub fn ghostty_terminal_point_from_grid_ref(
+        terminal: Handle,
+        grid_ref: *const GridRef,
+        tag: c_int,
+        out: *mut PointCoordinate,
+    ) -> c_int;
+    pub fn ghostty_grid_ref_cell(grid_ref: *const GridRef, out: *mut u64) -> c_int;
+    pub fn ghostty_grid_ref_row(grid_ref: *const GridRef, out: *mut u64) -> c_int;
+    pub fn ghostty_row_get(row: u64, data: c_int, out: *mut c_void) -> c_int;
     pub fn ghostty_terminal_select_word(
         terminal: Handle,
         options: *const SelectWordOptions,

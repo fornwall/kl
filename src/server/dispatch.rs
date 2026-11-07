@@ -3,7 +3,7 @@
 use std::ffi::c_int;
 use std::time::{Duration, Instant};
 
-use super::copy_mode::{self, CopyMode, Outcome};
+use super::copy_mode::{self, Action, Binding as CopyBinding, CopyMode, CopyPrompt, Outcome};
 use super::format::Context;
 use super::keys;
 use super::layout::{Divider, PaneId, Rect};
@@ -352,7 +352,37 @@ impl Server {
                 }
                 PromptAction::Command(None) => self.run_line(&text),
                 PromptAction::Confirm(command) => self.run_interactive(*command),
+                PromptAction::CopyMode(copy_prompt) => self.copy_prompt_done(copy_prompt, &text),
             },
+            PromptOutcome::DoneBefore(text) => {
+                if let PromptAction::CopyMode(copy_prompt) = prompt.action {
+                    self.copy_prompt_done(copy_prompt, &text);
+                }
+                self.copy_mode_key(event);
+            }
+        }
+    }
+
+    fn copy_prompt_done(&mut self, prompt: CopyPrompt, text: &str) {
+        match prompt {
+            CopyPrompt::GotoLine => {
+                if let Ok(line) = text.trim().parse() {
+                    self.copy_mode_action(Action::GotoLine(line));
+                }
+            }
+            CopyPrompt::Jump(kind) => {
+                if let Some(c) = text.chars().next() {
+                    self.copy_mode_action(Action::Jump(kind, c));
+                }
+            }
+            CopyPrompt::Repeat => {
+                let pane = self.session.active_pane_mut();
+                if let (Some(mode), Ok(repeat)) =
+                    (pane.and_then(|pane| pane.copy_mode.as_mut()), text.parse())
+                {
+                    mode.set_repeat(repeat);
+                }
+            }
         }
     }
 
@@ -412,20 +442,38 @@ impl Server {
     }
 
     fn copy_mode_key(&mut self, event: &KeyEvent) {
+        self.dirty = true;
+        match copy_mode::binding(event) {
+            Some(CopyBinding::Run(action)) => self.copy_mode_action(action),
+            Some(CopyBinding::Prompt(prompt, typed)) => {
+                let typed = typed.map(String::from).unwrap_or_default();
+                let action = PromptAction::CopyMode(prompt);
+                self.ui.prompt = Some(Prompt::new(prompt.label(), &typed, action));
+            }
+            None => {}
+        }
+    }
+
+    fn copy_mode_action(&mut self, action: Action) {
         let Some(pane) = self.session.active_pane_mut() else {
             return;
         };
-        let outcome = copy_mode::handle_key(pane, event);
-        let copied = (outcome == Outcome::Copy)
-            .then(|| pane.terminal.selected_text())
+        if pane.copy_mode.is_none() {
+            return;
+        }
+        let outcome = copy_mode::run(pane, action);
+        let copied = matches!(outcome, Outcome::Copy | Outcome::Append)
+            .then(|| copy_mode::selected_text(pane))
             .flatten();
         if outcome != Outcome::Stay {
             CopyMode::exit(pane);
         }
         if let Some(text) = copied {
-            self.store_buffer(text);
+            let start = (outcome == Outcome::Append).then(|| self.buffer.take());
+            let mut buffer = start.flatten().unwrap_or_default();
+            buffer.push_str(&text);
+            self.store_buffer(buffer);
         }
-        self.dirty = true;
     }
 
     /// Runs a command, returning any output for the user.
@@ -521,7 +569,7 @@ impl Server {
         if let Some(pane) = self.session.active_pane_mut() {
             CopyMode::enter(pane, false);
             if page_up {
-                pane.terminal.scroll_by(-i32::from(pane.rect.height));
+                copy_mode::page_up(pane, false);
             }
         }
     }
@@ -823,9 +871,9 @@ fn send_arrows(pane: &mut Pane, up: bool) {
 fn scroll_history(pane: &mut Pane, up: bool) {
     if up {
         CopyMode::enter(pane, true);
-        pane.terminal.scroll_by(-WHEEL_ROWS);
+        copy_mode::scroll_view(pane, -WHEEL_ROWS);
     } else if pane.copy_mode.is_some() {
-        pane.terminal.scroll_by(WHEEL_ROWS);
+        copy_mode::scroll_view(pane, WHEEL_ROWS);
         let at_bottom = pane
             .terminal
             .scrollbar()

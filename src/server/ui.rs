@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::copy_mode::CopyPrompt;
 use crate::command::Command;
 use crate::ghostty::key;
 use crate::input::KeyEvent;
@@ -20,6 +21,7 @@ pub enum PromptAction {
     Command(Option<String>),
     /// Run this command if the answer is `y`.
     Confirm(Box<Command>),
+    CopyMode(CopyPrompt),
 }
 
 pub struct Prompt {
@@ -35,6 +37,8 @@ pub enum PromptOutcome {
     Editing,
     Cancelled,
     Done(String),
+    /// Done, and the key that ended it is still to be acted on.
+    DoneBefore(String),
 }
 
 impl Prompt {
@@ -70,13 +74,42 @@ impl Prompt {
         }
     }
 
+    /// Takes the key itself as the answer, if it stands for a character.
+    fn one_key(event: &KeyEvent) -> PromptOutcome {
+        if event.key == key::ESCAPE || event.is_ctrl('c') || event.text.is_empty() {
+            PromptOutcome::Cancelled
+        } else {
+            PromptOutcome::Done(event.text.clone())
+        }
+    }
+
+    /// Takes digits, and is done at the first key that is not one.
+    fn digit_key(&mut self, event: &KeyEvent) -> PromptOutcome {
+        if event.key == key::ESCAPE || event.is_ctrl('c') {
+            return PromptOutcome::Cancelled;
+        }
+        match event.char() {
+            Some(c) if c.is_ascii_digit() => {
+                self.insert(&event.text);
+                PromptOutcome::Editing
+            }
+            _ if event.key == key::ENTER => PromptOutcome::Done(self.text()),
+            _ => PromptOutcome::DoneBefore(self.text()),
+        }
+    }
+
     pub fn handle_key(&mut self, event: &KeyEvent) -> PromptOutcome {
-        if let PromptAction::Confirm(_) = self.action {
-            return if event.char() == Some('y') {
-                PromptOutcome::Done(String::new())
-            } else {
-                PromptOutcome::Cancelled
-            };
+        match self.action {
+            PromptAction::Confirm(_) => {
+                return if event.char() == Some('y') {
+                    PromptOutcome::Done(String::new())
+                } else {
+                    PromptOutcome::Cancelled
+                };
+            }
+            PromptAction::CopyMode(CopyPrompt::Jump(_)) => return Self::one_key(event),
+            PromptAction::CopyMode(CopyPrompt::Repeat) => return self.digit_key(event),
+            _ => {}
         }
         match event.key {
             key::ENTER => return PromptOutcome::Done(self.text()),

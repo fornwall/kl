@@ -6,6 +6,7 @@ mod dispatch;
 mod format;
 mod keys;
 mod layout;
+mod motion;
 mod pane;
 mod render;
 mod restart;

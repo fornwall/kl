@@ -1107,7 +1107,7 @@ fn a_restart_keeps_history_and_copied_text() {
     screen.wait_for_line("history-100");
     // The line above the prompt, which only a paste can put after a prompt.
     screen.prefix("[");
-    screen.type_text("k0v$");
+    screen.type_text("k0 $");
     screen.enter();
     screen.wait_for_clipboard();
 
@@ -1648,7 +1648,7 @@ fn copy_mode_scrolls_through_history() {
     screen.prefix("[");
     screen.wait_for_text("[0/");
     screen.key(key::PAGE_UP, 0, "", 0);
-    let lines = screen.wait_for("the view to scroll", |lines| lines[0].contains("[23/"));
+    let lines = screen.wait_for("the view to scroll", |lines| lines[0].contains("[21/"));
     assert!(!lines.iter().any(|line| line.trim() == "100"), "{lines:?}");
     screen.type_text("q");
     screen.wait_for("the end of history", |lines| {
@@ -1699,7 +1699,7 @@ fn copies_with_the_keyboard_and_pastes() {
     // From the prompt below the output: up to its line, then to its start.
     screen.type_text("0");
     screen.type_text("k");
-    screen.type_text("v");
+    screen.type_text(" ");
     for _ in 0.."copy-this".len() - 1 {
         screen.type_text("l");
     }
@@ -1717,6 +1717,184 @@ fn copies_with_the_keyboard_and_pastes() {
             .count()
             >= 3
     });
+}
+
+/// Goes into copy mode, onto the start of the line above the prompt.
+fn copy_last_output(screen: &mut Screen) {
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("k0");
+}
+
+#[test]
+fn copy_mode_moves_by_word() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo alpha beta.gamma delta");
+    screen.wait_for_line("alpha beta.gamma delta");
+    copy_last_output(&mut screen);
+    // Three words, as the dot is one of its own.
+    screen.type_text("w ");
+    screen.type_text("eee");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"beta.gamma".to_vec()]);
+
+    copy_last_output(&mut screen);
+    screen.type_text("$bb");
+    screen.type_text(" ");
+    screen.type_text("W");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"gamma d".to_vec()]);
+
+    copy_last_output(&mut screen);
+    screen.type_text("W ");
+    screen.type_text("E");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"beta.gamma".to_vec()]);
+}
+
+#[test]
+fn copy_mode_jumps_to_characters() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo key=value,more,rest");
+    screen.wait_for_line("key=value,more,rest");
+    copy_last_output(&mut screen);
+    screen.type_text("f=l ");
+    screen.wait_for("the prompt to end", |lines| {
+        !lines.iter().any(|line| line.contains("(jump"))
+    });
+    screen.type_text("t,");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"value".to_vec()]);
+
+    copy_last_output(&mut screen);
+    screen.type_text("f, ");
+    screen.type_text(";");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b",more,".to_vec()]);
+
+    copy_last_output(&mut screen);
+    screen.type_text("$F,;");
+    screen.type_text(" ");
+    screen.type_text(",");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b",more,".to_vec()]);
+}
+
+#[test]
+fn copy_mode_selects_rectangles() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf 'abcd\\nefgh\\nijkl\\n'");
+    screen.wait_for_line("ijkl");
+    copy_last_output(&mut screen);
+    screen.type_text("kkl");
+    screen.type_text("v ");
+    screen.type_text("jjl");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"bc\nfg\njk".to_vec()]);
+}
+
+#[test]
+fn copy_mode_selects_whole_lines() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf 'first\\nsecond\\nthird\\n'");
+    screen.wait_for_line("third");
+    copy_last_output(&mut screen);
+    screen.type_text("kl");
+    screen.type_text("Vk");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"first\nsecond\n".to_vec()]);
+}
+
+#[test]
+fn copy_mode_goes_to_the_other_end_of_a_selection() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo one two three");
+    screen.wait_for_line("one two three");
+    copy_last_output(&mut screen);
+    screen.type_text("w ");
+    screen.type_text("eob");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"one two".to_vec()]);
+}
+
+#[test]
+fn copy_mode_copies_to_the_end_of_the_line() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo one two three");
+    screen.wait_for_line("one two three");
+    copy_last_output(&mut screen);
+    screen.type_text("wD");
+    assert_eq!(screen.wait_for_clipboard(), [b"two three".to_vec()]);
+    screen.wait_for_no_text("[0/");
+}
+
+#[test]
+fn escape_clears_the_selection_and_stays_in_copy_mode() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo one two three");
+    screen.wait_for_line("one two three");
+    copy_last_output(&mut screen);
+    screen.type_text(" ");
+    screen.type_text("w");
+    screen.key(key::ESCAPE, 0, "", 0);
+    screen.type_text(" ");
+    screen.type_text("e");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"two".to_vec()]);
+}
+
+#[test]
+fn a_count_repeats_the_next_key_in_copy_mode() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo a b c d e f g h i j k l");
+    screen.wait_for_line("a b c d e f g h i j k l");
+    copy_last_output(&mut screen);
+    screen.type_text("1");
+    screen.wait_for_text("(repeat) 1");
+    screen.type_text("0w");
+    screen.type_text(" ");
+    screen.type_text("$");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"k l".to_vec()]);
+}
+
+#[test]
+fn copy_mode_goes_to_a_line() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("seq 1 100");
+    screen.wait_for_line("100");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text(":");
+    screen.wait_for_text("(goto line)");
+    screen.run("30");
+    screen.wait_for("the view to scroll", |lines| lines[0].contains("[30/"));
+}
+
+#[test]
+fn copy_mode_moves_within_the_view_and_by_paragraph() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf 'one\\ntwo\\n\\nthree\\nfour\\n\\nfive\\n'");
+    screen.wait_for_line("five");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("H ");
+    screen.type_text("}");
+    screen.enter();
+    assert_eq!(
+        screen.wait_for_clipboard(),
+        [b"one\ntwo\n\n".to_vec()],
+        "as in tmux, a blank line at the end of a selection counts"
+    );
+
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("L{{");
+    screen.type_text(" ");
+    screen.type_text("M");
+    screen.enter();
+    let copied = screen.wait_for_clipboard();
+    assert!(copied[0].starts_with(b"\nthree\nfour"), "{copied:?}");
 }
 
 #[test]

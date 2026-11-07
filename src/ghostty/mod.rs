@@ -134,6 +134,43 @@ pub struct Cell {
     pub selected: bool,
 }
 
+/// One row of text, for moving around in it rather than for drawing it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Line {
+    /// What each cell starts with: a space for an empty one, and a NUL for the
+    /// right half of a double width character.
+    pub cells: Vec<char>,
+    /// The text goes on in the next row.
+    pub wrapped: bool,
+    /// A shell prompt starts in this row.
+    pub prompt: bool,
+}
+
+impl Line {
+    pub fn cell(&self, x: u16) -> char {
+        self.cells.get(usize::from(x)).copied().unwrap_or(' ')
+    }
+
+    pub fn is_padding(&self, x: u16) -> bool {
+        self.cell(x) == '\0'
+    }
+
+    /// Up to where there is text.
+    pub fn length(&self) -> u16 {
+        let text = self.cells.iter().rposition(|c| *c != ' ');
+        text.map_or(0, |last| u16::try_from(last + 1).unwrap_or(u16::MAX))
+    }
+
+    /// The column of the last character.
+    pub fn limit(&self) -> u16 {
+        let mut x = self.length().saturating_sub(1);
+        while x > 0 && self.is_padding(x) {
+            x -= 1;
+        }
+        x
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     /// Position in the viewport, if the cursor is inside of it.
@@ -876,6 +913,11 @@ impl Terminal {
         self.scroll(ffi::SCROLL_BOTTOM, 0);
     }
 
+    /// Puts this row of the screen at the top of the viewport.
+    pub fn scroll_to_row(&mut self, row: u32) {
+        self.scroll(ffi::SCROLL_ROW, row.try_into().unwrap_or(i32::MAX));
+    }
+
     /// Brings the render state up to date, unless the program is holding the
     /// screen. Gives up on a hold that lasts too long, since the terminal has no
     /// clock and would otherwise keep a crashed program's pane frozen forever.
@@ -1146,11 +1188,31 @@ impl Terminal {
         })
     }
 
-    fn grid_ref(&self, x: u16, y: u16) -> Option<ffi::GridRef> {
+    pub fn width(&self) -> u16 {
+        self.get(ffi::DATA_COLS).unwrap_or(0)
+    }
+
+    /// Reads a row of the screen, with history counted in. Empty if there is no
+    /// such row. Too slow for drawing, and meant for looking around in the text.
+    pub fn screen_line(&self, y: u32) -> Line {
+        let mut line = Line::default();
+        for x in 0..self.width() {
+            let Some(grid_ref) = self.grid_ref(ffi::POINT_SCREEN, x, y) else {
+                break;
+            };
+            if x == 0 {
+                read_row_flags(&grid_ref, &mut line);
+            }
+            line.cells.push(read_char(&grid_ref));
+        }
+        line
+    }
+
+    fn grid_ref(&self, tag: c_int, x: u16, y: u32) -> Option<ffi::GridRef> {
         let point = ffi::Point {
-            tag: ffi::POINT_VIEWPORT,
+            tag,
             value: ffi::PointValue {
-                coordinate: ffi::PointCoordinate { x, y: u32::from(y) },
+                coordinate: ffi::PointCoordinate { x, y },
                 padding: 0,
             },
         };
@@ -1171,9 +1233,13 @@ impl Terminal {
             .then_some(selection)
     }
 
+    fn viewport_ref(&self, x: u16, y: u16) -> Option<ffi::GridRef> {
+        self.grid_ref(ffi::POINT_VIEWPORT, x, u32::from(y))
+    }
+
     /// Starts a selection at a viewport position.
     pub fn select_start(&mut self, x: u16, y: u16) {
-        if let Some(grid_ref) = self.grid_ref(x, y) {
+        if let Some(grid_ref) = self.viewport_ref(x, y) {
             self.set_selection(&selection_at(grid_ref));
         }
     }
@@ -1181,10 +1247,75 @@ impl Terminal {
     /// Moves the end of the current selection to a viewport position. The
     /// terminal keeps the start in place as the viewport scrolls.
     pub fn select_extend(&mut self, x: u16, y: u16) {
-        let end = self.grid_ref(x, y);
+        let end = self.viewport_ref(x, y);
         if let (Some(selection), Some(end)) = (self.selection(), end) {
             self.set_selection(&ffi::Selection { end, ..selection });
         }
+    }
+
+    /// Selects between two positions of the screen, with history counted in.
+    pub fn select_range(&mut self, start: (u16, u32), end: (u16, u32)) {
+        let start = self.grid_ref(ffi::POINT_SCREEN, start.0, start.1);
+        let end = self.grid_ref(ffi::POINT_SCREEN, end.0, end.1);
+        if let (Some(start), Some(end)) = (start, end) {
+            self.set_selection(&ffi::Selection {
+                start,
+                end,
+                rectangle: false,
+            });
+        }
+    }
+
+    /// Makes the current selection a rectangle, or stops it being one.
+    pub fn set_selection_rectangle(&mut self, rectangle: bool) {
+        if let Some(selection) = self.selection() {
+            self.set_selection(&ffi::Selection {
+                rectangle,
+                ..selection
+            });
+        }
+    }
+
+    /// Turns the selection around, returning where the end of it is now, as a
+    /// position of the screen.
+    pub fn swap_selection_ends(&mut self) -> Option<(u16, u32)> {
+        let selection = self.selection()?;
+        self.set_selection(&ffi::Selection {
+            start: selection.end,
+            end: selection.start,
+            ..selection
+        });
+        self.screen_position(&selection.start)
+    }
+
+    /// Where the selection starts and ends, as positions of the screen. A
+    /// rectangle has its corners here, whichever way it was drawn.
+    pub fn selection_bounds(&self) -> Option<((u16, u32), (u16, u32))> {
+        let selection = self.selection()?;
+        let start = self.screen_position(&selection.start)?;
+        let end = self.screen_position(&selection.end)?;
+        Some(if selection.rectangle {
+            (
+                (start.0.min(end.0), start.1.min(end.1)),
+                (start.0.max(end.0), start.1.max(end.1)),
+            )
+        } else if (start.1, start.0) <= (end.1, end.0) {
+            (start, end)
+        } else {
+            (end, start)
+        })
+    }
+
+    fn screen_position(&self, grid_ref: &ffi::GridRef) -> Option<(u16, u32)> {
+        let mut point = ffi::PointCoordinate::default();
+        let terminal = self.handles.terminal;
+        let tag = ffi::POINT_SCREEN;
+        // SAFETY: The terminal is live, and both pointers are valid. The
+        // reference comes from this terminal, which has not changed since.
+        let result = unsafe {
+            ffi::ghostty_terminal_point_from_grid_ref(terminal, grid_ref, tag, &raw mut point)
+        };
+        (result == ffi::SUCCESS).then_some((point.x, point.y))
     }
 
     /// Selects what `find` comes up with for a viewport position.
@@ -1194,7 +1325,7 @@ impl Terminal {
         y: u16,
         find: impl FnOnce(ffi::GridRef, *mut ffi::Selection) -> c_int,
     ) {
-        let Some(grid_ref) = self.grid_ref(x, y) else {
+        let Some(grid_ref) = self.viewport_ref(x, y) else {
             return;
         };
         let mut selection = selection_at(grid_ref);
@@ -1248,7 +1379,11 @@ impl Terminal {
         let result =
             unsafe { ffi::ghostty_formatter_terminal_new(none, &raw mut formatter, terminal) };
         check(result).ok()?;
-        let text = format_selection(formatter, &selection);
+        // A rectangle's rows are separate pieces of text, unless it reaches the
+        // edge of the screen where they wrap. Spaces in them were asked for.
+        let reaches_edge = self.selection_bounds().map(|(_, end)| end.0 + 1) == Some(self.width());
+        let unwrap = !selection.rectangle || reaches_edge;
+        let text = format_selection(formatter, &selection, unwrap);
         // SAFETY: Created above and not used again.
         unsafe { ffi::ghostty_formatter_free(formatter) };
         text
@@ -1349,12 +1484,20 @@ fn fill_mouse_event(event: ffi::Handle, input: &MouseInput) -> Result<(), Error>
     check(unsafe { ffi::ghostty_mouse_event_set_position(event, position) })
 }
 
-fn format_selection(formatter: ffi::Handle, selection: &ffi::Selection) -> Option<String> {
-    let unwrap = true;
-    let unwrap_ptr = (&raw const unwrap).cast();
+fn format_selection(
+    formatter: ffi::Handle,
+    selection: &ffi::Selection,
+    unwrap: bool,
+) -> Option<String> {
+    let unwrap = (&raw const unwrap).cast();
     // SAFETY: The formatter is live, and the value matches the option's type.
     let result =
-        unsafe { ffi::ghostty_formatter_set(formatter, ffi::FORMATTER_OPT_UNWRAP, unwrap_ptr) };
+        unsafe { ffi::ghostty_formatter_set(formatter, ffi::FORMATTER_OPT_UNWRAP, unwrap) };
+    check(result).ok()?;
+    let trim = !selection.rectangle;
+    let trim = (&raw const trim).cast();
+    // SAFETY: As above.
+    let result = unsafe { ffi::ghostty_formatter_set(formatter, ffi::FORMATTER_OPT_TRIM, trim) };
     check(result).ok()?;
     let selection_ptr = ptr::from_ref(selection).cast();
     // SAFETY: As above.
@@ -1377,6 +1520,43 @@ fn format_selection(formatter: ffi::Handle, selection: &ffi::Selection) -> Optio
     // SAFETY: Allocated by the call above with the default allocator.
     unsafe { ffi::ghostty_free(none, text, len) };
     Some(copy)
+}
+
+/// What a cell of a [`Line`] holds.
+fn read_char(grid_ref: &ffi::GridRef) -> char {
+    let mut raw = 0;
+    // SAFETY: The reference was just made, and the out pointer is valid.
+    let result = unsafe { ffi::ghostty_grid_ref_cell(grid_ref, &raw mut raw) };
+    if result != ffi::SUCCESS {
+        return ' ';
+    }
+    if cell_value::<c_int>(raw, ffi::CELL_DATA_WIDE) == ffi::CELL_WIDE_SPACER_TAIL {
+        return '\0';
+    }
+    match char::from_u32(cell_value(raw, ffi::CELL_DATA_CODEPOINT)) {
+        None | Some('\0') => ' ',
+        Some(c) => c,
+    }
+}
+
+fn read_row_flags(grid_ref: &ffi::GridRef, line: &mut Line) {
+    let mut row = 0;
+    // SAFETY: The reference was just made, and the out pointer is valid.
+    if unsafe { ffi::ghostty_grid_ref_row(grid_ref, &raw mut row) } != ffi::SUCCESS {
+        return;
+    }
+    let out = (&raw mut line.wrapped).cast();
+    // SAFETY: `out` is valid for the bool this data documents.
+    best_effort(check(unsafe {
+        ffi::ghostty_row_get(row, ffi::SCREEN_ROW_DATA_WRAP, out)
+    }));
+    let mut prompt: c_int = 0;
+    let out = (&raw mut prompt).cast();
+    // SAFETY: `out` is valid for the enum this data documents.
+    best_effort(check(unsafe {
+        ffi::ghostty_row_get(row, ffi::SCREEN_ROW_DATA_SEMANTIC_PROMPT, out)
+    }));
+    line.prompt = prompt == ffi::ROW_SEMANTIC_PROMPT;
 }
 
 fn read_cell(cells: ffi::Handle) -> Cell {
