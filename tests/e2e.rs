@@ -585,6 +585,16 @@ impl Screen {
         String::from_utf8_lossy(&self.raw).into_owned()
     }
 
+    /// Waits for kl to have written this to the terminal.
+    fn wait_for_raw(&mut self, text: &str) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !self.raw_text().contains(text) {
+            self.pump();
+            assert!(Instant::now() < deadline, "no {text:?} from kl");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Waits for the outer terminal to color its cursor like this.
     fn wait_for_cursor_color(&mut self, color: Option<Rgb>) {
         let deadline = Instant::now() + TIMEOUT;
@@ -3216,6 +3226,17 @@ fn two_panes() -> Screen {
     screen.wait_for("a prompt in the new pane", |lines| lines[0].ends_with("│$"));
     screen.prefix("o");
     screen
+}
+
+#[test]
+fn the_pointer_shape_is_the_one_a_program_would_have_outside_of_kl() {
+    let mut screen = Screen::new(80, 24);
+    // Asking for the mouse made Ghostty show an arrow, so this has to be said.
+    screen.wait_for_raw("\x1b]22;text\x1b\\");
+    screen.run(r"printf '\033[?1000h'");
+    screen.wait_for_pointer_shape("default");
+    screen.run(r"printf '\033[?1000l'");
+    screen.wait_for_pointer_shape("text");
 }
 
 #[test]

@@ -6,7 +6,9 @@ use std::path::Path;
 use super::layout::{self, Layout, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
 use crate::command::{Beside, Direction, MoveWindow, Place, Resize, SplitKind};
-use crate::ghostty::{DEFAULT_POINTER_SHAPE, Link, MODE_SGR_PIXELS, OuterColors, Progress};
+use crate::ghostty::{
+    DEFAULT_POINTER_SHAPE, Link, MODE_SGR_PIXELS, MOUSE_POINTER_SHAPE, OuterColors, Progress,
+};
 use crate::sys::WinSize;
 
 /// Where a view that is too small for what it shows goes, as tmux has it: the
@@ -306,7 +308,14 @@ impl Session {
         };
         let id = pointer.map_or_else(|| self.active_id(), under);
         let pane = id.and_then(|id| self.panes.get(&id));
-        pane.map_or(DEFAULT_POINTER_SHAPE, |pane| pane.terminal.pointer_shape())
+        pane.map_or(DEFAULT_POINTER_SHAPE, |pane| {
+            let shape = pane.terminal.pointer_shape();
+            if shape == DEFAULT_POINTER_SHAPE && pane.terminal.mouse_tracking() {
+                MOUSE_POINTER_SHAPE
+            } else {
+                shape
+            }
+        })
     }
 
     /// Whether a program on display wants the mouse in pixels. Making anything

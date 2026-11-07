@@ -8,7 +8,7 @@ use super::motion::Position;
 use super::session::{Session, Window};
 use super::ui::{List, Ui};
 use crate::ghostty::{
-    self, Cell, CursorShape, DEFAULT_POINTER_SHAPE, Link, Match, Progress, Rgb, STYLE_BLINK,
+    self, Cell, CursorShape, Link, MOUSE_POINTER_SHAPE, Match, Progress, Rgb, STYLE_BLINK,
     STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE, STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE,
     STYLE_STRIKETHROUGH, STYLE_UNDERLINE_MASK, STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text,
     Width,
@@ -354,7 +354,8 @@ pub struct Renderer {
     progress: Option<Progress>,
     /// As in [`Session::progress_reports`], for the last one the terminal heard.
     progress_reports: u64,
-    /// The pointer shape the terminal is showing, if not the one it started with.
+    /// The pointer shape the terminal is showing, if not the one that asking for
+    /// the mouse gave it.
     pointer_shape: Option<&'static str>,
     /// Mouse reports were asked to come in pixels.
     pixel_mouse: bool,
@@ -688,7 +689,7 @@ impl Renderer {
         out: &mut Vec<u8>,
     ) {
         let wanted = session.pointer_shape(view, pointer);
-        if wanted != self.pointer_shape.unwrap_or(DEFAULT_POINTER_SHAPE) {
+        if wanted != self.pointer_shape.unwrap_or(MOUSE_POINTER_SHAPE) {
             out.extend_from_slice(format!("\x1b]22;{wanted}\x1b\\").as_bytes());
             self.pointer_shape = Some(wanted);
         }

@@ -102,6 +102,9 @@ const POINTER_SHAPES: [&str; 34] = [
 /// The pointer shape of a terminal nobody asked anything of.
 pub const DEFAULT_POINTER_SHAPE: &str = "text";
 
+/// What the Ghostty app turns the pointer into for a program asking for the mouse.
+pub const MOUSE_POINTER_SHAPE: &str = "default";
+
 /// The character that shows a piece of an image in a cell.
 const IMAGE_PLACEHOLDER: char = '\u{10EEEE}';
 
