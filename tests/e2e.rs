@@ -21,10 +21,11 @@ mod sys;
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs::{self, File, Permissions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::rc::Rc;
@@ -68,7 +69,12 @@ impl Scratch {
     fn new() -> Self {
         let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("kl-e2e-{}-{id}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        // Panes run a login shell, which reads what the system has for those, and
+        // on macOS that sets a prompt of its own. This one is by the same name.
+        let shell = dir.join("bin/sh");
+        fs::write(&shell, "#!/bin/sh\nexec /bin/sh -i\n").unwrap();
+        fs::set_permissions(&shell, Permissions::from_mode(0o755)).unwrap();
         Self(dir)
     }
 }
@@ -87,7 +93,7 @@ fn kl_command(dir: &Path) -> Command {
         .env("KL_TMPDIR", dir)
         // A login shell runs in panes, which must not read the real dotfiles.
         .env("HOME", dir)
-        .env("SHELL", "/bin/sh")
+        .env("SHELL", dir.join("bin/sh"))
         .env("PS1", "$ ")
         .env("ENV", "/dev/null")
         .env("TERM", "xterm-ghostty")
@@ -2388,6 +2394,20 @@ fn reports_an_unusable_socket_path_right_away() {
     command.env("KL_TMPDIR", &long);
     let (mut pty, mut child) = sys::spawn_on_pty(command, size).unwrap();
     let start = Instant::now();
+    // Reading comes first: on macOS a process only gets to exit once what it
+    // wrote to its terminal was read. This ends with EIO, or with EOF there.
+    let mut output = Vec::new();
+    let mut buf = [0; 1024];
+    loop {
+        match pty.read(&mut buf) {
+            Ok(0) => break,
+            Ok(len) => output.extend_from_slice(&buf[..len]),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => break,
+        }
+    }
     let status = child.wait().unwrap();
     assert!(!status.success());
     assert!(
@@ -2395,11 +2415,6 @@ fn reports_an_unusable_socket_path_right_away() {
         "{:?}",
         start.elapsed()
     );
-    let mut output = Vec::new();
-    let mut buf = [0; 1024];
-    while let Ok(len @ 1..) = pty.read(&mut buf) {
-        output.extend_from_slice(&buf[..len]);
-    }
     let output = String::from_utf8_lossy(&output);
     assert!(output.contains("SUN_LEN"), "{output}");
 }

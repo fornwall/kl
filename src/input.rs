@@ -1217,7 +1217,12 @@ mod tests {
             // Ctrl, alt and super keep a shifted character out of the sequence.
             (&b"\x1b[120:88;6u"[..], LEGACY, &b"\x1b[120;6u"[..]),
             (b"\x1b[120:88;4u", LEGACY, b"\x1bX"),
-            (b"\x1b[120;9u", LEGACY, b"x"),
+            // On macOS, super keeps a key away from programs altogether.
+            (
+                b"\x1b[120;9u",
+                LEGACY,
+                if cfg!(target_os = "macos") { b"" } else { b"x" },
+            ),
             // The same for a character that has no control code.
             (b"\x1b[91;5u", LEGACY, b"\x1b[91;5u"),
             (b"\x1b[99;5u", LEGACY, b"\x03"),
