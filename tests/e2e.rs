@@ -626,6 +626,58 @@ fn leaves_the_terminal_as_it_found_it() {
     ] {
         assert!(raw.contains(sequence), "{sequence:?} missing");
     }
+    // Ghostty has grapheme clustering on by default, and others have it off.
+    for setting in ["\x1b[?2027h", "\x1b[?2027l"] {
+        let mut outer = Terminal::new(80, 24).unwrap();
+        outer.write(setting.as_bytes());
+        let before = outer.mode(2027);
+        outer.write(&screen.raw);
+        assert_eq!(outer.mode(2027), before, "after {setting:?}");
+    }
+}
+
+#[test]
+fn survives_the_terminal_going_away() {
+    // Keeping the directory keeps the server, which would otherwise end first.
+    let Screen {
+        pty,
+        mut child,
+        dir: _dir,
+        ..
+    } = Screen::new(80, 24);
+    drop(pty);
+    let status = child.wait().unwrap();
+    assert!(matches!(status.code(), Some(0 | 1)), "{status}");
+}
+
+#[test]
+fn does_not_mind_nobody_reading_its_output() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut command = Command::new(KL);
+    let status = command.arg("--help").stdout(writer).status().unwrap();
+    assert!(status.success(), "{status}");
+}
+
+#[test]
+fn reaps_the_panes_that_end() {
+    let mut screen = Screen::new(80, 24);
+    assert!(screen.command(&["split-window", "true"]).status.success());
+    assert!(screen.command(&["split-window"]).status.success());
+    assert!(screen.command(&["kill-pane"]).status.success());
+    screen.run(
+        r#"while ps -A -o ppid=,stat= | grep -q "^ *${KL##*,} *Z"; do sleep 0.01; done; echo re''aped"#,
+    );
+    screen.wait_for_line("reaped");
+}
+
+#[test]
+fn opens_panes_after_the_directory_is_gone() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("cd; mkdir gone; cd gone; rmdir ../gone; echo re''ady");
+    screen.wait_for_line("ready");
+    let output = screen.command(&["split-window"]);
+    assert!(output.status.success(), "{output:?}");
 }
 
 #[test]
@@ -771,6 +823,41 @@ fn a_bell_in_another_window_is_flagged() {
 }
 
 #[test]
+fn the_window_taking_over_from_a_closed_one_loses_its_bell_flag() {
+    let mut screen = Screen::new(80, 24);
+    screen.run(r"sleep 1; printf '\007'");
+    screen.prefix("c");
+    screen.wait_for("the bell flag", |lines| {
+        lines.last().is_some_and(|status| status.contains('!'))
+    });
+    assert!(screen.command(&["kill-window"]).status.success());
+    screen.wait_for("the bell flag to clear", |lines| {
+        lines.last().is_some_and(|status| !status.contains('!'))
+    });
+}
+
+#[test]
+fn programs_hear_about_focus_moving_between_windows() {
+    let mut screen = Screen::new(80, 24);
+    screen.run_setup_then_cat(r"printf '\033[?1004h'");
+    screen.prefix("c");
+    screen.wait_for("a second window", |lines| {
+        lines.last().is_some_and(|status| status.contains(" 1:"))
+    });
+    screen.prefix("p");
+    screen.wait_for_text("^[[O^[[I");
+}
+
+#[test]
+fn programs_hear_about_focus_moving_when_a_pane_closes() {
+    let mut screen = Screen::new(80, 24);
+    screen.run_setup_then_cat(r"printf '\033[?1004h'");
+    assert!(screen.command(&["split-window"]).status.success());
+    assert!(screen.command(&["kill-pane"]).status.success());
+    screen.wait_for_text("^[[O^[[I");
+}
+
+#[test]
 fn forwards_clipboard_writes_to_the_outer_terminal() {
     let mut screen = Screen::new(80, 24);
     screen.run(r"printf '\033]52;c;aGVsbG8=\007'");
@@ -837,6 +924,24 @@ fn copy_mode_scrolls_through_history() {
     screen.type_text("q");
     screen.wait_for("the end of history", |lines| {
         lines.iter().any(|line| line.trim() == "100") && !lines[0].contains('/')
+    });
+}
+
+#[test]
+fn the_prefix_works_in_copy_mode() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("c");
+    screen.wait_for("a second window", |lines| {
+        lines.last().is_some_and(|status| status.contains(" 1:"))
+    });
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.prefix("p");
+    screen.wait_for("the first window", |lines| {
+        let status = lines.last().unwrap();
+        status
+            .split(' ')
+            .any(|window| window.starts_with("0:") && window.ends_with('*'))
     });
 }
 

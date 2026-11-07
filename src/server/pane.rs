@@ -6,7 +6,7 @@ use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Command;
 
 use super::copy_mode::CopyMode;
 use super::layout::{PaneId, Rect};
@@ -42,11 +42,14 @@ pub struct Pane {
     pub copy_mode: Option<CopyMode>,
     /// Set when every row must be drawn, not just the changed ones.
     pub redraw: bool,
+    /// The program, which the server reaps along with any other child.
+    pub pid: u32,
+    /// The program ended or closed the pty. A background job can keep the pty
+    /// open past the end of the program, so the end of output alone does not tell.
+    pub exited: bool,
     pty: File,
-    child: Child,
     /// Bytes on their way to the program.
     pending: Vec<u8>,
-    exited: bool,
     cell_size: (u16, u16),
 }
 
@@ -125,10 +128,10 @@ impl Pane {
             rect: Rect::default(),
             copy_mode: None,
             redraw: true,
-            pty,
-            child,
-            pending: Vec::new(),
+            pid: child.id(),
             exited: false,
+            pty,
+            pending: Vec::new(),
             cell_size: (0, 0),
         })
     }
@@ -181,12 +184,6 @@ impl Pane {
         activity
     }
 
-    /// Whether the program is gone. A background job can keep the pty open past
-    /// the end of the program, so the end of output alone does not tell.
-    pub fn has_exited(&mut self) -> bool {
-        self.exited || matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
-    }
-
     /// Moves the pane, telling the program if that changed its size.
     pub fn place(&mut self, rect: Rect, cell_size: (u16, u16)) {
         let unchanged_size = rect.width == self.rect.width
@@ -204,7 +201,7 @@ impl Pane {
             self.terminal
                 .resize(cols, rows, u32::from(cell_width), u32::from(cell_height));
         if let Err(error) = result {
-            eprintln!("resizing pane {}: {error}", self.id);
+            sys::log(format_args!("resizing pane {}: {error}", self.id));
         }
         let size = WinSize {
             cols,
@@ -213,7 +210,10 @@ impl Pane {
             height_px: rows.saturating_mul(cell_height),
         };
         if let Err(error) = sys::set_winsize(self.pty.as_fd(), size) {
-            eprintln!("resizing the pty of pane {}: {error}", self.id);
+            sys::log(format_args!(
+                "resizing the pty of pane {}: {error}",
+                self.id
+            ));
         }
         // A resize can move the cursor out from under copy mode.
         if let Some(copy_mode) = &mut self.copy_mode {
@@ -223,6 +223,12 @@ impl Pane {
         self.take_activity();
     }
 
+    /// Tells the program, if it asked, that it gained or lost the keyboard.
+    pub fn report_focus(&mut self, focused: bool) {
+        let report = self.terminal.encode_focus(focused);
+        self.send(&report);
+    }
+
     /// The name of what is running in the foreground.
     pub fn foreground_name(&self) -> Option<String> {
         sys::foreground_name(self.pty.as_fd())
@@ -230,10 +236,11 @@ impl Pane {
 
     /// The directory for a new pane opened from this one to start in. What the
     /// shell reported is preferred, since it survives programs in the foreground
-    /// and works on every platform.
+    /// and works on every platform. The directory may be gone by now.
     pub fn working_directory(&self) -> Option<PathBuf> {
         let reported = self.terminal.pwd();
-        path_from_pwd(&reported).or_else(|| sys::foreground_cwd(self.pty.as_fd()))
+        path_from_pwd(&reported)
+            .or_else(|| sys::foreground_cwd(self.pty.as_fd()).filter(|path| path.is_dir()))
     }
 }
 

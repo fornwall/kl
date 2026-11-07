@@ -81,7 +81,6 @@ fn page(pane: &Pane) -> i32 {
 fn handle_movement(pane: &mut Pane, mode: &mut CopyMode, event: &KeyEvent) -> bool {
     let half_page = page(pane) / 2;
     match (event.key, event.char()) {
-        _ if event.is_ctrl('b') => scroll(pane, -page(pane)),
         _ if event.is_ctrl('f') => scroll(pane, page(pane)),
         _ if event.is_ctrl('u') => scroll(pane, -half_page),
         _ if event.is_ctrl('d') => scroll(pane, half_page),

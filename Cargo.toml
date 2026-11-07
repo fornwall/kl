@@ -21,11 +21,14 @@ pedantic = { level = "deny", priority = -1 }
 
 # Hand-picked from `restriction`, which is not meant to be enabled as a group.
 
-# A panic in a multiplexer takes every session down with it.
+# A panic in a multiplexer takes every session down with it. That goes for the
+# print macros too, which panic if the output is gone.
 expect_used = "deny"
 get_unwrap = "deny"
 panic = "deny"
 panic_in_result_fn = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
 string_slice = "deny"
 todo = "deny"
 unimplemented = "deny"
@@ -33,7 +36,7 @@ unreachable = "deny"
 unwrap_in_result = "deny"
 unwrap_used = "deny"
 
-# Unsafe hygiene, for the pty and ioctl code to come.
+# Unsafe hygiene.
 multiple_unsafe_ops_per_block = "deny"
 undocumented_unsafe_blocks = "deny"
 unnecessary_safety_comment = "deny"

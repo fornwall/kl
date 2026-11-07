@@ -11,6 +11,7 @@ mod sys;
 
 use std::env;
 use std::error::Error;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -47,21 +48,27 @@ Other:
 
 Keys follow tmux, with C-b as the prefix: c n p l 0-9 , & for windows,
 % \" o ; z x arrows for panes, [ ] for copying, : for commands and d to detach.
-The mouse selects panes and windows, drags borders, scrolls and copies text.";
+The mouse selects panes and windows, drags borders, scrolls and copies text.
+";
+
+/// Unlike `print!`, this does not panic when nobody is reading any more.
+fn print(text: &str) {
+    drop(io::stdout().write_all(text.as_bytes()));
+}
 
 fn attach() -> Result<ExitCode, Box<dyn Error>> {
     let message = client::attach(&client::socket_path()?)?;
-    println!("{message}");
+    print(&format!("{message}\n"));
     Ok(ExitCode::SUCCESS)
 }
 
 fn run_command(args: &[String]) -> Result<ExitCode, Box<dyn Error>> {
     let (success, text) = client::run_command(&client::socket_path()?, args)?;
     if success {
-        print!("{text}");
+        print(&text);
         Ok(ExitCode::SUCCESS)
     } else {
-        eprintln!("kl: {text}");
+        sys::log(format_args!("kl: {text}"));
         Ok(ExitCode::FAILURE)
     }
 }
@@ -75,11 +82,11 @@ fn run(args: &[String]) -> Result<ExitCode, Box<dyn Error>> {
             Ok(ExitCode::SUCCESS)
         }
         Some("-h" | "--help") => {
-            println!("{USAGE}");
+            print(USAGE);
             Ok(ExitCode::SUCCESS)
         }
         Some("-V" | "--version") => {
-            println!("kl {}", env!("CARGO_PKG_VERSION"));
+            print(concat!("kl ", env!("CARGO_PKG_VERSION"), "\n"));
             Ok(ExitCode::SUCCESS)
         }
         Some(_) => run_command(args),
@@ -89,7 +96,7 @@ fn run(args: &[String]) -> Result<ExitCode, Box<dyn Error>> {
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     run(&args).unwrap_or_else(|error| {
-        eprintln!("kl: {error}");
+        sys::log(format_args!("kl: {error}"));
         ExitCode::FAILURE
     })
 }

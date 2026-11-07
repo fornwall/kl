@@ -1,6 +1,7 @@
 //! Thin safe wrappers over the libc calls that std does not cover.
 
 use std::ffi::{CStr, c_int};
+use std::fmt::Display;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
@@ -19,6 +20,12 @@ fn check(result: c_int) -> io::Result<c_int> {
     } else {
         Ok(result)
     }
+}
+
+/// Writes a line to stderr. `eprintln!` would panic if that fails, as it does
+/// once the terminal is gone or the disk with the server's log is full.
+pub fn log(message: impl Display) {
+    drop(writeln!(io::stderr(), "{message}"));
 }
 
 /// Size of a terminal in cells and, if the terminal reports it, pixels.
@@ -187,11 +194,7 @@ impl Drop for RawMode<'_> {
     fn drop(&mut self) {
         // SAFETY: Reads the valid `termios` it gets. A failure here means the
         // terminal is gone, which leaves nothing to restore.
-        let result =
-            unsafe { libc::tcsetattr(self.fd.as_raw_fd(), libc::TCSANOW, &raw const self.saved) };
-        if result < 0 {
-            eprintln!("restoring the terminal: {}", io::Error::last_os_error());
-        }
+        unsafe { libc::tcsetattr(self.fd.as_raw_fd(), libc::TCSANOW, &raw const self.saved) };
     }
 }
 
@@ -353,6 +356,19 @@ impl Selector {
     }
 }
 
+/// Collects the children that have exited, returning their process ids.
+pub fn reap_children() -> Vec<u32> {
+    let mut pids = Vec::new();
+    loop {
+        // SAFETY: A null status is allowed, and no other memory is involved.
+        let pid = unsafe { libc::waitpid(-1, ptr::null_mut(), libc::WNOHANG) };
+        match u32::try_from(pid) {
+            Ok(pid @ 1..) => pids.push(pid),
+            _ => return pids,
+        }
+    }
+}
+
 #[must_use]
 pub fn user_id() -> u32 {
     // SAFETY: Takes no arguments, and it cannot fail.
@@ -440,14 +456,13 @@ pub fn local_time(format: &CStr) -> String {
 pub fn flush_some(mut output: impl Write, pending: &mut Vec<u8>) -> io::Result<()> {
     let mut written = 0;
     let result = loop {
-        match output.write(pending.get(written..).unwrap_or(&[])) {
+        let rest = pending.get(written..).unwrap_or(&[]);
+        if rest.is_empty() {
+            break Ok(());
+        }
+        match output.write(rest) {
             Ok(0) => break Ok(()),
-            Ok(len) => {
-                written += len;
-                if written == pending.len() {
-                    break Ok(());
-                }
-            }
+            Ok(len) => written += len,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => break Ok(()),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => break Err(error),

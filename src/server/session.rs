@@ -110,13 +110,6 @@ impl Session {
         }
     }
 
-    fn window_of(&self, pane: PaneId) -> Option<u32> {
-        self.windows
-            .iter()
-            .find(|window| window.root.contains(pane))
-            .map(|window| window.index)
-    }
-
     /// Whether this pane is on the screen right now.
     pub fn is_visible(&self, pane: PaneId) -> bool {
         self.visible_panes().iter().any(|(id, _)| *id == pane)
@@ -233,16 +226,13 @@ impl Session {
     /// last one in it.
     pub fn remove_pane(&mut self, id: PaneId) {
         self.panes.remove(&id);
-        let Some(index) = self.window_of(id) else {
-            return;
-        };
-        let Some(position) = self.windows.iter().position(|w| w.index == index) else {
+        let Some(position) = self.windows.iter().position(|w| w.root.contains(id)) else {
             return;
         };
         let window = &mut self.windows[position];
         let root = std::mem::replace(&mut window.root, Node::Leaf(id));
         let Some(root) = root.remove(id) else {
-            self.windows.remove(position);
+            let index = self.windows.remove(position).index;
             self.after_window_removed(index);
             return;
         };
@@ -259,6 +249,9 @@ impl Session {
                 .map(|(id, _)| *id);
             let next = window.last_active.take().or(fallback);
             window.active = next.unwrap_or(id);
+            if window.index == self.current {
+                self.report_focus(true);
+            }
         }
         self.relayout();
     }
@@ -273,25 +266,28 @@ impl Session {
                 after.or_else(|| self.windows.last()).map(|w| w.index)
             });
             if let Some(next) = next {
-                self.current = next;
+                self.select_window(next);
             }
         }
         self.relayout();
     }
 
-    /// Closes all panes of a window, returning them to be disposed of.
     pub fn kill_current_window(&mut self) {
-        let Some(window) = self.window() else {
+        let position = self.windows.iter().position(|w| w.index == self.current);
+        let Some(position) = position else {
             return;
         };
-        let panes: Vec<PaneId> = window
-            .root
-            .panes(Rect::default())
-            .iter()
-            .map(|(id, _)| *id)
-            .collect();
-        for id in panes {
-            self.remove_pane(id);
+        let window = self.windows.remove(position);
+        for (id, _) in window.root.panes(Rect::default()) {
+            self.panes.remove(&id);
+        }
+        self.after_window_removed(window.index);
+    }
+
+    /// Tells the active pane that it gained or lost the keyboard.
+    pub fn report_focus(&mut self, focused: bool) {
+        if let Some(pane) = self.active_pane_mut() {
+            pane.report_focus(focused);
         }
     }
 
@@ -300,9 +296,11 @@ impl Session {
             return false;
         }
         if self.current != index {
+            self.report_focus(false);
             self.last =
                 Some(self.current).filter(|old| self.windows.iter().any(|w| w.index == *old));
             self.current = index;
+            self.report_focus(true);
         }
         if let Some(window) = self.window_mut() {
             window.bell = false;
@@ -335,22 +333,16 @@ impl Session {
     }
 
     pub fn select_pane(&mut self, id: PaneId) {
-        let Some(window) = self.window_mut() else {
-            return;
-        };
-        if window.active == id || !window.root.contains(id) {
+        let selectable = |window: &Window| window.active != id && window.root.contains(id);
+        if !self.window().is_some_and(selectable) {
             return;
         }
-        let old = window.active;
-        window.last_active = Some(old);
-        window.active = id;
-        // Programs that asked for it should know they lost or gained the keyboard.
-        for (pane, focused) in [(old, false), (id, true)] {
-            if let Some(pane) = self.panes.get_mut(&pane) {
-                let report = pane.terminal.encode_focus(focused);
-                pane.send(&report);
-            }
+        self.report_focus(false);
+        if let Some(window) = self.window_mut() {
+            window.last_active = Some(window.active);
+            window.active = id;
         }
+        self.report_focus(true);
         self.repaint = true;
     }
 

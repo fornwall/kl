@@ -185,12 +185,7 @@ impl Server {
             Event::Key(event) => self.handle_key(&event),
             Event::Mouse(event) => self.handle_mouse(event),
             Event::Paste(text) => self.handle_paste(&text),
-            Event::Focus(focused) => {
-                if let Some(pane) = self.session.active_pane_mut() {
-                    let report = pane.terminal.encode_focus(focused);
-                    pane.send(&report);
-                }
-            }
+            Event::Focus(focused) => self.session.report_focus(focused),
             Event::Foreground(rgb) => self.set_colors(Some(rgb), None),
             Event::Background(rgb) => self.set_colors(None, Some(rgb)),
         }
@@ -243,18 +238,18 @@ impl Server {
         if captured && key::is_modifier(event.key) {
             return;
         }
-        if captured {
+        if captured || event.is_ctrl('b') {
             self.swallow(event.key);
         }
         if self.ui.prompt.is_some() {
             self.prompt_key(event);
         } else if std::mem::take(&mut self.prefix) {
             self.run_binding(event);
+        } else if event.is_ctrl('b') {
+            // As in tmux, the prefix goes before the keys of copy mode too.
+            self.prefix = true;
         } else if self.in_copy_mode() {
             self.copy_mode_key(event);
-        } else if event.is_ctrl('b') {
-            self.swallow(event.key);
-            self.prefix = true;
         } else {
             self.forward_key(event);
         }

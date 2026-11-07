@@ -72,7 +72,7 @@ const fn check(result: c_int) -> Result<(), Error> {
 /// can no longer query. Logged, since there is nothing better to do with it.
 fn best_effort(result: Result<(), Error>) {
     if let Err(error) = result {
-        eprintln!("{error}");
+        crate::sys::log(error);
     }
 }
 
@@ -1526,6 +1526,13 @@ mod tests {
         assert_eq!(terminal.encode_paste(b"a\nb"), b"a\rb");
         terminal.write(b"\x1b[?2004h");
         assert_eq!(terminal.encode_paste(b"ab"), b"\x1b[200~ab\x1b[201~");
+    }
+
+    #[test]
+    fn pastes_more_than_the_encoder_buffer_at_first_holds() {
+        let terminal = Terminal::new(10, 2).unwrap();
+        let text = vec![b'a'; 1000];
+        assert_eq!(terminal.encode_paste(&text), text);
     }
 
     #[test]

@@ -44,6 +44,10 @@ const STARTUP_TIME: Duration = Duration::from_secs(10);
 /// How many copied texts to keep.
 const MAX_BUFFERS: usize = 50;
 
+/// How long a client gets to take in the goodbye, since one that stopped reading
+/// must not keep the server alive.
+const GOODBYE_TIME: Duration = Duration::from_secs(1);
+
 struct Connection {
     id: u64,
     stream: UnixStream,
@@ -95,7 +99,7 @@ impl Connection {
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    eprintln!("connection {}: {error}", self.id);
+                    sys::log(format_args!("connection {}: {error}", self.id));
                     self.closed = true;
                     break;
                 }
@@ -131,8 +135,6 @@ pub struct Server {
     last_tick: Instant,
     started_at: Instant,
     escape_since: Option<Instant>,
-    /// A pane may be gone, so check them.
-    check_panes: bool,
     lifecycle: Lifecycle,
     exit_message: &'static str,
 }
@@ -195,7 +197,6 @@ pub fn run(socket: &Path) -> Result<(), Box<dyn Error>> {
         last_tick: now,
         started_at: now,
         escape_since: None,
-        check_panes: false,
         lifecycle: Lifecycle::Starting,
         exit_message: "[exited]",
     };
@@ -244,8 +245,14 @@ impl Server {
 
     fn next_wakeup(&self) -> Instant {
         let mut next = self.last_tick + TICK_TIME;
-        if self.dirty && self.can_draw() {
-            next = next.min(self.last_frame + FRAME_TIME);
+        if self.can_draw() {
+            if self.dirty {
+                next = next.min(self.last_frame + FRAME_TIME);
+            }
+            // Drawing is what ends a hold, so without it there is nothing to do.
+            if let Some(deadline) = self.hold_deadline() {
+                next = next.min(deadline);
+            }
         }
         if let Some(since) = self.escape_since {
             next = next.min(since + ESCAPE_TIME);
@@ -253,13 +260,14 @@ impl Server {
         if let Some(deadline) = self.ui.message_deadline() {
             next = next.min(deadline);
         }
-        for (id, _) in self.session.visible_panes() {
-            let hold = self.session.panes.get(&id);
-            if let Some(deadline) = hold.and_then(|pane| pane.terminal.hold_deadline()) {
-                next = next.min(deadline);
-            }
-        }
         next
+    }
+
+    /// When the first program holding a visible pane gets to be ignored.
+    fn hold_deadline(&self) -> Option<Instant> {
+        let panes = self.session.visible_panes();
+        let hold = |id| self.session.panes.get(id)?.terminal.hold_deadline();
+        panes.iter().filter_map(|(id, _)| hold(id)).min()
     }
 
     fn handle_signals(&mut self, selector: &Selector) {
@@ -268,7 +276,10 @@ impl Server {
         }
         for signal in sys::pending_signals(&self.signals) {
             if signal == SIGCHLD {
-                self.check_panes = true;
+                let pids = sys::reap_children();
+                for pane in self.session.panes.values_mut() {
+                    pane.exited |= pids.contains(&pane.pid);
+                }
             } else {
                 self.exit_message = "[server exited]";
                 self.lifecycle = Lifecycle::Quitting;
@@ -409,8 +420,6 @@ impl Server {
     }
 
     fn after_read(&mut self, id: PaneId, activity: &Activity) {
-        // Read also finds out about programs that closed the pty.
-        self.check_panes = true;
         let visible = self.session.is_visible(id);
         self.dirty |= visible || activity.title_changed;
         for text in &activity.clipboard {
@@ -467,11 +476,7 @@ impl Server {
             }
         }
         self.dirty |= self.ui.expire_message();
-        for (id, _) in self.session.visible_panes() {
-            let hold = self.session.panes.get(&id);
-            let deadline = hold.and_then(|pane| pane.terminal.hold_deadline());
-            self.dirty |= deadline.is_some_and(|deadline| now >= deadline);
-        }
+        self.dirty |= self.hold_deadline().is_some_and(|deadline| now >= deadline);
         if now >= self.last_tick + TICK_TIME {
             self.last_tick = now;
             self.refresh_window_names();
@@ -492,14 +497,10 @@ impl Server {
     }
 
     fn reap_panes(&mut self) {
-        if !std::mem::take(&mut self.check_panes) {
-            return;
-        }
-        let exited: Vec<PaneId> = self
-            .session
-            .panes
-            .iter_mut()
-            .filter_map(|(id, pane)| pane.has_exited().then_some(*id))
+        let panes = self.session.panes.values();
+        let exited: Vec<PaneId> = panes
+            .filter(|pane| pane.exited)
+            .map(|pane| pane.id)
             .collect();
         for id in exited {
             self.session.remove_pane(id);
@@ -544,16 +545,19 @@ impl Server {
     }
 
     /// Tells clients goodbye. Blocking is fine here, since nothing is left to
-    /// serve, and it makes sure they get to restore their terminals.
+    /// serve, and it gives them the best chance to restore their terminals.
     fn shutdown(&mut self) {
         let goodbye = ServerMessage::Exit(self.exit_message.to_owned());
         for connection in &mut self.connections {
             let mut message = std::mem::take(&mut connection.output);
             goodbye.encode(&mut message);
-            if connection.stream.set_nonblocking(false).is_ok()
-                && (&connection.stream).write_all(&message).is_err()
-            {
-                eprintln!("connection {} left without a goodbye", connection.id);
+            let stream = &connection.stream;
+            let result = stream
+                .set_nonblocking(false)
+                .and_then(|()| stream.set_write_timeout(Some(GOODBYE_TIME)))
+                .and_then(|()| { stream }.write_all(&message));
+            if let Err(error) = result {
+                sys::log(format_args!("goodbye to {}: {error}", connection.id));
             }
         }
     }

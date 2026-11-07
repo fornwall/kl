@@ -141,11 +141,13 @@ pub const fn from_kitty_code(code: u32) -> Option<c_int> {
         57441 => SHIFT_LEFT,
         57442 => CONTROL_LEFT,
         57443 => ALT_LEFT,
-        57444 | 57446 => META_LEFT,
+        57444..=57446 => META_LEFT,
         57447 => SHIFT_RIGHT,
         57448 => CONTROL_RIGHT,
-        57449 => ALT_RIGHT,
-        57450 | 57452 => META_RIGHT,
+        // ISO level 3 and 5 shift are AltGr and friends, which have to stay out
+        // of the way of a key typed with them after the prefix.
+        57449 | 57453 | 57454 => ALT_RIGHT,
+        57450..=57452 => META_RIGHT,
         _ => return None,
     })
 }
@@ -232,5 +234,8 @@ mod tests {
         assert_eq!(from_kitty_code(57441), Some(SHIFT_LEFT));
         assert!(is_modifier(SHIFT_LEFT));
         assert!(!is_modifier(ENTER));
+        // Hyper, and ISO level 3 shift, which is AltGr.
+        assert_eq!(from_kitty_code(57445).map(is_modifier), Some(true));
+        assert_eq!(from_kitty_code(57453).map(is_modifier), Some(true));
     }
 }

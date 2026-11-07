@@ -361,9 +361,9 @@ fn parse_osc(body: &[u8]) -> Option<Event> {
 fn parse_color(color: &str) -> Option<Rgb> {
     let mut parts = color.strip_prefix("rgb:")?.split('/');
     let component = |part: Option<&str>| -> Option<u8> {
-        let part = part?;
+        let part = part.filter(|part| part.len() <= 4)?;
         let value = u32::from_str_radix(part, 16).ok()?;
-        let max = 16_u32.checked_pow(u32::try_from(part.len()).ok()?)? - 1;
+        let max = 16_u32.pow(u32::try_from(part.len()).ok()?) - 1;
         u8::try_from(value * 255 / max).ok()
     };
     Some(Rgb {
@@ -391,6 +391,7 @@ fn parse_csi(rest: &[u8]) -> Step {
     };
     match (last, params) {
         (b'~', "200") => Step::PasteStart(used),
+        (b'Z', "") => Step::Consumed(used, Some(key_event(key::TAB, MOD_SHIFT))),
         (b'I', "") => Step::Consumed(used, Some(Event::Focus(true))),
         (b'O', "") => Step::Consumed(used, Some(Event::Focus(false))),
         (b'M' | b'm', _) if params.starts_with('<') => {
@@ -511,14 +512,16 @@ fn parse_mouse(params: &str, pressed: bool) -> Option<MouseEvent> {
             mods |= value;
         }
     }
-    let button = match (code & 0x3, code & 64 != 0) {
-        (0, false) => Some(MouseButton::Left),
-        (1, false) => Some(MouseButton::Middle),
-        (2, false) => Some(MouseButton::Right),
-        (0, true) => Some(MouseButton::WheelUp),
-        (1, true) => Some(MouseButton::WheelDown),
-        (2, true) => Some(MouseButton::WheelLeft),
-        (3, true) => Some(MouseButton::WheelRight),
+    // What is left without the modifiers and the motion bit. The buttons from
+    // 128 up are the extra ones on the side of a mouse.
+    let button = match code & !0b11_1100 {
+        0 => Some(MouseButton::Left),
+        1 => Some(MouseButton::Middle),
+        2 => Some(MouseButton::Right),
+        64 => Some(MouseButton::WheelUp),
+        65 => Some(MouseButton::WheelDown),
+        66 => Some(MouseButton::WheelLeft),
+        67 => Some(MouseButton::WheelRight),
         _ => None,
     };
     let kind = match (code & 32 != 0, pressed) {
@@ -606,6 +609,13 @@ mod tests {
         let event = only_key(b"\x1b[1;5C");
         assert_eq!(event.key, key::ARROW_RIGHT);
         assert_eq!(event.mods, MOD_CTRL);
+    }
+
+    #[test]
+    fn reads_legacy_shift_tab() {
+        let event = only_key(b"\x1b[Z");
+        assert_eq!(event.key, key::TAB);
+        assert_eq!(event.mods, MOD_SHIFT);
     }
 
     #[test]
@@ -735,6 +745,20 @@ mod tests {
     }
 
     #[test]
+    fn the_extra_mouse_buttons_are_not_clicks() {
+        assert_eq!(
+            events(b"\x1b[<128;1;1M"),
+            [Event::Mouse(MouseEvent {
+                kind: MouseKind::Press,
+                button: None,
+                mods: 0,
+                x: 0,
+                y: 0,
+            })]
+        );
+    }
+
+    #[test]
     fn reads_focus_events() {
         assert_eq!(
             events(b"\x1b[I\x1b[O"),
@@ -794,6 +818,7 @@ mod tests {
             events(b"\x1b]11;rgb:11/22/33\x07"),
             [Event::Background(background)]
         );
+        assert_eq!(events(b"\x1b]11;rgb:fffffff/0/0\x07"), []);
     }
 
     #[test]
