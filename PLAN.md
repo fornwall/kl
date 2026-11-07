@@ -12,6 +12,8 @@ The first iteration has the core of tmux, with no configuration:
 - Windows and panes: creating, closing, switching, renaming, splitting, zooming,
   resizing, with the status line and tmux's default keys on the `C-b` prefix.
 - Copy mode, the `:` prompt, and the same commands from the command line.
+- Upgrading without losing anything: `restart-server` turns the server into a new
+  binary, with programs still running and clients attached again.
 - The mouse is always on: select panes and windows, drag borders, scroll, select
   text (double and triple click too), and paste with the middle button. Programs
   that ask for the mouse get it, and holding shift takes it back.
@@ -92,7 +94,11 @@ Things panes can ask for that stop at kl today.
 - Several clients at once. A new client currently takes over from the old one.
   This raises the question of which size wins, and tmux's answers are a good
   start.
-- Surviving a server restart, with libghostty-vt's `snapshot` feature.
+- Surviving a crash or a reboot. `restart-server` replaces a running server with
+  programs still running, by way of `exec`, but nothing can keep programs alive
+  through those two. Bringing back the layout and what panes showed, with new
+  shells, would mean regularly writing what is on screen to disk, which needs a
+  decision first.
 
 ### Later: settings
 

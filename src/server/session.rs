@@ -60,8 +60,8 @@ pub struct Session {
     /// A pane reported progress, which the outer terminal wants to hear even if
     /// it is the same as before: it gives up on a report that stays quiet.
     pub progress_reported: bool,
-    socket: String,
-    next_pane: PaneId,
+    pub socket: String,
+    pub next_pane: PaneId,
 }
 
 impl Session {

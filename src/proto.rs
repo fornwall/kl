@@ -7,7 +7,7 @@
 use crate::sys::WinSize;
 
 /// Bumped on any change to the messages below.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Larger than anything sent in practice, to catch a corrupt stream.
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
@@ -21,6 +21,7 @@ const TAG_COMMAND: u8 = 4;
 const TAG_OUTPUT: u8 = 5;
 const TAG_EXIT: u8 = 6;
 const TAG_RESULT: u8 = 7;
+const TAG_REATTACH: u8 = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientMessage {
@@ -52,6 +53,8 @@ pub enum ServerMessage {
         success: bool,
         text: String,
     },
+    /// The server is being replaced, and the next one is already listening.
+    Reattach,
 }
 
 /// The stream is corrupt or from an incompatible version.
@@ -73,7 +76,7 @@ fn put_frame(out: &mut Vec<u8>, tag: u8, payload: &[u8]) {
     out.extend_from_slice(payload);
 }
 
-fn size_bytes(size: WinSize) -> Vec<u8> {
+pub fn size_bytes(size: WinSize) -> Vec<u8> {
     [size.cols, size.rows, size.width_px, size.height_px]
         .iter()
         .flat_map(|value| value.to_le_bytes())
@@ -81,16 +84,20 @@ fn size_bytes(size: WinSize) -> Vec<u8> {
 }
 
 /// Reads a value off the front of a payload.
-struct Reader<'a>(&'a [u8]);
+pub struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
+    pub const fn new(bytes: &'a [u8]) -> Self {
+        Self(bytes)
+    }
+
     fn take(&mut self, len: usize) -> Result<&'a [u8], Malformed> {
         let (head, tail) = self.0.split_at_checked(len).ok_or(Malformed)?;
         self.0 = tail;
         Ok(head)
     }
 
-    fn take_array<const LEN: usize>(&mut self) -> Result<[u8; LEN], Malformed> {
+    pub fn take_array<const LEN: usize>(&mut self) -> Result<[u8; LEN], Malformed> {
         let (head, tail) = self.0.split_first_chunk().ok_or(Malformed)?;
         self.0 = tail;
         Ok(*head)
@@ -100,11 +107,15 @@ impl<'a> Reader<'a> {
         self.take_array().map(u16::from_le_bytes)
     }
 
-    fn take_u32(&mut self) -> Result<u32, Malformed> {
+    pub fn take_u32(&mut self) -> Result<u32, Malformed> {
         self.take_array().map(u32::from_le_bytes)
     }
 
-    fn take_size(&mut self) -> Result<WinSize, Malformed> {
+    pub fn take_bool(&mut self) -> Result<bool, Malformed> {
+        self.take_array().map(|[byte]| byte != 0)
+    }
+
+    pub fn take_size(&mut self) -> Result<WinSize, Malformed> {
         Ok(WinSize {
             cols: self.take_u16()?,
             rows: self.take_u16()?,
@@ -117,9 +128,13 @@ impl<'a> Reader<'a> {
         std::mem::take(&mut self.0)
     }
 
-    fn take_text(&mut self) -> Result<String, Malformed> {
+    pub fn take_bytes(&mut self) -> Result<&'a [u8], Malformed> {
         let len = usize::try_from(self.take_u32()?).ok().ok_or(Malformed)?;
-        let bytes = self.take(len)?;
+        self.take(len)
+    }
+
+    pub fn take_text(&mut self) -> Result<String, Malformed> {
+        let bytes = self.take_bytes()?;
         Ok(String::from_utf8_lossy(bytes).into_owned())
     }
 
@@ -131,14 +146,30 @@ impl<'a> Reader<'a> {
         }
         Ok(texts)
     }
+
+    /// Texts from [`put_texts_counted`].
+    pub fn take_texts_counted(&mut self) -> Result<Vec<String>, Malformed> {
+        (0..self.take_u32()?).map(|_| self.take_text()).collect()
+    }
+}
+
+pub fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(bytes);
 }
 
 fn put_texts(out: &mut Vec<u8>, texts: &[String]) {
     for text in texts {
-        let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(text.as_bytes());
+        put_bytes(out, text.as_bytes());
     }
+}
+
+/// Texts with what comes after them in the same buffer.
+pub fn put_texts_counted(out: &mut Vec<u8>, texts: &[String]) {
+    let count = u32::try_from(texts.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    put_texts(out, texts);
 }
 
 /// A frame's tag and payload, and how many bytes it took up.
@@ -218,6 +249,7 @@ impl ServerMessage {
                 payload.extend_from_slice(text.as_bytes());
                 put_frame(out, TAG_RESULT, &payload);
             }
+            Self::Reattach => put_frame(out, TAG_REATTACH, &[]),
         }
     }
 
@@ -236,6 +268,7 @@ impl ServerMessage {
                 let text = String::from_utf8_lossy(reader.take_rest()).into_owned();
                 Self::Result { success, text }
             }
+            TAG_REATTACH => Self::Reattach,
             _ => return Err(Malformed),
         };
         Ok(Some((message, used)))
@@ -289,6 +322,7 @@ mod tests {
             success: false,
             text: "unknown command".to_owned(),
         });
+        round_trip_server(&ServerMessage::Reattach);
     }
 
     #[test]

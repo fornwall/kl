@@ -75,9 +75,11 @@ pub fn set_nonblocking(fd: BorrowedFd<'_>) -> io::Result<()> {
     check(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }).map(drop)
 }
 
-fn set_cloexec(fd: BorrowedFd<'_>) -> io::Result<()> {
+/// Sets whether a descriptor closes on `exec`, rather than being inherited.
+pub fn set_cloexec(fd: BorrowedFd<'_>, close: bool) -> io::Result<()> {
+    let flags = if close { libc::FD_CLOEXEC } else { 0 };
     // SAFETY: F_SETFD takes an integer and does not touch memory.
-    check(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) }).map(drop)
+    check(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags) }).map(drop)
 }
 
 /// Opens a pty, returning its master and slave sides.
@@ -100,8 +102,8 @@ fn open_pty(size: WinSize) -> io::Result<(OwnedFd, OwnedFd)> {
     let master = unsafe { OwnedFd::from_raw_fd(master) };
     // SAFETY: As above, for `slave`.
     let slave = unsafe { OwnedFd::from_raw_fd(slave) };
-    set_cloexec(master.as_fd())?;
-    set_cloexec(slave.as_fd())?;
+    set_cloexec(master.as_fd(), true)?;
+    set_cloexec(slave.as_fd(), true)?;
     Ok((master, slave))
 }
 

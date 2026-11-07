@@ -24,6 +24,10 @@ const SCROLLBACK_BYTES: usize = 10_000_000;
 /// How long one round of compressing may keep the server from everything else.
 const COMPRESSION_BUDGET: Duration = Duration::from_millis(2);
 
+/// How much of an unfinished escape sequence a snapshot can carry over. A
+/// terminal in the middle of a longer one cannot be saved at that moment.
+const CONTINUATION_BYTES: usize = 64 * 1024;
+
 const VERSION_REPLY: &str = concat!("kl ", env!("CARGO_PKG_VERSION"));
 
 pub const STYLE_BOLD: u16 = 1 << 0;
@@ -472,12 +476,11 @@ impl Handles {
         }
     }
 
-    /// Allocates everything. On error the handles made so far are freed by drop.
-    fn allocate(&mut self, cols: u16, rows: u16) -> Result<(), Error> {
+    /// Allocates what goes with the terminal. On error the handles made so far
+    /// are freed by drop.
+    fn allocate(&mut self) -> Result<(), Error> {
         let none = ptr::null();
         // SAFETY: A null allocator selects the default, and the out pointer is valid.
-        check(unsafe { ffi::ghostty_terminal_new(none, &raw mut self.terminal, cols, rows) })?;
-        // SAFETY: As above.
         check(unsafe { ffi::ghostty_render_state_new(none, &raw mut self.render_state) })?;
         // SAFETY: As above.
         check(unsafe { ffi::ghostty_render_state_row_iterator_new(none, &raw mut self.rows) })?;
@@ -547,7 +550,29 @@ impl Drop for Terminal {
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Result<Self, Error> {
         let mut handles = Handles::null();
-        handles.allocate(cols, rows)?;
+        // SAFETY: A null allocator selects the default, and the out pointer is valid.
+        check(unsafe {
+            ffi::ghostty_terminal_new(ptr::null(), &raw mut handles.terminal, cols, rows)
+        })?;
+        Self::around(handles, cols, rows)
+    }
+
+    /// Brings back a terminal from [`Self::snapshot`]. It holds what the original
+    /// did, but none of what the caller set on that one.
+    pub fn restore(snapshot: &[u8]) -> Result<Self, Error> {
+        let mut handles = Handles::null();
+        decode_snapshot(snapshot, &mut handles.terminal)?;
+        let mut restored = Self::around(handles, 1, 1)?;
+        let cols = restored.get(ffi::DATA_COLS).unwrap_or(1);
+        let rows = restored.get(ffi::DATA_ROWS).unwrap_or(1);
+        restored.effects().size = (cols, rows, 1, 1);
+        Ok(restored)
+    }
+
+    /// Everything about the terminal that is not part of a snapshot. Takes the
+    /// terminal in `handles`, and makes the rest of them.
+    fn around(mut handles: Handles, cols: u16, rows: u16) -> Result<Self, Error> {
+        handles.allocate()?;
         let effects = Box::into_raw(Box::new(Effects {
             replies: Vec::new(),
             bell: false,
@@ -573,7 +598,30 @@ impl Terminal {
             ffi::OPT_SCROLLBACK_MAX_BYTES,
             (&raw const scrollback).cast(),
         )?;
+        let continuation = CONTINUATION_BYTES;
+        terminal.set(
+            ffi::OPT_CONTINUATION_MAX_BYTES,
+            (&raw const continuation).cast(),
+        )?;
         Ok(terminal)
+    }
+
+    /// The complete state of the terminal, for [`Self::restore`]. `None` if that
+    /// cannot be had right now, as in the middle of a very long escape sequence.
+    pub fn snapshot(&self) -> Option<Vec<u8>> {
+        let mut bytes: *mut u8 = ptr::null_mut();
+        let mut len = 0;
+        let (terminal, none) = (self.handles.terminal, ptr::null());
+        // SAFETY: The terminal is live, and the out pointers are valid.
+        let result = unsafe {
+            ffi::ghostty_snapshot_encode_alloc(terminal, none, &raw mut bytes, &raw mut len)
+        };
+        check(result).ok()?;
+        // SAFETY: On success the library returns an allocation of `len` bytes.
+        let copy = unsafe { bytes_of(bytes, len) }.to_vec();
+        // SAFETY: Allocated by the call above with the default allocator.
+        unsafe { ffi::ghostty_free(none, bytes, len) };
+        Some(copy)
     }
 
     fn register_effects(&mut self) -> Result<(), Error> {
@@ -1103,6 +1151,30 @@ impl Terminal {
     }
 }
 
+/// Decodes a snapshot into a new terminal.
+fn decode_snapshot(snapshot: &[u8], terminal: &mut ffi::Handle) -> Result<(), Error> {
+    let mut decoder: ffi::Handle = ptr::null_mut();
+    let (bytes, len) = (snapshot.as_ptr(), snapshot.len());
+    // SAFETY: A null allocator selects the default. The decoder borrows the
+    // bytes, which outlive it, and the out pointer is valid.
+    check(unsafe {
+        ffi::ghostty_snapshot_decoder_new_buf(ptr::null(), &raw mut decoder, bytes, len)
+    })?;
+    // Without this, a program that was halfway through a sequence could not be
+    // saved a second time until it finished it.
+    let retain = true;
+    let option = ffi::SNAPSHOT_OPT_RETAIN_CONTINUATION;
+    // SAFETY: The decoder is live, and the value matches the option's type.
+    let result = check(unsafe {
+        ffi::ghostty_snapshot_decoder_set(decoder, option, (&raw const retain).cast())
+    })
+    // SAFETY: The decoder is live, and the out pointer is valid.
+    .and_then(|()| check(unsafe { ffi::ghostty_snapshot_decoder_decode(decoder, terminal) }));
+    // SAFETY: Created above and not used again. It only borrowed the terminal.
+    unsafe { ffi::ghostty_snapshot_decoder_free(decoder) };
+    result
+}
+
 const NO_REF: ffi::GridRef = ffi::GridRef {
     node: ptr::null_mut(),
     x: 0,
@@ -1592,6 +1664,55 @@ mod tests {
 
         terminal.scroll_to_top();
         assert_eq!(lines(&mut terminal)[0], "line 0");
+    }
+
+    #[test]
+    fn a_snapshot_brings_back_the_screen_and_its_history() {
+        let mut terminal = Terminal::new(20, 3).unwrap();
+        for line in 0..1000 {
+            terminal.write(format!("line {line}\r\n").as_bytes());
+        }
+        let history = terminal.scrollbar().unwrap().total;
+        terminal.write(b"\x1b[?1049h\x1b[?2004h\x1b]2;a title\x07full screen");
+
+        let mut restored = Terminal::restore(&terminal.snapshot().unwrap()).unwrap();
+        assert_eq!(lines(&mut restored), ["", "", "full screen"]);
+        assert!(restored.alternate_screen());
+        assert!(restored.mode(MODE_BRACKETED_PASTE));
+        assert_eq!(restored.title(), "a title");
+
+        // It works like any other terminal from there on, with effects and all.
+        restored.write(b"\x1b[?1049l\x1b[6n\x07");
+        assert_eq!(restored.effects().replies, b"\x1b[3;1R");
+        assert!(restored.effects().bell);
+        assert_eq!(restored.scrollbar().unwrap().total, history);
+        restored.scroll_to_top();
+        assert_eq!(lines(&mut restored)[0], "line 0");
+    }
+
+    #[test]
+    fn a_snapshot_carries_an_unfinished_sequence_over() {
+        let mut terminal = Terminal::new(20, 1).unwrap();
+        terminal.write(b"\x1b[3");
+        let mut restored = Terminal::restore(&terminal.snapshot().unwrap()).unwrap();
+        restored.write(b"1mred");
+        restored.refresh();
+        let mut row = Vec::new();
+        restored.draw_rows(true, |_, cells| row = cells.to_vec());
+        assert_eq!(row[0].text.as_str(), "r");
+        assert_eq!(row[0].style.fg.as_palette(), Some(1));
+        // And again, from the restored one.
+        restored.write(b"\x1b]2;par");
+        let mut again = Terminal::restore(&restored.snapshot().unwrap()).unwrap();
+        again.write(b"tial\x07");
+        assert_eq!(again.title(), "partial");
+    }
+
+    #[test]
+    fn a_broken_snapshot_is_an_error() {
+        assert!(Terminal::restore(b"not a snapshot").is_err());
+        let snapshot = Terminal::new(4, 1).unwrap().snapshot().unwrap();
+        assert!(Terminal::restore(&snapshot[..snapshot.len() / 2]).is_err());
     }
 
     #[test]

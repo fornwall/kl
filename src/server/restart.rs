@@ -1,0 +1,356 @@
+//! Replacing the server with another binary while every program keeps running.
+//!
+//! `exec` keeps the process, so programs stay its children, and it keeps every
+//! descriptor that is not close-on-exec, so their ptys stay open and the socket
+//! keeps taking connections. What is left to carry over is what lives in memory,
+//! which goes through a file next to the socket.
+
+use std::env;
+use std::error::Error;
+use std::fs::{self, File};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use super::Server;
+use super::copy_mode::CopyMode;
+use super::layout::{Node, PaneId};
+use super::pane::Pane;
+use super::session::{Monitor, Session, Window};
+use crate::command::SplitKind;
+use crate::ghostty::{OuterColors, Rgb, Terminal};
+use crate::proto::{self, Malformed, Reader, ServerMessage};
+use crate::sys;
+
+/// Bumped on any change to the file written here. Failing to read it would end
+/// every program, so a binary with another version is refused beforehand.
+pub const STATE_VERSION: u32 = 1;
+
+/// What a server starts from when it takes over from another one.
+pub struct Restored {
+    pub listener: UnixListener,
+    pub session: Session,
+    pub buffer: Option<String>,
+}
+
+/// Whether this binary can read what this server is about to write.
+fn check_successor(binary: &Path) -> Result<(), String> {
+    let output = Command::new(binary)
+        .arg("--state-version")
+        .output()
+        .map_err(|error| format!("{}: {error}", binary.display()))?;
+    if String::from_utf8_lossy(&output.stdout).trim() == STATE_VERSION.to_string() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} cannot take over from this server",
+            binary.display()
+        ))
+    }
+}
+
+fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_bool(out: &mut Vec<u8>, value: bool) {
+    out.push(u8::from(value));
+}
+
+fn put_optional_u32(out: &mut Vec<u8>, value: Option<u32>) {
+    put_bool(out, value.is_some());
+    put_u32(out, value.unwrap_or(0));
+}
+
+fn take_optional_u32(reader: &mut Reader<'_>) -> Result<Option<u32>, Malformed> {
+    let present = reader.take_bool()?;
+    let value = reader.take_u32()?;
+    Ok(present.then_some(value))
+}
+
+fn put_color(out: &mut Vec<u8>, color: Option<Rgb>) {
+    put_bool(out, color.is_some());
+    let Rgb { r, g, b } = color.unwrap_or_default();
+    out.extend_from_slice(&[r, g, b]);
+}
+
+fn take_color(reader: &mut Reader<'_>) -> Result<Option<Rgb>, Malformed> {
+    let present = reader.take_bool()?;
+    let [r, g, b] = reader.take_array()?;
+    Ok(present.then_some(Rgb { r, g, b }))
+}
+
+fn put_colors(out: &mut Vec<u8>, colors: &OuterColors) {
+    put_color(out, colors.foreground);
+    put_color(out, colors.background);
+    put_bool(out, colors.dark.is_some());
+    put_bool(out, colors.dark.unwrap_or(false));
+}
+
+fn take_colors(reader: &mut Reader<'_>) -> Result<OuterColors, Malformed> {
+    let foreground = take_color(reader)?;
+    let background = take_color(reader)?;
+    let known = reader.take_bool()?;
+    let dark = reader.take_bool()?;
+    Ok(OuterColors {
+        foreground,
+        background,
+        dark: known.then_some(dark),
+    })
+}
+
+fn put_fd(out: &mut Vec<u8>, fd: BorrowedFd<'_>) {
+    put_u32(out, fd.as_raw_fd().cast_unsigned());
+}
+
+/// Takes ownership of a descriptor the previous server left open.
+fn take_fd(reader: &mut Reader<'_>) -> Result<OwnedFd, Box<dyn Error>> {
+    let fd: RawFd = reader.take_u32()?.cast_signed();
+    // SAFETY: The previous server wrote this number for a descriptor it kept
+    // open across `exec`, and each one appears once, so nothing else owns it.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    sys::set_cloexec(fd.as_fd(), true)?;
+    Ok(fd)
+}
+
+fn put_node(out: &mut Vec<u8>, node: &Node) {
+    match node {
+        Node::Leaf(id) => {
+            out.push(0);
+            put_u32(out, *id);
+        }
+        Node::Split {
+            kind,
+            ratio,
+            first,
+            second,
+        } => {
+            out.push(match kind {
+                SplitKind::Horizontal => 1,
+                SplitKind::Vertical => 2,
+            });
+            put_u32(out, *ratio);
+            put_node(out, first);
+            put_node(out, second);
+        }
+    }
+}
+
+fn take_node(reader: &mut Reader<'_>) -> Result<Node, Malformed> {
+    let kind = match reader.take_array()? {
+        [0] => return reader.take_u32().map(Node::Leaf),
+        [1] => SplitKind::Horizontal,
+        [2] => SplitKind::Vertical,
+        _ => return Err(Malformed),
+    };
+    Ok(Node::Split {
+        kind,
+        ratio: reader.take_u32()?,
+        first: Box::new(take_node(reader)?),
+        second: Box::new(take_node(reader)?),
+    })
+}
+
+const fn monitor_byte(monitor: Monitor) -> u8 {
+    match monitor {
+        Monitor::Off => 0,
+        Monitor::Watching => 1,
+        Monitor::Flagged => 2,
+    }
+}
+
+fn take_monitor(reader: &mut Reader<'_>) -> Result<Monitor, Malformed> {
+    match reader.take_array()? {
+        [0] => Ok(Monitor::Off),
+        [1] => Ok(Monitor::Watching),
+        [2] => Ok(Monitor::Flagged),
+        _ => Err(Malformed),
+    }
+}
+
+fn put_window(out: &mut Vec<u8>, window: &Window) {
+    put_u32(out, window.index);
+    proto::put_bytes(out, window.name.as_bytes());
+    put_bool(out, window.automatic_name);
+    put_node(out, &window.root);
+    put_u32(out, window.active);
+    put_optional_u32(out, window.last_active);
+    put_bool(out, window.zoomed);
+    put_bool(out, window.bell);
+    out.push(monitor_byte(window.monitor));
+}
+
+fn take_window(reader: &mut Reader<'_>) -> Result<Window, Malformed> {
+    Ok(Window {
+        index: reader.take_u32()?,
+        name: reader.take_text()?,
+        automatic_name: reader.take_bool()?,
+        root: take_node(reader)?,
+        active: reader.take_u32()?,
+        last_active: take_optional_u32(reader)?,
+        zoomed: reader.take_bool()?,
+        bell: reader.take_bool()?,
+        monitor: take_monitor(reader)?,
+    })
+}
+
+fn put_pane(out: &mut Vec<u8>, pane: &Pane) {
+    put_u32(out, pane.id);
+    put_u32(out, pane.pid);
+    put_fd(out, pane.pty());
+    // A terminal that cannot be saved right now loses what it shows, but its
+    // program keeps running, and full screen ones draw again when resized.
+    proto::put_bytes(out, &pane.terminal.snapshot().unwrap_or_default());
+}
+
+fn take_pane(reader: &mut Reader<'_>, colors: &OuterColors) -> Result<Pane, Box<dyn Error>> {
+    let id: PaneId = reader.take_u32()?;
+    let pid = reader.take_u32()?;
+    let pty = File::from(take_fd(reader)?);
+    let snapshot = reader.take_bytes()?;
+    let mut terminal = Terminal::restore(snapshot).or_else(|error| {
+        sys::log(format_args!("restoring pane {id}: {error}"));
+        Terminal::new(1, 1)
+    })?;
+    terminal.set_outer_colors(colors);
+    Ok(Pane::adopt(id, pid, pty, terminal))
+}
+
+/// Reads what [`Server::restart`] left behind, which is only good for one use.
+pub fn read_state(state: &Path, socket: &Path) -> Result<Restored, Box<dyn Error>> {
+    let bytes = fs::read(state)?;
+    fs::remove_file(state)?;
+    let mut reader = Reader::new(&bytes);
+    let reader = &mut reader;
+
+    let listener = UnixListener::from(take_fd(reader)?);
+    let buffer = reader.take_bool()?;
+    let text = reader.take_text()?;
+    let mut session = Session::new(socket.display().to_string());
+    session.current = reader.take_u32()?;
+    session.last = take_optional_u32(reader)?;
+    session.size = reader.take_size()?;
+    session.colors = take_colors(reader)?;
+    session.next_pane = reader.take_u32()?;
+    session.environment = reader.take_texts_counted()?;
+    for _ in 0..reader.take_u32()? {
+        session.windows.push(take_window(reader)?);
+    }
+    for _ in 0..reader.take_u32()? {
+        let pane = take_pane(reader, &session.colors)?;
+        session.panes.insert(pane.id, pane);
+    }
+    session.relayout();
+    Ok(Restored {
+        listener,
+        session,
+        buffer: buffer.then_some(text),
+    })
+}
+
+impl Server {
+    fn encode_state(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let session = &self.session;
+        put_fd(&mut out, self.listener.as_fd());
+        put_bool(&mut out, self.buffer.is_some());
+        proto::put_bytes(&mut out, self.buffer.as_deref().unwrap_or("").as_bytes());
+        put_u32(&mut out, session.current);
+        put_optional_u32(&mut out, session.last);
+        out.extend(proto::size_bytes(session.size));
+        put_colors(&mut out, &session.colors);
+        put_u32(&mut out, session.next_pane);
+        proto::put_texts_counted(&mut out, &session.environment);
+        let count = |len| u32::try_from(len).unwrap_or(u32::MAX);
+        put_u32(&mut out, count(session.windows.len()));
+        for window in &session.windows {
+            put_window(&mut out, window);
+        }
+        put_u32(&mut out, count(session.panes.len()));
+        for pane in session.panes.values() {
+            put_pane(&mut out, pane);
+        }
+        out
+    }
+
+    /// What has to stay open for the next server.
+    fn inherited(&self) -> Vec<BorrowedFd<'_>> {
+        let panes = self.session.panes.values().map(Pane::pty);
+        panes.chain([self.listener.as_fd()]).collect()
+    }
+
+    /// Becomes `binary`, or this binary again. Only returns if that failed, and
+    /// then this server just carries on.
+    pub fn restart(&mut self, binary: Option<PathBuf>) -> Result<(), String> {
+        let binary = binary
+            .map_or_else(env::current_exe, Ok)
+            .map_err(|error| format!("finding this binary: {error}"))?;
+        check_successor(&binary)?;
+        for pane in self.session.panes.values_mut() {
+            if pane.copy_mode.is_some() {
+                CopyMode::exit(pane);
+            }
+        }
+        let socket = PathBuf::from(&self.session.socket);
+        let state = socket.with_file_name("restart-state");
+        fs::write(&state, self.encode_state())
+            .map_err(|error| format!("{}: {error}", state.display()))?;
+        self.goodbye(&ServerMessage::Reattach);
+
+        let result = self
+            .inherited()
+            .into_iter()
+            .try_for_each(|fd| sys::set_cloexec(fd, false));
+        let error = match result {
+            Ok(()) => Command::new(&binary)
+                .arg("--server")
+                .arg(socket)
+                .arg("--restore")
+                .arg(&state)
+                .exec(),
+            Err(error) => error,
+        };
+        for fd in self.inherited() {
+            if let Err(error) = sys::set_cloexec(fd, true) {
+                sys::log(format_args!("after failing to restart: {error}"));
+            }
+        }
+        if let Err(error) = fs::remove_file(&state) {
+            sys::log(format_args!("{}: {error}", state.display()));
+        }
+        Err(format!("{}: {error}", binary.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layouts_survive_a_round_trip() {
+        let mut node = Node::Leaf(1);
+        node.split(1, 2, SplitKind::Horizontal);
+        node.split(2, 3, SplitKind::Vertical);
+        let mut bytes = Vec::new();
+        put_node(&mut bytes, &node);
+        assert_eq!(take_node(&mut Reader::new(&bytes)), Ok(node));
+    }
+
+    #[test]
+    fn a_truncated_layout_is_an_error() {
+        let mut node = Node::Leaf(1);
+        node.split(1, 2, SplitKind::Horizontal);
+        let mut bytes = Vec::new();
+        put_node(&mut bytes, &node);
+        bytes.pop();
+        assert_eq!(take_node(&mut Reader::new(&bytes)), Err(Malformed));
+    }
+
+    #[test]
+    fn refuses_a_binary_that_cannot_take_over() {
+        assert!(check_successor(Path::new("/bin/false")).is_err());
+        assert!(check_successor(Path::new("/no/such/binary")).is_err());
+    }
+}

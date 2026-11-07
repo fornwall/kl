@@ -3,7 +3,7 @@
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -170,22 +170,31 @@ impl Pane {
         if !sys::selectable(pty.as_raw_fd()) {
             return Err(io::Error::other("too many panes"));
         }
-        Ok(Self {
+        Ok(Self::adopt(id, child.id(), pty, terminal))
+    }
+
+    /// A pane around a program that is already running on `pty`.
+    pub fn adopt(id: PaneId, pid: u32, pty: File, terminal: Terminal) -> Self {
+        Self {
             id,
             terminal,
             rect: Rect::default(),
             copy_mode: None,
             redraw: true,
-            pid: child.id(),
+            pid,
             exited: false,
             pty,
             pending: Vec::new(),
             cell_size: (0, 0),
-        })
+        }
     }
 
     pub fn fd(&self) -> RawFd {
         self.pty.as_raw_fd()
+    }
+
+    pub fn pty(&self) -> BorrowedFd<'_> {
+        self.pty.as_fd()
     }
 
     pub const fn wants_write(&self) -> bool {

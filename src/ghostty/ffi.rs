@@ -26,9 +26,12 @@ pub const OPT_CLIPBOARD_WRITE: c_int = 27;
 pub const OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
 pub const OPT_DESKTOP_NOTIFICATION: c_int = 30;
 pub const OPT_PROGRESS_REPORT: c_int = 31;
+pub const OPT_CONTINUATION_MAX_BYTES: c_int = 32;
 pub const OPT_MODE: c_int = 35;
 pub const OPT_RENDER_HOLD: c_int = 42;
 
+pub const DATA_COLS: c_int = 1;
+pub const DATA_ROWS: c_int = 2;
 pub const DATA_ACTIVE_SCREEN: c_int = 6;
 pub const DATA_SCROLLBAR: c_int = 9;
 pub const DATA_MOUSE_TRACKING: c_int = 11;
@@ -40,6 +43,8 @@ pub const DATA_MODE: c_int = 37;
 pub const DATA_MEMORY_USAGE: c_int = 42;
 
 pub const SCREEN_ALTERNATE: c_int = 1;
+
+pub const SNAPSHOT_OPT_RETAIN_CONTINUATION: c_int = 2;
 
 pub const COMPRESSION_MODE_INCREMENTAL: c_int = 0;
 pub const COMPRESSION_RESULT_PENDING: c_int = 1;
@@ -438,6 +443,26 @@ unsafe extern "C" {
     ) -> c_int;
     pub fn ghostty_formatter_free(formatter: Handle);
     pub fn ghostty_free(allocator: *const c_void, ptr: *mut u8, len: usize);
+
+    pub fn ghostty_snapshot_encode_alloc(
+        terminal: Handle,
+        allocator: *const c_void,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_new_buf(
+        allocator: *const c_void,
+        decoder: *mut Handle,
+        ptr: *const u8,
+        len: usize,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_set(
+        decoder: Handle,
+        option: c_int,
+        value: *const c_void,
+    ) -> c_int;
+    pub fn ghostty_snapshot_decoder_decode(decoder: Handle, terminal: *mut Handle) -> c_int;
+    pub fn ghostty_snapshot_decoder_free(decoder: Handle);
 
     pub fn ghostty_unicode_codepoint_width(codepoint: u32) -> u8;
 

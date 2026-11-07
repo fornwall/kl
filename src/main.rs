@@ -24,6 +24,9 @@ Session:
   attach-session (attach, new-session, new)   attach to the session
   detach-client (detach)                      detach the attached client
   kill-server                                 end the session
+  restart-server [binary]                     replace the server, for example
+                                              after an upgrade, with programs
+                                              still running
 
 Windows:
   new-window (neww) [-n name] [command]       open a window
@@ -79,8 +82,23 @@ fn run(args: &[String]) -> Result<ExitCode, Box<dyn Error>> {
         None | Some("attach-session" | "attach" | "a" | "new-session" | "new") => attach(),
         Some("--server") => {
             let socket = args.get(1).ok_or("--server needs a socket path")?;
-            server::run(Path::new(socket))?;
+            let state = match args.get(2..).unwrap_or(&[]) {
+                [] => None,
+                [flag, state] if flag == "--restore" => Some(Path::new(state)),
+                _ => return Err("--server takes a socket path and --restore".into()),
+            };
+            server::run(Path::new(socket), state)?;
             Ok(ExitCode::SUCCESS)
+        }
+        Some("--state-version") => {
+            print(&format!("{}\n", server::STATE_VERSION));
+            Ok(ExitCode::SUCCESS)
+        }
+        // The running server may be an older binary, or one that is gone, and
+        // what the user just ran is what it should turn into.
+        Some("restart-server") if args.len() == 1 => {
+            let binary = env::current_exe()?.display().to_string();
+            run_command(&["restart-server".to_owned(), binary])
         }
         Some("-h" | "--help") => {
             print(USAGE);

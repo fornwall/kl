@@ -176,7 +176,7 @@ pub fn attach(socket: &Path) -> Result<String, Box<dyn Error>> {
     if !stdin.is_terminal() || !io::stdout().is_terminal() {
         return Err("kl needs a terminal to attach to".into());
     }
-    let stream = connect_or_start(socket)?;
+    let mut stream = connect_or_start(socket)?;
     let terminal = stdin.as_fd();
     let _raw_mode = sys::RawMode::enter(terminal)?;
     let signals = sys::watch_signals(&[SIGWINCH, SIGHUP, SIGTERM])?;
@@ -185,7 +185,16 @@ pub fn attach(socket: &Path) -> Result<String, Box<dyn Error>> {
     stdout.write_all(ENTER_TERMINAL)?;
     stdout.flush()?;
 
-    let result = attached_loop(&stream, &signals);
+    let result = loop {
+        match attached_loop(&stream, &signals) {
+            Ok(Some(text)) => break Ok(text),
+            Ok(None) => match UnixStream::connect(socket) {
+                Ok(next) => stream = next,
+                Err(error) => break Err(error.into()),
+            },
+            Err(error) => break Err(error),
+        }
+    };
 
     stdout.write_all(LEAVE_TERMINAL)?;
     stdout.flush()?;
@@ -197,7 +206,9 @@ fn environment_entry(name: &str) -> String {
     env::var(name).map_or_else(|_| name.to_owned(), |value| format!("{name}={value}"))
 }
 
-fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn Error>> {
+/// Shows the session until it is over, returning what to tell the user, or
+/// `None` if the server asked to be attached to again.
+fn attached_loop(stream: &UnixStream, signals: &File) -> Result<Option<String>, Box<dyn Error>> {
     let stdin = io::stdin();
     let terminal = stdin.as_fd();
     let mut input = File::from(terminal.try_clone_to_owned()?);
@@ -223,14 +234,14 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn 
                 if signal == SIGWINCH {
                     send_while_attached(stream, &ClientMessage::Resize(sys::winsize(terminal)?));
                 } else {
-                    return Ok("[terminated]".to_owned());
+                    return Ok(Some("[terminated]".to_owned()));
                 }
             }
         }
         if selector.readable(input.as_raw_fd()) {
             let mut buf = [0; 16 * 1024];
             match input.read(&mut buf)? {
-                0 => return Ok("[detached]".to_owned()),
+                0 => return Ok(Some("[detached]".to_owned())),
                 len => {
                     let bytes = buf.get(..len).unwrap_or(&[]).to_vec();
                     send_while_attached(stream, &ClientMessage::Input(bytes));
@@ -239,7 +250,7 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn 
         }
         if selector.readable(stream.as_raw_fd()) {
             if !receiver.read(stream)? {
-                return Ok("[lost server]".to_owned());
+                return Ok(Some("[lost server]".to_owned()));
             }
             while let Some(message) = receiver.next_message()? {
                 match message {
@@ -247,7 +258,8 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn 
                         stdout.write_all(&bytes)?;
                         stdout.flush()?;
                     }
-                    ServerMessage::Exit(text) => return Ok(text),
+                    ServerMessage::Exit(text) => return Ok(Some(text)),
+                    ServerMessage::Reattach => return Ok(None),
                     ServerMessage::Result { .. } => {}
                 }
             }
@@ -278,8 +290,10 @@ pub fn run_command(socket: &Path, args: &[String]) -> Result<(bool, String), Box
             Some(ServerMessage::Output(_)) => {
                 return Err("unexpected reply from the server".into());
             }
-            // kill-server can take the server down before it gets to answer.
-            Some(ServerMessage::Exit(_)) => return Ok((true, String::new())),
+            // Ending or replacing the server can happen before it gets to answer.
+            Some(ServerMessage::Exit(_) | ServerMessage::Reattach) => {
+                return Ok((true, String::new()));
+            }
             None if !receiver.read(&stream)? => return Ok((true, String::new())),
             None => {}
         }

@@ -29,7 +29,7 @@ const GHOSTTY_PATCH: &str = "patches/ghostty-split-static-sections.patch";
 /// Only the parts of libghostty-vt that kl calls. Functions of a left-out
 /// feature stay exported but return `GHOSTTY_UNSUPPORTED`.
 const VT_FEATURES: &str =
-    "-all,+render-state,+input-encode,+selection,+formatter,+grid-introspection";
+    "-all,+render-state,+input-encode,+selection,+formatter,+grid-introspection,+snapshot";
 
 fn main() -> Result<(), String> {
     println!("cargo:rerun-if-changed=build.rs");

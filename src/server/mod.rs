@@ -6,6 +6,7 @@ mod dispatch;
 mod layout;
 mod pane;
 mod render;
+mod restart;
 mod session;
 mod ui;
 
@@ -27,6 +28,7 @@ use dispatch::{Click, Drag};
 use layout::PaneId;
 use pane::Activity;
 use render::{Renderer, osc_text};
+pub use restart::STATE_VERSION;
 use session::{Monitor, Session};
 use ui::Ui;
 
@@ -193,10 +195,19 @@ fn bind(path: &Path) -> io::Result<Option<UnixListener>> {
     }
 }
 
-/// Runs a server on the given socket until the session ends.
-pub fn run(socket: &Path) -> Result<(), Box<dyn Error>> {
-    let Some(listener) = bind(socket)? else {
-        return Ok(());
+/// Runs a server on the given socket until the session ends, taking over from
+/// the server that left `state` if there is one.
+pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
+    let (listener, session, buffer, lifecycle) = if let Some(state) = state {
+        let restored = restart::read_state(state, socket)?;
+        let (listener, session, buffer) = (restored.listener, restored.session, restored.buffer);
+        (listener, session, buffer, Lifecycle::Running)
+    } else {
+        let Some(listener) = bind(socket)? else {
+            return Ok(());
+        };
+        let session = Session::new(socket.display().to_string());
+        (listener, session, None, Lifecycle::Starting)
     };
     listener.set_nonblocking(true)?;
     let signals = sys::watch_signals(&[SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
@@ -207,7 +218,7 @@ pub fn run(socket: &Path) -> Result<(), Box<dyn Error>> {
         connections: Vec::new(),
         next_connection: 0,
         attached: None,
-        session: Session::new(socket.display().to_string()),
+        session,
         ui: Ui::default(),
         renderer: Renderer::default(),
         parser: Parser::default(),
@@ -215,18 +226,20 @@ pub fn run(socket: &Path) -> Result<(), Box<dyn Error>> {
         swallowed: Vec::new(),
         drag: Drag::None,
         last_click: None,
-        buffer: None,
+        buffer,
         dirty: false,
         last_frame: now,
         last_tick: now,
         started_at: now,
         escape_since: None,
         names_due: None,
-        lifecycle: Lifecycle::Starting,
+        lifecycle,
         exit_message: "[exited]",
     };
+    // No signal is coming for a program that ended during a handover.
+    server.collect_children();
     let result = server.run();
-    server.shutdown();
+    server.goodbye(&ServerMessage::Exit(server.exit_message.to_owned()));
     fs::remove_file(socket)?;
     Ok(result?)
 }
@@ -304,14 +317,18 @@ impl Server {
         }
         for signal in sys::pending_signals(&self.signals) {
             if signal == SIGCHLD {
-                let pids = sys::reap_children();
-                for pane in self.session.panes.values_mut() {
-                    pane.exited |= pids.contains(&pane.pid);
-                }
+                self.collect_children();
             } else {
                 self.exit_message = "[server exited]";
                 self.lifecycle = Lifecycle::Quitting;
             }
+        }
+    }
+
+    fn collect_children(&mut self) {
+        let pids = sys::reap_children();
+        for pane in self.session.panes.values_mut() {
+            pane.exited |= pids.contains(&pane.pid);
         }
     }
 
@@ -388,7 +405,7 @@ impl Server {
         (version != proto::VERSION).then(|| {
             format!(
                 "this client (protocol {version}) does not match the running server \
-                 (protocol {}): stop it with the old binary's kill-server",
+                 (protocol {}): replace it with restart-server",
                 proto::VERSION
             )
         })
@@ -430,10 +447,15 @@ impl Server {
     }
 
     fn run_client_command(&mut self, id: u64, version: u32, args: &[String]) {
-        let result = Self::version_error(version).map_or_else(
-            || crate::command::parse(args).and_then(|command| self.execute(command)),
-            Err,
-        );
+        // Replacing the server is how a client of another version gets to talk
+        // to it, so that much has to work across versions.
+        let restarting = args.first().is_some_and(|name| name == "restart-server");
+        let result = Self::version_error(version)
+            .filter(|_| !restarting)
+            .map_or_else(
+                || crate::command::parse(args).and_then(|command| self.execute(command)),
+                Err,
+            );
         let (success, text) = match result {
             Ok(text) => (true, text),
             Err(text) => (false, text),
@@ -608,10 +630,9 @@ impl Server {
         }
     }
 
-    /// Tells clients goodbye. Blocking is fine here, since nothing is left to
-    /// serve, and it gives them the best chance to restore their terminals.
-    fn shutdown(&mut self) {
-        let goodbye = ServerMessage::Exit(self.exit_message.to_owned());
+    /// Sends every client a last message. Blocking is fine here, since nothing
+    /// is left to serve, and it gives them the best chance to take it in.
+    fn goodbye(&mut self, goodbye: &ServerMessage) {
         for connection in &mut self.connections {
             let mut message = std::mem::take(&mut connection.output);
             goodbye.encode(&mut message);

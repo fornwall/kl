@@ -360,6 +360,7 @@ impl Server {
             Command::ResizePane { direction, cells } => {
                 self.session.resize_pane(direction, cells);
             }
+            Command::RestartServer(binary) => self.restart(binary)?,
             Command::SelectPane(direction) => self.session.select_direction(direction),
             Command::SelectWindow(index) => {
                 if !self.session.select_window(index) {

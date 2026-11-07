@@ -716,6 +716,67 @@ fn a_new_client_takes_over_from_the_old_one() {
 }
 
 #[test]
+fn programs_keep_running_across_a_server_restart() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("echo from-the-first-server");
+    screen.wait_for_line("from-the-first-server");
+    screen.prefix("%");
+    screen.run_setup_then_cat("echo in-the-split");
+    screen.type_text("typed-before");
+    screen.enter();
+    screen.wait_for_text("typed-before");
+
+    let output = screen.command(&["restart-server"]);
+    assert!(output.status.success(), "{output:?}");
+    screen.wait_for_text("from-the-first-server");
+
+    // The same program is still there, with the same client attached.
+    screen.type_text("typed-after");
+    screen.enter();
+    let lines = screen.wait_for("the program to echo what was typed", |lines| {
+        let echoed = lines.iter().filter(|line| line.contains("typed-after"));
+        echoed.count() == 2
+    });
+    assert!(lines.iter().any(|line| line.contains("in-the-split")));
+    assert!(!screen.raw_text().contains("[detached"));
+
+    // And the session is what it was, a window with two panes.
+    let output = screen.command(&["list-panes"]);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 2);
+}
+
+#[test]
+fn a_restart_keeps_history_and_copied_text() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("for i in $(seq 1 100); do echo history-$i; done");
+    screen.wait_for_line("history-100");
+    screen.prefix("[");
+    screen.type_text("gv$");
+    screen.enter();
+    screen.wait_for_clipboard();
+
+    let output = screen.command(&["restart-server"]);
+    assert!(output.status.success(), "{output:?}");
+    screen.wait_for_text("history-100");
+    screen.prefix("[");
+    screen.type_text("g");
+    screen.wait_for_text("for i in");
+    screen.type_text("q");
+    screen.prefix("]");
+    screen.wait_for_text("$ for i in");
+}
+
+#[test]
+fn a_failed_restart_leaves_the_server_running() {
+    let mut screen = Screen::new(80, 24);
+    let output = screen.command(&["restart-server", "/bin/false"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot take over"));
+    screen.run("echo still-$((1 + 1))");
+    screen.wait_for_text("still-2");
+}
+
+#[test]
 fn ends_when_the_last_shell_exits() {
     let mut screen = Screen::new(80, 24);
     screen.run("exit");

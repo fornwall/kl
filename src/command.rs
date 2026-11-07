@@ -1,6 +1,8 @@
 //! The command language, which follows tmux. The same commands are reached from
 //! key bindings, the `:` prompt and the `kl` command line.
 
+use std::path::PathBuf;
+
 /// A direction to move focus or a pane border in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -46,6 +48,8 @@ pub enum Command {
         direction: Direction,
         cells: u16,
     },
+    /// Replaces the server with this binary, or the one it is running from.
+    RestartServer(Option<PathBuf>),
     SelectPane(Direction),
     SelectWindow(u32),
     SendKeys(Vec<String>),
@@ -80,6 +84,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "previous-window" | "prev" => no_args(name, args, Command::PreviousWindow),
         "rename-window" | "renamew" => parse_rename_window(args),
         "resize-pane" | "resizep" => parse_resize_pane(args),
+        "restart-server" => parse_restart_server(args),
         "select-pane" | "selectp" => parse_select_pane(args),
         "select-window" | "selectw" => parse_select_window(args),
         "send-keys" | "send" => Ok(Command::SendKeys(args.to_vec())),
@@ -152,6 +157,14 @@ fn parse_resize_pane(args: &[String]) -> Result<Command, String> {
             Ok(Command::ResizePane { direction, cells })
         }
         _ => Err(usage.to_owned()),
+    }
+}
+
+fn parse_restart_server(args: &[String]) -> Result<Command, String> {
+    match args {
+        [] => Ok(Command::RestartServer(None)),
+        [binary] => Ok(Command::RestartServer(Some(PathBuf::from(binary)))),
+        _ => Err("usage: restart-server [binary]".to_owned()),
     }
 }
 
