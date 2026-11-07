@@ -1827,6 +1827,15 @@ fn commands_explain_when_no_server_runs() {
 }
 
 #[test]
+fn the_status_line_names_the_machine_until_a_program_sets_a_title() {
+    let mut screen = Screen::new(80, 24);
+    let host: String = sys::hostname().chars().take(21).collect();
+    screen.wait_for_text(&format!("\"{host}\" "));
+    screen.run(r"printf '\033]2;mine\033\\'");
+    screen.wait_for_text("\"mine\" ");
+}
+
+#[test]
 fn survives_arguments_that_are_not_text() {
     let scratch = Scratch::new();
     let output = kl_command(&scratch.0)

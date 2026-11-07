@@ -704,7 +704,10 @@ fn status_right(session: &Session) -> String {
     let title: String = session
         .active_pane()
         .map(|pane| pane.terminal.title())
-        .unwrap_or_default()
+        .filter(|title| !title.is_empty())
+        // A pane is named after the machine until its program says otherwise,
+        // which is where tmux has it too.
+        .unwrap_or_else(sys::hostname)
         .chars()
         .take(21)
         .collect();

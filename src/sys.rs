@@ -28,6 +28,17 @@ pub fn log(message: impl Display) {
     drop(writeln!(io::stderr(), "{message}"));
 }
 
+/// The name of this machine, or nothing if it has none to offer.
+pub fn hostname() -> String {
+    let mut name = [0_u8; 256];
+    // SAFETY: The buffer is valid for writes of its length.
+    let result = unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) };
+    let name = (result == 0).then(|| CStr::from_bytes_until_nul(&name).ok());
+    name.flatten()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Size of a terminal in cells and, if the terminal reports it, pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WinSize {
