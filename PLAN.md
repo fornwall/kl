@@ -41,7 +41,7 @@ kl has the core of tmux, with no configuration:
 | ---------------- | ------ | --------- |
 | Linux x86-64     | yes    | yes, here and in CI |
 | Linux aarch64    | yes    | yes, in CI |
-| macOS aarch64    | yes    | in CI: all 350 unit tests, and 341 of 369 end-to-end tests |
+| macOS aarch64    | yes    | in CI: the unit tests, and about 340 of 368 end-to-end tests |
 
 CI runs formatting, clippy and all tests on each of them, and checks that
 libghostty-vt really is linked statically.
@@ -137,8 +137,17 @@ for the tests, and is not meant as a setting.
 
 ### 2. Confidence on every target
 
-- Get the end-to-end tests passing on macOS, as of `b1d2ad3`. What is known of the
-  28 that fail:
+- Find out how the outer terminal's replies reach programs as typing on macOS.
+  `panes_do_not_inherit_what_the_first_client_had_open` failed once with
+  `$ 4;36;rgb:0000/afaf/8787echo ...`: part of a reply to the color queries kl sends
+  on attaching went to the shell as if typed. All 256 palette entries are asked
+  for at once, and a guess is that this overflows the small input queue of a
+  terminal on macOS, so that bytes get lost and what is left of a reply is no longer
+  one. This has not been confirmed. If it is so, it happens outside the tests too,
+  and asking for a few entries at a time would be the fix. It may be behind some
+  of the failures below.
+- Get the end-to-end tests passing on macOS. What is known of the 30 or so that
+  fail, which is not always the same 30:
   - Those waiting for a window called `sh`, which `/bin/sh` is not on macOS: it
     shows up as `bash`. `control_keys_reach_programs` is one, where the keys
     themselves worked. So are others that time out on `0:sh*` or `1:sh*`.
@@ -152,6 +161,9 @@ for the tests, and is not meant as a setting.
     (`programs_have_the_keyboard_while_any_terminal_does`), the color scheme
     (`programs_hear_when_the_color_scheme_changes`), images, and clients that stop
     reading or come back from a restart.
+- See what happens to what is on its way to a program on macOS when its pty is
+  full. In the test of replies piling up, less was left waiting than on Linux. A
+  failed write drops all of it, which is not what a slow reader should get.
 - Try kl in the Ghostty app on macOS. Option composing a character is the first
   thing to look at: kl takes alt that reaches it for alt, as the outer terminal
   has decided what option means, but text that comes with it has not been tried.

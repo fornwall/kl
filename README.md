@@ -139,7 +139,9 @@ each target has been verified.
   - What panes hold passes through a file next to the socket for a moment, in a
     directory only the user can enter.
 - **macOS is not all there yet.** kl builds and runs there, and CI runs all tests
-  on every target. They pass on Linux x86-64 and aarch64. On macOS all unit tests
-  pass and 28 of 369 end-to-end tests fail, some of which may be real bugs, as
-  [PLAN.md](PLAN.md) says. The Ghostty app has only been tried on Linux, so nothing
-  says yet what option composing a character does on macOS.
+  on every target. They pass on Linux x86-64 and aarch64. On macOS the unit tests
+  pass and about 30 of 368 end-to-end tests fail, and [PLAN.md](PLAN.md) says what
+  is known of them. Some may be real bugs: at least once, part of the outer
+  terminal's reply to a color query was typed into a shell on attaching. The
+  Ghostty app has only been tried on Linux, so nothing says yet what option
+  composing a character does on macOS.

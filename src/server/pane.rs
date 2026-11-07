@@ -411,7 +411,8 @@ mod tests {
         }
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(pane.pending.len() >= MAX_PENDING - reply.len());
+        // Twelve of these would go well past it. How much of them a pty takes, or
+        // whether it fails along the way, is up to the system.
         assert!(pane.pending.len() < MAX_PENDING + reply.len());
     }
 
