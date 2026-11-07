@@ -707,6 +707,44 @@ impl Node {
         });
     }
 
+    /// How far what holds a pane in the nearest split of this kind reaches, and
+    /// whether that comes last in the split.
+    fn extent_in_split(&self, pane: PaneId, area: Rect, wanted: SplitKind) -> Option<(u16, bool)> {
+        let Self::Split {
+            kind,
+            shares,
+            children,
+        } = self
+        else {
+            return None;
+        };
+        let position = children.iter().position(|child| child.contains(pane))?;
+        let child_area = child_areas(area, *kind, shares).get(position).copied()?;
+        let nearer = children
+            .get(position)
+            .and_then(|child| child.extent_in_split(pane, child_area, wanted));
+        let last = position + 1 == children.len();
+        nearer.or_else(|| (*kind == wanted).then_some((child_area.extent(wanted), last)))
+    }
+
+    /// Gives a pane a size, like `resize-pane -x` and `-y`, which is a matter of
+    /// moving the same border as [`Self::resize`] does. A pane in a stack of them
+    /// goes by the size of the stack.
+    pub fn resize_to(&mut self, pane: PaneId, area: Rect, kind: SplitKind, size: u16) {
+        let Some((current, last)) = self.extent_in_split(pane, area, kind) else {
+            return;
+        };
+        // The border is before the last child, so that one grows the other way.
+        let forward = (size > current) != last;
+        let direction = match kind {
+            SplitKind::Horizontal if forward => Direction::Right,
+            SplitKind::Horizontal => Direction::Left,
+            SplitKind::Vertical if forward => Direction::Down,
+            SplitKind::Vertical => Direction::Up,
+        };
+        self.resize(pane, area, direction, size.abs_diff(current));
+    }
+
     /// Moves the border of a pane by some cells, like `resize-pane`: the one
     /// after it, or before it for the last pane of a split. A pane out of room
     /// on one side grows the other way.
@@ -1379,6 +1417,42 @@ mod tests {
         let before = node.clone();
         node.resize(1, AREA, Direction::Up, 3);
         assert_eq!(node, before);
+    }
+
+    /// The sizes of the panes after giving one of them a size. The numbers in
+    /// the tests come from tmux, with the same panes in a window of 81x25.
+    fn sizes_after(pane: PaneId, kind: SplitKind, size: u16) -> Vec<(u16, u16)> {
+        let mut node = three_panes();
+        node.resize_to(pane, AREA, kind, size);
+        let panes = node.panes(AREA);
+        panes.iter().map(|(_, r)| (r.width, r.height)).collect()
+    }
+
+    #[test]
+    fn resizes_to_a_size_like_tmux() {
+        let (across, down) = (SplitKind::Horizontal, SplitKind::Vertical);
+        assert_eq!(sizes_after(1, across, 30), [(30, 25), (50, 12), (50, 12)]);
+        // What is in the last place of the split gets there from the other side.
+        assert_eq!(sizes_after(2, across, 30), [(50, 25), (30, 12), (30, 12)]);
+        assert_eq!(sizes_after(3, across, 30), [(50, 25), (30, 12), (30, 12)]);
+        assert_eq!(sizes_after(2, down, 5), [(40, 25), (40, 5), (40, 19)]);
+        assert_eq!(sizes_after(3, down, 5), [(40, 25), (40, 19), (40, 5)]);
+    }
+
+    #[test]
+    fn resizing_to_a_size_stops_where_there_is_no_room() {
+        let across = SplitKind::Horizontal;
+        assert_eq!(sizes_after(1, across, 5000), [(79, 25), (1, 12), (1, 12)]);
+        assert_eq!(sizes_after(1, across, 0), [(1, 25), (79, 12), (79, 12)]);
+    }
+
+    #[test]
+    fn resizing_to_a_size_needs_a_split_that_way() {
+        let down = SplitKind::Vertical;
+        assert_eq!(sizes_after(1, down, 5), [(40, 25), (40, 12), (40, 12)]);
+        let mut node = Node::Leaf(1);
+        node.resize_to(1, AREA, SplitKind::Horizontal, 10);
+        assert_eq!(node, Node::Leaf(1));
     }
 
     #[test]

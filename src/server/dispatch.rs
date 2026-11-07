@@ -719,13 +719,9 @@ impl Server {
                     window.automatic_name = false;
                 }
             }
-            Command::ResizePane {
-                target,
-                direction,
-                cells,
-            } => {
+            Command::ResizePane { target, resize } => {
                 let id = self.session.find_pane(target.as_deref())?;
-                self.session.resize_pane(id, direction, cells);
+                self.session.resize_pane(id, resize);
             }
             Command::RestartServer(binary) => self.restart(binary)?,
             Command::RotateWindow { target, down } => {

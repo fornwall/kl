@@ -104,6 +104,18 @@ impl Size {
     }
 }
 
+/// What `resize-pane` was asked to do, in this order. Asking for nothing is fine,
+/// as a pane that gets resized comes out of a zoom either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Resize {
+    /// A size to give the pane, as `-x` and `-y` say.
+    pub width: Option<Size>,
+    pub height: Option<Size>,
+    /// A way to move a border, as `-L`, `-R`, `-U` and `-D` say.
+    pub direction: Option<Direction>,
+    pub cells: u16,
+}
+
 /// Where a new pane goes, as the flags of `split-window` say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Place {
@@ -291,8 +303,7 @@ pub enum Command {
     },
     ResizePane {
         target: Target,
-        direction: Direction,
-        cells: u16,
+        resize: Resize,
     },
     /// Moves every pane to the place of the next one, or the previous with `down`.
     RotateWindow {
@@ -901,23 +912,36 @@ fn parse_rename_window(args: &[String]) -> Result<Command, String> {
     })
 }
 
+/// The value of `-x` or `-y`, with tmux's words for what is wrong with it.
+fn parse_pane_size(what: &str, text: Option<String>) -> Result<Option<Size>, String> {
+    let parse = |text: String| {
+        if text.starts_with('-') {
+            return Err(format!("{what} too small"));
+        }
+        let size = Size::parse(&text).ok();
+        size.ok_or_else(|| format!("{what} invalid"))
+    };
+    text.map(parse).transpose()
+}
+
 fn parse_resize_pane(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse("resize-pane", args, "DLRUt:Z")?;
+    let flags = Flags::parse("resize-pane", args, "DLRUt:x:y:Z")?;
     flags.at_most(1)?;
     let target = flags.value('t');
     if flags.has('Z') {
         return Ok(Command::ToggleZoom { target });
     }
-    let direction = flags
-        .direction()
-        .ok_or("usage: resize-pane -Z | -L|-R|-U|-D [-t target] [cells]")?;
     let cells = flags.rest.first().map_or(Ok(1), |cells| {
         cells.parse().map_err(|error| format!("{cells}: {error}"))
     })?;
     Ok(Command::ResizePane {
         target,
-        direction,
-        cells,
+        resize: Resize {
+            width: parse_pane_size("width", flags.value('x'))?,
+            height: parse_pane_size("height", flags.value('y'))?,
+            direction: flags.direction(),
+            cells,
+        },
     })
 }
 
@@ -1343,9 +1367,33 @@ mod tests {
             command("resize-pane -L 5"),
             Command::ResizePane {
                 target: None,
-                direction: Direction::Left,
-                cells: 5,
+                resize: Resize {
+                    width: None,
+                    height: None,
+                    direction: Some(Direction::Left),
+                    cells: 5,
+                },
             }
+        );
+        assert_eq!(
+            command("resizep -x 30 -y 50% -t 1"),
+            Command::ResizePane {
+                target: Some("1".to_owned()),
+                resize: Resize {
+                    width: Some(Size::Cells(30)),
+                    height: Some(Size::Percent(50)),
+                    direction: None,
+                    cells: 1,
+                },
+            }
+        );
+        assert_eq!(
+            parse(&words("resize-pane -x abc")).unwrap_err(),
+            "width invalid"
+        );
+        assert_eq!(
+            parse(&words("resize-pane -y -5")).unwrap_err(),
+            "height too small"
         );
         assert_eq!(
             command("select-pane -U"),
@@ -1520,7 +1568,6 @@ mod tests {
             "unknown command: frobnicate"
         );
         assert!(parse(&words("resize-pane -X")).is_err());
-        assert!(parse(&words("resize-pane")).is_err());
         assert_eq!(
             parse(&words("kill-pane now")).unwrap_err(),
             "command kill-pane: too many arguments (need at most 0)"

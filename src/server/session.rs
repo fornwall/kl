@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::layout::{self, Layout, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
-use crate::command::{Beside, Direction, MoveWindow, Place};
+use crate::command::{Beside, Direction, MoveWindow, Place, Resize, SplitKind};
 use crate::ghostty::{DEFAULT_POINTER_SHAPE, Link, MODE_SGR_PIXELS, OuterColors, Progress};
 use crate::sys::WinSize;
 
@@ -974,11 +974,20 @@ impl Session {
         self.relayout();
     }
 
-    pub fn resize_pane(&mut self, id: PaneId, direction: Direction, cells: u16) {
+    pub fn resize_pane(&mut self, id: PaneId, resize: Resize) {
         let area = self.area();
         if let Some(window) = self.window_of_mut(id) {
             window.zoomed = false;
-            window.root.resize(id, area, direction, cells);
+            let root = &mut window.root;
+            if let Some(width) = resize.width {
+                root.resize_to(id, area, SplitKind::Horizontal, width.cells(area.width));
+            }
+            if let Some(height) = resize.height {
+                root.resize_to(id, area, SplitKind::Vertical, height.cells(area.height));
+            }
+            if let Some(direction) = resize.direction {
+                root.resize(id, area, direction, resize.cells);
+            }
             self.relayout();
         }
     }

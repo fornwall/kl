@@ -48,7 +48,7 @@ Panes:
                         [command]
   select-pane (selectp) [-L|-R|-U|-D|-l|-m|-M] [-t pane]
   last-pane (lastp) [-t window]
-  resize-pane (resizep) -L|-R|-U|-D [-t pane] [cells]
+  resize-pane (resizep) [-L|-R|-U|-D] [-x width] [-y height] [-t pane] [cells]
   resize-pane (resizep) -Z [-t pane]          toggle zoom
   swap-pane (swapp) [-dDU] [-s pane] [-t pane]  swap two panes
   break-pane (breakp) [-d] [-n name] [-P [-F format]] [-s pane] [-t index]

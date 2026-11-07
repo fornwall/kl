@@ -1793,6 +1793,40 @@ fn select_layout_goes_by_the_start_of_a_name_and_applies_again() {
 }
 
 #[test]
+fn resizes_a_pane_to_a_size() {
+    let screen = three_panes();
+    let width = "#{pane_width}";
+    assert_eq!(
+        output_of(&screen, &["select-layout", "even-horizontal"]),
+        ""
+    );
+    let args = ["resize-pane", "-t", "%0", "-x", "30"];
+    assert_eq!(output_of(&screen, &args), "");
+    let args = ["display", "-p", "-t", "%0", width];
+    assert_eq!(output_of(&screen, &args), "30\n");
+
+    let args = ["resize-pane", "-t", "%2", "-x", "25%"];
+    assert_eq!(output_of(&screen, &args), "");
+    let args = ["display", "-p", "-t", "%2", width];
+    assert_eq!(output_of(&screen, &args), "20\n");
+
+    assert_eq!(
+        error_of(&screen, &["resizep", "-x", "wide"]),
+        "kl: width invalid\n"
+    );
+}
+
+#[test]
+fn resizing_ends_a_zoom_even_if_nothing_changes_size() {
+    let screen = three_panes();
+    assert_eq!(output_of(&screen, &["resize-pane", "-Z"]), "");
+    let zoomed = ["display", "-p", "#{window_zoomed_flag}"];
+    assert_eq!(output_of(&screen, &zoomed), "1\n");
+    assert_eq!(output_of(&screen, &["resize-pane"]), "");
+    assert_eq!(output_of(&screen, &zoomed), "0\n");
+}
+
+#[test]
 fn a_layout_keeps_its_proportions_when_the_window_changes_size() {
     let mut screen = three_panes();
     screen.command(&["select-layout", "even-horizontal"]);
