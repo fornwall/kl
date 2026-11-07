@@ -11,7 +11,7 @@ use super::format::Context;
 use super::keys;
 use super::layout::{Divider, Layout, PaneId};
 use super::pane::Pane;
-use super::session::{Monitor, Window};
+use super::session::Monitor;
 use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
 use super::{Lifecycle, Server, color_queries};
 use crate::command::{self, BufferCommand, Command, Direction, PaneScope, PasteOptions};
@@ -430,28 +430,6 @@ impl Server {
         self.after_list(outcome);
     }
 
-    /// The window chooser, on the row of the current window.
-    fn choose_tree(&mut self) {
-        let session = &self.session;
-        let row = |window: &Window| {
-            let context = Context {
-                session,
-                window: Some(window),
-                pane: session.panes.get(&window.active),
-            };
-            let text = context.expand("#I: #W#F#{?pane_title, \"#T\",}");
-            let target = Some(format!("@{}", window.id));
-            ListRow::new(text, Command::SelectWindow { target })
-        };
-        let rows = session.windows.iter().map(row).collect();
-        let current = session
-            .windows
-            .iter()
-            .position(|w| w.index == session.current);
-        let list = List::new(rows, current.unwrap_or(0));
-        self.client().ui.list = Some(list);
-    }
-
     fn prompt_key(&mut self, event: &KeyEvent) {
         let Some(mut prompt) = self.client().ui.prompt.take() else {
             return;
@@ -637,6 +615,11 @@ impl Server {
                 format,
             } => return self.display_message(target.as_deref(), print, format.as_deref()),
             Command::DisplayPanes(time) => self.client().ui.show_pane_numbers(time),
+            Command::FindWindow(find) => self.find_window(&find),
+            Command::GoToPane { target } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.session.go_to_pane(id);
+            }
             Command::JoinPane {
                 source,
                 target,

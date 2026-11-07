@@ -921,6 +921,17 @@ impl Session {
         }
     }
 
+    /// Shows a pane, in whichever window it is. A window zoomed in on another
+    /// pane stays zoomed, as with `switch-client -Z`, which is what tmux's lists
+    /// run.
+    pub fn go_to_pane(&mut self, id: PaneId) {
+        if let Some(index) = self.window_of(id).map(|window| window.index) {
+            self.select_pane(id);
+            self.select_window(index);
+            self.relayout();
+        }
+    }
+
     /// Selects a pane of the current window by its number.
     pub fn select_pane_at(&mut self, index: usize) {
         let panes = self.window().map(|w| w.root.panes(self.area()));

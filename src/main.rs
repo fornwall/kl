@@ -40,6 +40,7 @@ Windows:
   kill-window (killw) [-a] [-t window]
   list-windows (lsw) [-a] [-F format] [-f filter]
   choose-tree                                 pick a window from a list
+  find-window (findw) [-CiNTZ] pattern        pick from the panes that match
   set-window-option (setw) [-t window] monitor-activity [on|off]
 
 Panes:
@@ -83,7 +84,7 @@ number, %id or window.pane, and {last}, {next}, {top} and the like work too.
 Commands run in a pane are about that pane by default. Formats are tmux's, such
 as #{window_name} or #W, with conditions, comparisons and the usual modifiers.
 
-Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , . & for windows,
+Keys follow tmux, with C-b as the prefix: c n p l w f ' 0-9 , . & for windows,
 % \" o ; q z x { } ! m M Space E C-o M-o M-1..7 arrows for panes, [ ] # = - for copying and paste buffers, : for
 commands, ? to list the keys and d to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a

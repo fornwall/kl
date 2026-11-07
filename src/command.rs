@@ -137,6 +137,26 @@ pub enum Beside {
     Before,
 }
 
+/// What `find-window` looks at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Searched {
+    /// What panes show.
+    pub content: bool,
+    /// The names of windows.
+    pub name: bool,
+    /// The titles of panes.
+    pub title: bool,
+}
+
+/// What `find-window` looks for, and where.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FindWindow {
+    /// A shell pattern for some part of the text.
+    pub pattern: String,
+    pub ignore_case: bool,
+    pub searched: Searched,
+}
+
 /// What `move-window` was asked to do.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MoveWindow {
@@ -189,6 +209,13 @@ pub enum Command {
     },
     /// Shows the number of each pane for a while, or until a key if zero.
     DisplayPanes(Option<Duration>),
+    /// Lets the user pick from the panes that show something.
+    FindWindow(FindWindow),
+    /// Shows a pane, whichever window it is in. This is what rows of the window
+    /// list run, and there is no name for it: tmux has `switch-client` there.
+    GoToPane {
+        target: Target,
+    },
     /// Moves a pane next to another one.
     JoinPane {
         source: Target,
@@ -354,6 +381,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
             parse_buffer_name("delete-buffer", args, BufferCommand::Delete)
         }
         "display-panes" | "displayp" => parse_display_panes(args),
+        "find-window" | "findw" => parse_find_window(args),
         "join-pane" | "joinp" | "move-pane" | "movep" => parse_join_pane(args),
         "kill-pane" | "killp" => parse_kill_pane(args),
         "kill-server" => no_args("kill-server", args, Command::KillServer),
@@ -621,6 +649,26 @@ fn parse_set_buffer(args: &[String]) -> Result<Command, String> {
 fn parse_choose_tree(args: &[String]) -> Result<Command, String> {
     let flags = Flags::parse("choose-tree", args, "swZ")?;
     flags.at_most(0).map(|()| Command::ChooseTree)
+}
+
+/// There is no `-r` for lack of regular expressions, and lists always cover the
+/// window as with `-Z`.
+fn parse_find_window(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("find-window", args, "CiNTZ")?;
+    flags.at_most(1)?;
+    let [pattern] = flags.rest else {
+        return Err("command find-window: too few arguments (need at least 1)".to_owned());
+    };
+    let everywhere = !(flags.has('C') || flags.has('N') || flags.has('T'));
+    Ok(Command::FindWindow(FindWindow {
+        pattern: pattern.clone(),
+        ignore_case: flags.has('i'),
+        searched: Searched {
+            content: everywhere || flags.has('C'),
+            name: everywhere || flags.has('N'),
+            title: everywhere || flags.has('T'),
+        },
+    }))
 }
 
 fn parse_display_message(args: &[String]) -> Result<Command, String> {
@@ -1255,6 +1303,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_finding_windows() {
+        assert_eq!(
+            command("find-window -Z logs"),
+            Command::FindWindow(FindWindow {
+                pattern: "logs".to_owned(),
+                ignore_case: false,
+                searched: Searched {
+                    content: true,
+                    name: true,
+                    title: true,
+                },
+            })
+        );
+        assert_eq!(
+            command("findw -iN logs"),
+            Command::FindWindow(FindWindow {
+                pattern: "logs".to_owned(),
+                ignore_case: true,
+                searched: Searched {
+                    name: true,
+                    ..Searched::default()
+                },
+            })
+        );
+        assert_eq!(
+            parse(&words("find-window")).unwrap_err(),
+            "command find-window: too few arguments (need at least 1)"
+        );
+        assert!(parse(&words("find-window a b")).is_err());
     }
 
     #[test]

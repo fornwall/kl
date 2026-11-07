@@ -15,6 +15,7 @@ mod render;
 mod restart;
 mod session;
 mod target;
+mod tree;
 mod ui;
 
 use std::error::Error;

@@ -857,7 +857,7 @@ fn lists_the_keys_on_screen_and_goes_back_to_the_panes() {
     screen.run("echo still-here");
     screen.wait_for_line("still-here");
     screen.prefix("?");
-    screen.wait_for_text("C-b ?");
+    screen.wait_for_text("C-b Space");
     screen.wait_for_no_text("still-here");
 
     // Keys go to the list and not the shell, until it is left.
@@ -865,7 +865,7 @@ fn lists_the_keys_on_screen_and_goes_back_to_the_panes() {
     screen.wait_for_text("Resize the pane right");
     screen.type_text("q");
     screen.wait_for_line("still-here");
-    screen.wait_for_no_text("C-b ?");
+    screen.wait_for_no_text("Resize the pane right");
 }
 
 #[test]
@@ -946,6 +946,99 @@ fn moves_the_window_from_the_prompt() {
     screen.type_text("7");
     screen.enter();
     screen.wait_for_text("7:c*");
+}
+
+#[test]
+fn selects_a_window_by_its_index_from_the_prompt() {
+    let mut screen = three_windows();
+    screen.prefix("'");
+    screen.wait_for_text("index");
+    screen.type_text("0");
+    screen.enter();
+    screen.wait_for_text("0:a*");
+
+    screen.prefix("'");
+    screen.wait_for_text("index");
+    screen.type_text("7");
+    screen.enter();
+    screen.wait_for_text("can't find window: 7");
+}
+
+/// A window with `needle` on its left pane and `hay` on its right one, and one
+/// more window showing nothing of note, which is the current one.
+fn needle_in_a_window() -> Screen {
+    let mut screen = Screen::new(80, 24);
+    screen.run("echo needle");
+    screen.wait_for_text("needle");
+    screen.prefix("%");
+    screen.wait_for_text("\u{2502}$");
+    screen.run("echo hay");
+    screen.wait_for_text("hay");
+    assert!(screen.command(&["new-window", "-n", "x"]).status.success());
+    screen.wait_for_text("1:x*");
+    screen
+}
+
+#[test]
+fn finds_what_a_pane_shows_and_goes_there() {
+    let mut screen = needle_in_a_window();
+    assert_eq!(output_of(&screen, &["find-window", "needle"]), "");
+    let lines = screen.wait_for_text("(0) 0: ");
+    assert!(lines[1].starts_with("(1)     0: "), "{lines:?}");
+    assert!(lines[2].trim().is_empty(), "{lines:?}");
+
+    // It starts on the pane, rather than on its window.
+    screen.enter();
+    screen.wait_for_no_text("(0) 0: ");
+    let format = "#{window_index}.#{pane_index}";
+    assert_eq!(output_of(&screen, &["display", "-p", format]), "0.0\n");
+}
+
+#[test]
+fn finding_goes_by_case_and_flags_as_asked() {
+    let mut screen = needle_in_a_window();
+    let lists = |screen: &mut Screen, args: &[&str]| {
+        assert_eq!(output_of(screen, args), "");
+        let lines = screen.wait_for_text("(0) ");
+        screen.key(key::ESCAPE, 0, "", 0);
+        screen.wait_for_no_text("(0) ");
+        lines[0].contains("(0) 0: ") && !lines[2].contains("(2) ")
+    };
+    assert!(lists(&mut screen, &["find-window", "-i", "NEEDLE"]));
+    assert!(lists(&mut screen, &["find-window", "-C", "n??dle"]));
+    assert!(!lists(&mut screen, &["find-window", "-N", "x"]));
+
+    assert_eq!(output_of(&screen, &["find-window", "NEEDLE"]), "");
+    let lines = screen.wait_for_text("filter: no matches");
+    assert!(lines[0].contains("(0) 0: "), "{lines:?}");
+    assert!(lines[1].contains("(1) 1: x*"), "{lines:?}");
+}
+
+#[test]
+fn searches_for_a_pane_from_the_prompt() {
+    let mut screen = needle_in_a_window();
+    screen.prefix("f");
+    screen.wait_for_text("(find-window)");
+    screen.type_text("hay");
+    screen.enter();
+    let lines = screen.wait_for_text("(1)     1: ");
+    assert!(lines[0].contains("(0) 0: "), "{lines:?}");
+}
+
+#[test]
+fn a_zoomed_window_stays_zoomed_going_to_another_of_its_panes() {
+    let mut screen = needle_in_a_window();
+    let window = "0";
+    assert_eq!(output_of(&screen, &["select-window", "-t", window]), "");
+    assert_eq!(output_of(&screen, &["resize-pane", "-Z"]), "");
+    screen.wait_for_text("0:");
+    assert_eq!(output_of(&screen, &["find-window", "needle"]), "");
+    screen.wait_for_text("(1)     0: ");
+    screen.enter();
+    let lines = screen.wait_for_text("needle");
+    assert!(!lines.iter().any(|line| line.contains("hay")), "{lines:?}");
+    let format = "#{pane_index} #{window_zoomed_flag}";
+    assert_eq!(output_of(&screen, &["display", "-p", format]), "0 1\n");
 }
 
 #[test]

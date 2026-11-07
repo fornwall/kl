@@ -63,18 +63,32 @@ impl<'a> Parts<'a> {
     }
 }
 
-/// Whether text matches a shell pattern of `*` and `?`.
-fn glob_matches(pattern: &[char], text: &[char]) -> bool {
-    match (pattern.split_first(), text.split_first()) {
-        (None, None) => true,
-        (Some(('*', rest)), _) => {
-            glob_matches(rest, text) || (!text.is_empty() && glob_matches(pattern, &text[1..]))
+/// Whether text matches a shell pattern of `*` and `?`. Only the last star ever
+/// needs another try, which keeps a pattern full of them from taking forever.
+pub fn glob_matches(pattern: &[char], text: &[char]) -> bool {
+    let (mut wanted, mut at) = (0, 0);
+    let mut star = None;
+    while let Some(c) = text.get(at) {
+        match pattern.get(wanted) {
+            Some('*') => {
+                wanted += 1;
+                star = Some((wanted, at));
+            }
+            Some(next) if next == c || *next == '?' => {
+                wanted += 1;
+                at += 1;
+            }
+            _ => {
+                let Some((after_star, from)) = star else {
+                    return false;
+                };
+                wanted = after_star;
+                at = from + 1;
+                star = Some((after_star, at));
+            }
         }
-        (Some((wanted, rest)), Some((c, tail))) if *wanted == '?' || wanted == c => {
-            glob_matches(rest, tail)
-        }
-        _ => false,
     }
+    pattern.iter().skip(wanted).all(|c| *c == '*')
 }
 
 /// The only one of some candidates, if there is exactly one.
@@ -421,6 +435,14 @@ mod tests {
         assert!(!matches("a?c", "ac"));
         assert!(!matches("b*", "abc"));
         assert!(!matches("abc", "ab"));
+        assert!(matches("a*b*c", "a--b--b--c"));
+        assert!(!matches("a*b*c", "a--b--b--"));
+    }
+
+    #[test]
+    fn patterns_full_of_stars_stay_quick() {
+        let pattern = format!("{}b", "*a".repeat(30));
+        assert!(!matches(&pattern, &"a".repeat(2000)));
     }
 
     #[test]

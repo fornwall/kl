@@ -44,6 +44,11 @@ pub const PREFIX_TABLE: &[Binding] = &[
         "Kill current window",
     ),
     bind(
+        "'",
+        "command-prompt -p index \"select-window -t \\\":%%\\\"\"",
+        "Prompt for window index to select",
+    ),
+    bind(
         ",",
         "command-prompt -I \"#W\" \"rename-window -- \\\"%%\\\"\"",
         "Rename current window",
@@ -74,6 +79,11 @@ pub const PREFIX_TABLE: &[Binding] = &[
     bind("]", "paste-buffer -p", "Paste the most recent paste buffer"),
     bind("c", "new-window", "Create a new window"),
     bind("d", "detach-client", "Detach the current client"),
+    bind(
+        "f",
+        "command-prompt \"find-window -Z \\\"%%\\\"\"",
+        "Search for a pane",
+    ),
     bind("i", "display-message", "Display window information"),
     bind("l", "last-window", "Select the previously current window"),
     bind("m", "select-pane -m", "Toggle the marked pane"),

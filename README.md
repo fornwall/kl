@@ -78,6 +78,8 @@ each target has been verified.
 - **Formats cover what people actually use.** That is variables, conditions,
   comparisons and common modifiers. `s/from/to/` replaces plain text rather than
   a regular expression, and there is no `#()`, `#[]` or looping over windows.
+- **`find-window` has no regular expressions.** There is no `-r`, and its
+  patterns know `*` and `?`, but not the `[...]` of `glob(7)`.
 - **Programs cannot read the clipboard.** They can write to it, but who should be
   allowed to read it is undecided, so OSC 52 queries get no answer.
 - **`restart-server` has some rough edges:**

@@ -113,7 +113,6 @@ Before adding much more, close the gaps in the table above.
 What is missing for daily use compared with tmux.
 
 - A preview in the list of `C-b w`, and going down to panes there, as in tmux.
-- Finding windows: `C-b '` and `find-window` on `C-b f`.
 - `resize-pane -x` and `-y`.
 - `select-layout -o` and layouts in tmux's own notation, including
   `#{window_layout}`. `main-pane-width` and the like are fixed at their defaults
