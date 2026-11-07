@@ -62,6 +62,11 @@ each target has been verified.
 - **The terminal's title does not come back in Ghostty.** It has no title stack,
   so leaving kl clears the title rather than restoring it, until something like
   the shell's prompt sets it again.
+- **Copy mode differs from tmux in a few ways.** It shows the live screen rather
+  than a copy of it, so at the bottom of the history new output moves the text
+  under the cursor. Searching ignores case and takes the text literally, where
+  tmux takes a regular expression. Relative paths for `save-buffer` and
+  `load-buffer` go by the active pane's directory, not the client's.
 - **Programs cannot read the clipboard.** They can write to it, but who should be
   allowed to read it is undecided, so OSC 52 queries get no answer.
 - **`restart-server` has some rough edges:**
