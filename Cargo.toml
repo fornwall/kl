@@ -7,6 +7,7 @@ description = "Klethron Terminal Multiplexer"
 publish = false
 
 [dependencies]
+libc = "0.2"
 
 [lints.rust]
 warnings = "deny"
@@ -63,3 +64,9 @@ string_add = "deny"
 tests_outside_test_module = "deny"
 try_err = "deny"
 verbose_file_reads = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true

@@ -1,0 +1,293 @@
+//! A pane: one program running on a pty, and the terminal emulating it.
+
+use std::env;
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
+
+use super::copy_mode::CopyMode;
+use super::layout::{PaneId, Rect};
+use crate::ghostty::{Rgb, Terminal};
+use crate::sys::{self, WinSize};
+
+/// How much to read from a pty at a time.
+const READ_SIZE: usize = 64 * 1024;
+
+/// What to run in a new pane, and where.
+pub struct Spawn<'a> {
+    /// Empty for the user's shell. A single word is a shell command, and more
+    /// words are a program with arguments, as in tmux.
+    pub program: &'a [String],
+    pub cwd: Option<&'a Path>,
+    /// The socket path, for programs to find their way back to the server.
+    pub socket: &'a str,
+}
+
+/// Things a program did in the last read, for the caller to act on.
+#[derive(Default)]
+pub struct Activity {
+    pub bell: bool,
+    pub title_changed: bool,
+    pub clipboard: Vec<Vec<u8>>,
+}
+
+pub struct Pane {
+    pub id: PaneId,
+    pub terminal: Terminal,
+    /// The area of the window this pane covers.
+    pub rect: Rect,
+    pub copy_mode: Option<CopyMode>,
+    /// Set when every row must be drawn, not just the changed ones.
+    pub redraw: bool,
+    pty: File,
+    child: Child,
+    /// Bytes on their way to the program.
+    pending: Vec<u8>,
+    exited: bool,
+    cell_size: (u16, u16),
+}
+
+fn user_shell() -> String {
+    env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "/bin/sh".to_owned())
+}
+
+/// Starts the shell as a login shell, with the customary dash in `argv[0]`.
+fn shell_command() -> Command {
+    let shell = user_shell();
+    let name = Path::new(&shell)
+        .file_name()
+        .map_or_else(|| "sh".into(), |name| name.to_string_lossy());
+    let mut command = Command::new(&shell);
+    command.arg0(format!("-{name}"));
+    command
+}
+
+fn build_command(spawn: &Spawn<'_>, id: PaneId) -> Command {
+    let mut command = match spawn.program {
+        [] => shell_command(),
+        [line] => {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", line]);
+            command
+        }
+        [program, args @ ..] => {
+            let mut command = Command::new(program);
+            command.args(args);
+            command
+        }
+    };
+    if let Some(cwd) = spawn.cwd {
+        command.current_dir(cwd);
+    }
+    // libghostty-vt is the engine of Ghostty, so that is the terminal programs
+    // are talking to. Its terminfo entry is only certain to be installed where
+    // Ghostty itself is what started the server, though.
+    let term = match env::var("TERM").as_deref() {
+        Ok("xterm-ghostty") => "xterm-ghostty",
+        _ => "xterm-256color",
+    };
+    command
+        .env("TERM", term)
+        .env("COLORTERM", "truecolor")
+        .env("TERM_PROGRAM", "kl")
+        .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("KL", format!("{},{}", spawn.socket, std::process::id()))
+        .env("KL_PANE", format!("%{id}"))
+        .env_remove("LINES")
+        .env_remove("COLUMNS");
+    command
+}
+
+impl Pane {
+    pub fn spawn(
+        id: PaneId,
+        spawn: &Spawn<'_>,
+        size: WinSize,
+        colors: (Option<Rgb>, Option<Rgb>),
+    ) -> io::Result<Self> {
+        let cols = size.cols.max(1);
+        let rows = size.rows.max(1);
+        let mut terminal = Terminal::new(cols, rows).map_err(io::Error::other)?;
+        terminal.set_default_colors(colors.0, colors.1);
+        let (pty, child) = sys::spawn_on_pty(build_command(spawn, id), size)?;
+        if !sys::selectable(pty.as_raw_fd()) {
+            return Err(io::Error::other("too many panes"));
+        }
+        Ok(Self {
+            id,
+            terminal,
+            rect: Rect::default(),
+            copy_mode: None,
+            redraw: true,
+            pty,
+            child,
+            pending: Vec::new(),
+            exited: false,
+            cell_size: (0, 0),
+        })
+    }
+
+    pub fn fd(&self) -> RawFd {
+        self.pty.as_raw_fd()
+    }
+
+    pub const fn wants_write(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Queues bytes for the program, and writes as much as it will take now.
+    pub fn send(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+        self.flush();
+    }
+
+    pub fn flush(&mut self) {
+        if sys::flush_some(&self.pty, &mut self.pending).is_err() {
+            self.pending.clear();
+        }
+    }
+
+    /// Feeds the program's output into the terminal.
+    pub fn read(&mut self) -> Activity {
+        let mut buf = vec![0; READ_SIZE];
+        match (&self.pty).read(&mut buf) {
+            // On Linux, the master reports EIO once the slave side is closed.
+            Ok(0) => self.exited = true,
+            Ok(len) => self.terminal.write(buf.get(..len).unwrap_or(&[])),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => self.exited = true,
+        }
+        self.take_activity()
+    }
+
+    fn take_activity(&mut self) -> Activity {
+        let effects = self.terminal.effects();
+        let replies = std::mem::take(&mut effects.replies);
+        let activity = Activity {
+            bell: std::mem::take(&mut effects.bell),
+            title_changed: std::mem::take(&mut effects.title_changed),
+            clipboard: std::mem::take(&mut effects.clipboard),
+        };
+        if !replies.is_empty() {
+            self.send(&replies);
+        }
+        activity
+    }
+
+    /// Whether the program is gone. A background job can keep the pty open past
+    /// the end of the program, so the end of output alone does not tell.
+    pub fn has_exited(&mut self) -> bool {
+        self.exited || matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+    }
+
+    /// Moves the pane, telling the program if that changed its size.
+    pub fn place(&mut self, rect: Rect, cell_size: (u16, u16)) {
+        let unchanged_size = rect.width == self.rect.width
+            && rect.height == self.rect.height
+            && cell_size == self.cell_size;
+        self.rect = rect;
+        self.redraw = true;
+        if unchanged_size {
+            return;
+        }
+        self.cell_size = cell_size;
+        let (cols, rows) = (rect.width.max(1), rect.height.max(1));
+        let (cell_width, cell_height) = cell_size;
+        let result =
+            self.terminal
+                .resize(cols, rows, u32::from(cell_width), u32::from(cell_height));
+        if let Err(error) = result {
+            eprintln!("resizing pane {}: {error}", self.id);
+        }
+        let size = WinSize {
+            cols,
+            rows,
+            width_px: cols.saturating_mul(cell_width),
+            height_px: rows.saturating_mul(cell_height),
+        };
+        if let Err(error) = sys::set_winsize(self.pty.as_fd(), size) {
+            eprintln!("resizing the pty of pane {}: {error}", self.id);
+        }
+        // A resize can move the cursor out from under copy mode.
+        if let Some(copy_mode) = &mut self.copy_mode {
+            copy_mode.x = copy_mode.x.min(cols - 1);
+            copy_mode.y = copy_mode.y.min(rows - 1);
+        }
+        self.take_activity();
+    }
+
+    /// The name of what is running in the foreground.
+    pub fn foreground_name(&self) -> Option<String> {
+        sys::foreground_name(self.pty.as_fd())
+    }
+
+    /// The directory for a new pane opened from this one to start in. What the
+    /// shell reported is preferred, since it survives programs in the foreground
+    /// and works on every platform.
+    pub fn working_directory(&self) -> Option<PathBuf> {
+        let reported = self.terminal.pwd();
+        path_from_pwd(&reported).or_else(|| sys::foreground_cwd(self.pty.as_fd()))
+    }
+}
+
+/// Shells report their directory with OSC 7, as either a path or a file URL.
+fn path_from_pwd(pwd: &str) -> Option<PathBuf> {
+    let path = match pwd.strip_prefix("file://") {
+        Some(rest) => rest.find('/').and_then(|start| rest.get(start..))?,
+        None => pwd,
+    };
+    let path = percent_decode(path);
+    let path = PathBuf::from(path);
+    path.is_dir().then_some(path)
+}
+
+fn percent_decode(text: &str) -> String {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut rest = text.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        let escaped = (byte == b'%')
+            .then(|| tail.get(..2))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        if let Some(escaped) = escaped {
+            bytes.push(escaped);
+            rest = tail.get(2..).unwrap_or(&[]);
+        } else {
+            bytes.push(byte);
+            rest = tail;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_percent_escapes() {
+        assert_eq!(percent_decode("/a%20b"), "/a b");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn reads_pwd_as_a_path_or_a_url() {
+        assert_eq!(path_from_pwd("/tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(
+            path_from_pwd("file://host/tmp"),
+            Some(PathBuf::from("/tmp"))
+        );
+        assert_eq!(path_from_pwd("file:///tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(path_from_pwd("/no/such/directory"), None);
+        assert_eq!(path_from_pwd(""), None);
+    }
+}
