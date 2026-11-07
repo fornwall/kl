@@ -41,14 +41,58 @@ The first iteration has the core of tmux, with no configuration:
 | macOS aarch64    | type-checked and linted, with libghostty-vt built | no |
 
 The end-to-end tests use libghostty-vt as the outer terminal, so they exercise
-the core of Ghostty and the exact key sequences it encodes. They do not cover
-the Ghostty application itself, which has not been tried yet. Real programs
-(nvim, less, htop) have been tried with tmux as the outer terminal, which also
-covers the legacy input path.
+the core of Ghostty and the exact key sequences its encoder produces. That leaves
+out what the app adds around its core: how it fills in key events, what it keeps
+for itself, and the limits of its replies. So kl has been tried in the app too.
+
+That was Ghostty 1.4.0, the GTK build from the snap, on Linux x86-64, under Xvfb
+with Mesa's software OpenGL, with keys and mouse events injected through XTEST.
+Wherever it could be done, the same thing was done with a program directly in the
+app and in a pane of the same size, comparing what the program logged or what the
+framebuffer held:
+
+- **Keys.** 53 keys and combinations under legacy encoding, kitty flags 1, 3 and
+  31, on the alternate screen, in application cursor and keypad mode, and with
+  modifyOtherKeys 1 and 2. Programs get the same bytes, but for an added `::43` on
+  the release of the numpad plus. The same goes for 11 keys on a Russian and a
+  Dvorak layout, and for dead keys, on GTK's built-in input method. Bindings work,
+  including `%` and `"` with shift pressed between the prefix and the key, and
+  they go by physical key on the Russian layout.
+- **The mouse.** 17 events in tracking modes 1000, 1002 and 1003, and in the X10,
+  SGR, URXVT and SGR-pixels formats, give programs the same reports, but for how
+  many motion events a drag comes to. By hand: clicking panes and windows, dragging
+  borders, the wheel in history and on the alternate screen, selecting by dragging
+  and by double and triple clicks, reaching the clipboard over OSC 52 with
+  Ghostty's default configuration, pasting with the middle button and with
+  ctrl+shift+v, shift for Ghostty's own selection, and ctrl+shift to hover a link.
+- **Rendering.** A page of text attributes, underline styles and colors, 256 and
+  true colors, wide characters, emoji sequences, keycaps, combining marks, right
+  to left text and box drawing is the same pixel for pixel, apart from the mouse
+  pointer, in a full window and in half of a split. So are palette, default color
+  and cursor color changes, reverse video, kitty images and double width lines,
+  apart from the window's padding, since a program's colors stay in its pane.
+- **Programs.** nvim with true colors, splits and the mouse is the same pixel for
+  pixel at each of 11 steps, including the bar cursor in insert mode, and across
+  resizing the window. htop and less were only looked at. 3 million lines through
+  a pane took 1.3 seconds, against 1.1 directly.
+- **What programs are told.** 71 values, from all modes to device attributes,
+  DECRQSS, sizes, colors and the color scheme, match the app. The exceptions are
+  XTVERSION, which says kl, and tertiary device attributes, which the app does not
+  answer.
+- **Leaving.** After detaching, the last shell exiting, `kill-server`, killing the
+  server and terminating the client, 31 modes, the kitty flags, the cursor style
+  and the colors are back as they were. The title is not, as the README says.
+- **Also tried.** A configured `cursor-style`, resizing all the way down to 18x5
+  and rapidly, closing the window and attaching from a new one, synchronized
+  output, focus reports, key repeat and copy mode from the keyboard.
+
+Not covered: Wayland, the macOS app, a GPU, a real input method such as ibus, and
+what is hard to see from outside, such as notifications, the bell and following a
+live color scheme change.
 
 The input parser, the protocol decoders, the command language and the way from
 parsed events and program output through libghostty-vt have been fuzzed on Linux
-x86-64, for 5 to 11 minutes on 4 cores each without a crash. See
+x86-64, for 11 to 21 minutes on 4 cores each without a crash. See
 [fuzz/README.md](fuzz/README.md).
 
 `KL_TMPDIR` moves the socket directory, as `TMUX_TMPDIR` does in tmux. It exists
@@ -63,7 +107,6 @@ Before adding much more, close the gaps in the table above.
 - Get CI running. `.github/workflows/ci.yml` covers Linux x86-64, Linux aarch64
   and macOS aarch64 with clippy and all tests, but this repository has no remote
   yet, so it has never run. The first run is what fills in the table above.
-- Try it for real in Ghostty, and fix what that finds.
 
 ### 3. Getting around
 
