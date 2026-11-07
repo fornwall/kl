@@ -323,6 +323,42 @@ impl<'a, L: Lines> Reader<'a, L> {
         self.go_to_row(start.y);
     }
 
+    fn on_word_boundary(&self) -> bool {
+        self.line.cell(self.x) == ' ' || self.in_set(SEPARATORS)
+    }
+
+    /// Steps back, across a wrapped row if need be. Returns false at the start
+    /// of the line.
+    fn step_back_in_line(&mut self) -> bool {
+        if self.x == 0 {
+            if !self.wrapped_from_above() {
+                return false;
+            }
+            self.go_to_row(self.y - 1);
+            self.x = self.line.length();
+            if self.x == 0 {
+                return false;
+            }
+        }
+        self.x -= 1;
+        true
+    }
+
+    /// Steps on, across a wrapped row if need be. Returns false at the end of the
+    /// line.
+    fn step_forward_in_line(&mut self) -> bool {
+        if self.x + 1 < self.line.length() {
+            self.x += 1;
+            return true;
+        }
+        if self.y >= self.last_row() || !self.line.wrapped {
+            return false;
+        }
+        self.x = 0;
+        self.go_to_row(self.y + 1);
+        true
+    }
+
     /// Steps one character back through the text, skipping empty rows. Returns
     /// false at the start of the text.
     fn step_back(&mut self) -> bool {
@@ -514,32 +550,29 @@ pub fn matching_bracket(lines: &impl Lines, at: Position) -> Option<Position> {
     }
 }
 
-/// The word at a position, as `*` and `#` look for it.
-pub fn word_at(lines: &impl Lines, at: Position) -> Option<String> {
+/// The word at a position, as `*` and `#` look for it. On a separator or a space
+/// that is the word after it, and the empty string if nothing follows.
+pub fn word_at(lines: &impl Lines, at: Position) -> String {
     let mut reader = Reader::new(lines, at);
-    reader.settle();
-    if reader.in_whitespace() || reader.in_set(SEPARATORS) {
-        return None;
+    let mut on_boundary = false;
+    while !reader.line.is_padding(reader.x) {
+        on_boundary = reader.on_word_boundary();
+        if on_boundary || !reader.step_back_in_line() {
+            break;
+        }
     }
-    let mut start = reader.x;
-    while start > 0 && is_word_cell(&reader.line, start - 1) {
-        start -= 1;
+    let mut word = String::new();
+    loop {
+        if on_boundary && !reader.step_forward_in_line() {
+            break;
+        }
+        on_boundary = true;
+        if reader.line.is_padding(reader.x) || reader.on_word_boundary() {
+            break;
+        }
+        word.push(reader.line.cell(reader.x));
     }
-    let end = (start..reader.line.length())
-        .find(|x| !is_word_cell(&reader.line, *x))
-        .unwrap_or_else(|| reader.line.length());
-    let cells = start..end;
-    Some(
-        cells
-            .filter(|x| !reader.line.is_padding(*x))
-            .map(|x| reader.line.cell(x))
-            .collect(),
-    )
-}
-
-fn is_word_cell(line: &Line, x: u16) -> bool {
-    let c = line.cell(x);
-    line.is_padding(x) || !(c.is_whitespace() || SEPARATORS.contains(c))
+    word
 }
 
 #[cfg(test)]
@@ -759,11 +792,28 @@ mod tests {
 
     #[test]
     fn finds_the_word_under_the_cursor() {
-        let text = text(&["foo.bar baz"]);
-        assert_eq!(word_at(&text, Position::new(1, 0)).as_deref(), Some("foo"));
-        assert_eq!(word_at(&text, Position::new(5, 0)).as_deref(), Some("bar"));
-        assert_eq!(word_at(&text, Position::new(3, 0)), None);
-        assert_eq!(word_at(&text, Position::new(7, 0)), None);
+        let text = text(&["foo.bar baz", "wrapped-at-the-edge-\\", "of-screen"]);
+        let word = |x, y| word_at(&text, Position::new(x, y));
+        assert_eq!(word(1, 0), "foo");
+        assert_eq!(word(5, 0), "bar");
+        assert_eq!(word(10, 0), "baz");
+    }
+
+    #[test]
+    fn on_a_separator_the_word_is_what_follows_it() {
+        let text = text(&["foo.bar baz$", ""]);
+        let word = |x, y| word_at(&text, Position::new(x, y));
+        assert_eq!(word(3, 0), "bar");
+        assert_eq!(word(7, 0), "baz");
+        assert_eq!(word(11, 0), "");
+        assert_eq!(word(0, 1), "");
+    }
+
+    #[test]
+    fn a_word_under_the_cursor_goes_across_wrapped_rows() {
+        let text = text(&["one two-----------ab\\", "cd three"]);
+        assert_eq!(word_at(&text, Position::new(19, 0)), "abcd");
+        assert_eq!(word_at(&text, Position::new(0, 1)), "abcd");
     }
 
     #[test]

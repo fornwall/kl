@@ -821,7 +821,8 @@ fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) ->
         Action::SearchAgain => find(pane, mode, mode.search_forward),
         Action::SearchReverse => find(pane, mode, !mode.search_forward),
         Action::SearchWord(forward) => {
-            if let Some(word) = motion::word_at(&pane.terminal, cursor(pane, mode)) {
+            let word = motion::word_at(&pane.terminal, cursor(pane, mode));
+            if !word.is_empty() {
                 start_search(pane, mode, word, forward);
             }
         }
