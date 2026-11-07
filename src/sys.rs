@@ -48,7 +48,29 @@ pub struct WinSize {
     pub height_px: u16,
 }
 
+/// The most cells a terminal gets to count as in either direction, which is more
+/// than any screen shows. Grids are this big, and failing to allocate one would
+/// end the server, along with everything running in it.
+const MAX_CELLS: u16 = 4096;
+
 impl WinSize {
+    /// A size that can be drawn, from what a terminal reported. One that does not
+    /// know its size says zero, which would leave every pane without any room.
+    pub fn sensible(self) -> Self {
+        let held = |cells: u16, default| {
+            if cells == 0 {
+                default
+            } else {
+                cells.min(MAX_CELLS)
+            }
+        };
+        Self {
+            cols: held(self.cols, 80),
+            rows: held(self.rows, 24),
+            ..self
+        }
+    }
+
     /// The size of a cell in pixels, if the terminal reports that.
     pub const fn cell_size(self) -> (u16, u16) {
         (
@@ -182,6 +204,18 @@ pub fn spawn_daemon(mut command: Command) -> io::Result<Child> {
     }
     // SAFETY: The hook only makes an async-signal-safe call.
     unsafe { std::os::unix::process::CommandExt::pre_exec(&mut command, detach) }.spawn()
+}
+
+/// Closes what this process inherited beyond the standard three descriptors. A
+/// server outlives the client that started it, and would otherwise hand all of
+/// it on to every pane, keeping pipes open that someone is waiting on to end.
+pub fn close_inherited() {
+    let last = c_int::try_from(libc::FD_SETSIZE).unwrap_or(c_int::MAX);
+    for fd in 3..last {
+        // SAFETY: This runs first thing, before anything in this process opens
+        // a descriptor of its own. Closing one that is not open does nothing.
+        unsafe { libc::close(fd) };
+    }
 }
 
 /// Puts a terminal in raw mode until dropped.
@@ -507,6 +541,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sizes_are_held_to_what_can_be_drawn() {
+        let huge = WinSize {
+            cols: u16::MAX,
+            rows: 30,
+            ..WinSize::default()
+        };
+        assert_eq!(huge.sensible().cols, MAX_CELLS);
+        assert_eq!(huge.sensible().rows, 30);
+        let unknown = WinSize::default().sensible();
+        assert_eq!((unknown.cols, unknown.rows), (80, 24));
+    }
+
+    #[test]
     fn selector_reports_ready_descriptors() {
         let (reader, mut writer) = io::pipe().unwrap();
         let fd = reader.as_raw_fd();
@@ -541,13 +588,21 @@ mod tests {
             ..WinSize::default()
         };
         let (mut master, mut child) = spawn_on_pty(command, size).unwrap();
-        child.wait().unwrap();
         let mut output = Vec::new();
         let mut buf = [0; 256];
-        // The child has exited, so this ends with EIO, or with EOF on macOS.
-        while let Ok(len @ 1..) = master.read(&mut buf) {
-            output.extend_from_slice(&buf[..len]);
+        // Reading comes first: on macOS a process only gets to exit once what it
+        // wrote to its terminal was read. This ends with EIO, or with EOF there.
+        loop {
+            match master.read(&mut buf) {
+                Ok(0) => break,
+                Ok(len) => output.extend_from_slice(&buf[..len]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
         }
+        child.wait().unwrap();
         let output = String::from_utf8_lossy(&output);
         assert!(output.contains("11 33"), "{output}");
         assert!(output.contains("isatty"), "{output}");

@@ -21,6 +21,9 @@ use crate::ghostty::{
 use crate::input::{Event, KeyEvent, MouseEvent};
 use crate::sys;
 
+/// The most `send-keys` queues up at once. Running out of memory ends the server.
+const MAX_SEND_KEYS: usize = 64 * 1024 * 1024;
+
 /// How long dragging at the edge of a pane takes to scroll a row, as in tmux.
 const AUTOSCROLL_TIME: Duration = Duration::from_millis(50);
 
@@ -793,6 +796,9 @@ impl Server {
                         }
                     })
                     .collect();
+                if bytes.len().saturating_mul(repeat) > MAX_SEND_KEYS {
+                    return Err("send-keys: too much to send".to_owned());
+                }
                 if let Some(pane) = self.session.panes.get_mut(&id) {
                     pane.send(&bytes.repeat(repeat));
                 }

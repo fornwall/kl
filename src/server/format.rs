@@ -2,6 +2,7 @@
 //! their short forms, conditions, comparisons and the common modifiers. Unlike
 //! in tmux, `s/from/to/` replaces plain text rather than a regular expression.
 
+use std::cell::Cell;
 use std::path::Path;
 
 use super::client::Client;
@@ -13,6 +14,15 @@ use crate::{ghostty, sys};
 
 /// Finds the value of a variable.
 pub type Lookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// How deep formats can nest, which is what tmux allows too.
+const MAX_DEPTH: usize = 100;
+
+/// How many times one format can expand something in all.
+const MAX_STEPS: usize = 1000;
+
+/// Roughly how long the text of a format can get.
+const MAX_LENGTH: usize = 1024 * 1024;
 
 /// The variable behind a short form such as `#W`.
 const fn short_form(c: char) -> Option<&'static str> {
@@ -65,28 +75,28 @@ pub fn is_true(value: &str) -> bool {
     !value.is_empty() && value != "0"
 }
 
-fn holds(condition: &str, vars: Lookup<'_>) -> bool {
-    let value =
-        vars(condition).or_else(|| condition.contains('#').then(|| expand(condition, vars)));
+fn holds(condition: &str, state: &Expansion<'_>) -> bool {
+    let value = (state.vars)(condition)
+        .or_else(|| condition.contains('#').then(|| state.expand(condition)));
     value.is_some_and(|value| is_true(&value))
 }
 
 /// `#{?condition,then,else}`, where more pairs may come before the else.
-fn conditional(text: &str, vars: Lookup<'_>) -> String {
+fn conditional(text: &str, state: &Expansion<'_>) -> String {
     let args = split_args(text);
     let mut rest = args.as_slice();
     while let [condition, then, tail @ ..] = rest {
-        if holds(condition, vars) {
-            return expand(then, vars);
+        if holds(condition, state) {
+            return state.expand(then);
         }
         rest = tail;
     }
     rest.first()
-        .map_or_else(String::new, |otherwise| expand(otherwise, vars))
+        .map_or_else(String::new, |otherwise| state.expand(otherwise))
 }
 
 /// `#{==:a,b}` and its relatives, which are 1 or 0.
-fn comparison(operator: &str, operands: &str, vars: Lookup<'_>) -> Option<String> {
+fn comparison(operator: &str, operands: &str, state: &Expansion<'_>) -> Option<String> {
     let test: fn(&str, &str) -> bool = match operator {
         "==" => |a, b| a == b,
         "!=" => |a, b| a != b,
@@ -102,7 +112,7 @@ fn comparison(operator: &str, operands: &str, vars: Lookup<'_>) -> Option<String
     let [left, right] = args.as_slice() else {
         return None;
     };
-    let result = test(&expand(left, vars), &expand(right, vars));
+    let result = test(&state.expand(left), &state.expand(right));
     Some(u8::from(result).to_string())
 }
 
@@ -228,7 +238,17 @@ fn dirname(path: &str) -> String {
     }
 }
 
-fn apply(modifier: &Modifier<'_>, value: String, vars: Lookup<'_>) -> String {
+/// Replaces text, unless the result would get out of hand.
+fn replace(value: String, from: &str, to: &str) -> String {
+    let added = value.matches(from).count().saturating_mul(to.len());
+    if value.len().saturating_add(added) > MAX_LENGTH {
+        value
+    } else {
+        value.replace(from, to)
+    }
+}
+
+fn apply(modifier: &Modifier<'_>, value: String, state: &Expansion<'_>) -> String {
     match modifier {
         Modifier::Basename => Path::new(&value)
             .file_name()
@@ -237,51 +257,87 @@ fn apply(modifier: &Modifier<'_>, value: String, vars: Lookup<'_>) -> String {
         Modifier::Literal | Modifier::Replace { from: "", .. } => value,
         Modifier::Length => value.chars().count().to_string(),
         Modifier::Width => text_width(&value).to_string(),
-        Modifier::Expand => expand(&value, vars),
+        Modifier::Expand => state.expand(&value),
         Modifier::Not => u8::from(!is_true(&value)).to_string(),
         Modifier::Truncate { limit, marker } => truncate(&value, *limit, marker),
-        Modifier::Replace { from, to } => value.replace(from, to),
+        Modifier::Replace { from, to } => replace(value, from, to),
     }
 }
 
 /// What a name stands for: a nested format, or else a variable.
-fn value_of(name: &str, vars: Lookup<'_>) -> String {
+fn value_of(name: &str, state: &Expansion<'_>) -> String {
     if name.contains("#{") {
-        expand(name, vars)
+        state.expand(name)
     } else {
-        vars(name).unwrap_or_default()
+        (state.vars)(name).unwrap_or_default()
     }
 }
 
 /// What is between the braces of `#{...}`.
-fn expression(text: &str, vars: Lookup<'_>) -> String {
+fn expression(text: &str, state: &Expansion<'_>) -> String {
     if let Some(condition) = text.strip_prefix('?') {
-        return conditional(condition, vars);
+        return conditional(condition, state);
     }
     if let Some(result) = text
         .split_once(':')
-        .and_then(|(operator, operands)| comparison(operator, operands, vars))
+        .and_then(|(operator, operands)| comparison(operator, operands, state))
     {
         return result;
     }
     let Some((modifiers, name)) = parse_modifiers(text) else {
-        return value_of(text, vars);
+        return value_of(text, state);
     };
     let value = if modifiers.contains(&Modifier::Literal) {
         name.to_owned()
     } else {
-        value_of(name, vars)
+        value_of(name, state)
     };
     modifiers
         .iter()
-        .fold(value, |value, modifier| apply(modifier, value, vars))
+        .fold(value, |value, modifier| apply(modifier, value, state))
 }
 
 /// Expands a format, with empty text for variables that do not exist.
 pub fn expand(template: &str, vars: Lookup<'_>) -> String {
+    let state = Expansion {
+        vars,
+        depth: Cell::new(0),
+        steps: Cell::new(0),
+    };
+    state.expand(template)
+}
+
+/// Text can come from programs, by way of a title and `#{E:...}`, and a format
+/// can refer to itself, so all of this has to end, and soon, whatever it says.
+struct Expansion<'a> {
+    vars: Lookup<'a>,
+    depth: Cell<usize>,
+    /// Counted apart from the depth: text that expands itself twice stays within
+    /// any depth, and doubles the work at each level.
+    steps: Cell<usize>,
+}
+
+impl Expansion<'_> {
+    fn expand(&self, template: &str) -> String {
+        let (depth, steps) = (self.depth.get(), self.steps.get());
+        if depth >= MAX_DEPTH || steps >= MAX_STEPS {
+            return String::new();
+        }
+        self.depth.set(depth + 1);
+        self.steps.set(steps + 1);
+        let out = expand_text(template, self);
+        self.depth.set(depth);
+        out
+    }
+}
+
+fn expand_text(template: &str, state: &Expansion<'_>) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find('#') {
+        if out.len() > MAX_LENGTH {
+            return out;
+        }
         out.push_str(rest.get(..start).unwrap_or(""));
         let hash = rest.get(start..).unwrap_or("");
         let mut after = hash.chars().skip(1);
@@ -291,7 +347,7 @@ pub fn expand(template: &str, vars: Lookup<'_>) -> String {
                     out.push_str(hash);
                     return out;
                 };
-                out.push_str(&expression(hash.get(2..end).unwrap_or(""), vars));
+                out.push_str(&expression(hash.get(2..end).unwrap_or(""), state));
                 hash.get(end + 1..).unwrap_or("")
             }
             Some(c @ ('#' | ',' | '}')) => {
@@ -300,7 +356,7 @@ pub fn expand(template: &str, vars: Lookup<'_>) -> String {
             }
             Some(c) => {
                 if let Some(name) = short_form(c) {
-                    out.push_str(&vars(name).unwrap_or_default());
+                    out.push_str(&(state.vars)(name).unwrap_or_default());
                 } else {
                     out.push('#');
                     out.push(c);
@@ -477,6 +533,32 @@ impl<'a> Context<'a> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_format_that_expands_itself_ends() {
+        let vars = |name: &str| match name {
+            "once" => Some("#{E:once}".to_owned()),
+            "twice" => Some("#{E:twice}#{E:twice}".to_owned()),
+            _ => None,
+        };
+        assert_eq!(expand("#{E:once}", &vars), "");
+        assert_eq!(expand("#{E:twice}", &vars), "");
+    }
+
+    #[test]
+    fn deeply_nested_formats_end() {
+        let open = "#{".repeat(100_000);
+        let closed = format!("{open}{}", "}".repeat(100_000));
+        expand(&open, &|_| None);
+        assert_eq!(expand(&closed, &|_| None), "");
+    }
+
+    #[test]
+    fn replacing_cannot_make_text_grow_without_limit() {
+        let growing = "s/a/aaaaaaaa/;".repeat(12);
+        let text = expand(&format!("#{{l;{growing}:a}}"), &|_| None);
+        assert!(text.len() <= MAX_LENGTH, "{}", text.len());
+    }
 
     fn vars(name: &str) -> Option<String> {
         match name {

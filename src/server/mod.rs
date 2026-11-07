@@ -198,7 +198,9 @@ fn color_queries() -> Vec<u8> {
 /// digit would read as one of the numbered commands that share OSC 9 with it.
 fn notification_sequence(notification: &Notification) -> Vec<u8> {
     let Notification { title, body } = notification;
-    let plain = title.is_empty() && !body.starts_with(|c: char| c.is_ascii_digit());
+    // After filtering, or a control character could hide the digit behind it.
+    let body: Vec<u8> = osc_text(body).collect();
+    let plain = title.is_empty() && !body.first().is_some_and(u8::is_ascii_digit);
     let mut osc = if plain {
         b"\x1b]9;".to_vec()
     } else {
@@ -207,7 +209,7 @@ fn notification_sequence(notification: &Notification) -> Vec<u8> {
         osc.push(b';');
         osc
     };
-    osc.extend(osc_text(body));
+    osc.extend(body);
     osc.extend_from_slice(b"\x1b\\");
     osc
 }
@@ -236,6 +238,7 @@ pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
         let (listener, session, buffers) = (restored.listener, restored.session, restored.buffers);
         (listener, session, buffers, Lifecycle::Running)
     } else {
+        sys::close_inherited();
         let Some(listener) = bind(socket)? else {
             return Ok(());
         };
@@ -522,10 +525,10 @@ impl Server {
                 mode,
                 info,
                 environment,
-            } => self.attach(id, version, size, mode, info, environment),
+            } => self.attach(id, version, size.sensible(), mode, info, environment),
             ClientMessage::Input(bytes) if attached => self.handle_input(&bytes),
             ClientMessage::Resize(size) if attached => {
-                self.client().size = size;
+                self.client().size = size.sensible();
                 self.note_activity();
                 self.dirty = true;
             }
@@ -859,6 +862,16 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_control_character_cannot_hide_a_digit_from_the_notification_check() {
+        let notification = Notification {
+            title: String::new(),
+            body: "\u{7f}4;1;50".to_owned(),
+        };
+        let sequence = notification_sequence(&notification);
+        assert!(sequence.starts_with(b"\x1b]777;notify;;"), "{sequence:?}");
+    }
 
     #[test]
     fn asks_for_palette_entries_one_by_one() {

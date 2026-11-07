@@ -12,6 +12,11 @@ pub const VERSION: u32 = 6;
 /// Larger than anything sent in practice, to catch a corrupt stream.
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 
+/// What a client takes from the server, which has to fit a clipboard write and
+/// the output of `show-buffer`. Those are not cut in pieces, and refusing one
+/// would end the client.
+const MAX_SERVER_PAYLOAD: usize = 1024 * 1024 * 1024;
+
 const HEADER_LEN: usize = 5;
 
 const TAG_ATTACH: u8 = 1;
@@ -219,14 +224,14 @@ pub fn put_texts_counted(out: &mut Vec<u8>, texts: &[String]) {
 type Frame<'a> = (u8, &'a [u8], usize);
 
 /// Splits one complete frame off the front of `buffer`.
-fn split_frame(buffer: &[u8]) -> Result<Option<Frame<'_>>, Malformed> {
+fn split_frame(buffer: &[u8], limit: usize) -> Result<Option<Frame<'_>>, Malformed> {
     let Some((&[tag, a, b, c, d], rest)) = buffer.split_first_chunk::<HEADER_LEN>() else {
         return Ok(None);
     };
     let len = usize::try_from(u32::from_le_bytes([a, b, c, d]))
         .ok()
         .ok_or(Malformed)?;
-    if len > MAX_PAYLOAD {
+    if len > limit {
         return Err(Malformed);
     }
     Ok(rest
@@ -275,7 +280,7 @@ impl ClientMessage {
     /// Decodes the first message in `buffer`, returning how much of it was
     /// used, or `None` if more bytes are needed.
     pub fn decode(buffer: &[u8]) -> Result<Option<(Self, usize)>, Malformed> {
-        let Some((tag, payload, used)) = split_frame(buffer)? else {
+        let Some((tag, payload, used)) = split_frame(buffer, MAX_PAYLOAD)? else {
             return Ok(None);
         };
         let mut reader = Reader(payload);
@@ -340,7 +345,7 @@ impl ServerMessage {
     /// Decodes the first message in `buffer`, returning how much of it was
     /// used, or `None` if more bytes are needed.
     pub fn decode(buffer: &[u8]) -> Result<Option<(Self, usize)>, Malformed> {
-        let Some((tag, payload, used)) = split_frame(buffer)? else {
+        let Some((tag, payload, used)) = split_frame(buffer, MAX_SERVER_PAYLOAD)? else {
             return Ok(None);
         };
         let mut reader = Reader(payload);
@@ -473,6 +478,15 @@ mod tests {
         ClientMessage::Input(b"b".to_vec()).encode(&mut bytes);
         let (_, used) = ClientMessage::decode(&bytes).unwrap().unwrap();
         assert_eq!(used, first);
+    }
+
+    #[test]
+    fn clients_take_more_from_the_server_than_it_takes_from_them() {
+        let len = u32::try_from(MAX_PAYLOAD + 1).unwrap().to_le_bytes();
+        let header = [TAG_OUTPUT, len[0], len[1], len[2], len[3]];
+        assert_eq!(ServerMessage::decode(&header), Ok(None));
+        let header = [TAG_INPUT, len[0], len[1], len[2], len[3]];
+        assert_eq!(ClientMessage::decode(&header), Err(Malformed));
     }
 
     #[test]

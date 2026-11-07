@@ -16,6 +16,12 @@ use crate::sys::{self, WinSize};
 /// How much to read from a pty at a time.
 const READ_SIZE: usize = 64 * 1024;
 
+/// How far a program can get behind on what is for it before replies are dropped.
+/// Any more than the largest paste, which is not dropped, as a program that takes
+/// its time with one must still hear back. One that never reads would otherwise
+/// use up all memory, which ends the server and every pane with it.
+const MAX_PENDING: usize = 96 * 1024 * 1024;
+
 /// Ghostty's terminfo entry, compiled by `tic`. Programs in panes talk to
 /// libghostty-vt whatever the outer terminal is, so this is the accurate entry
 /// for them, but few hosts have it, least of all those reached over ssh.
@@ -244,6 +250,7 @@ impl Pane {
             Ok(len) => {
                 read = len;
                 let output = buf.get(..len).unwrap_or(&[]);
+                let clipboard = clipboard.filter(|_| self.pending.len() < MAX_PENDING);
                 self.terminal.write_with_clipboard(output, clipboard);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
@@ -267,7 +274,7 @@ impl Pane {
             notifications: std::mem::take(&mut effects.notifications),
             progress_reported: std::mem::take(&mut effects.progress_reported),
         };
-        if !replies.is_empty() {
+        if !replies.is_empty() && self.pending.len() < MAX_PENDING {
             self.send(&replies);
         }
         activity

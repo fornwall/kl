@@ -242,7 +242,8 @@ impl List {
     pub fn top(&self, height: usize) -> usize {
         let last_top = self.rows.len().saturating_sub(height);
         let lowest = (self.selected + 1).saturating_sub(height);
-        self.top.clamp(lowest, self.selected).min(last_top)
+        // Not `clamp`, which panics when there is no room for even one row.
+        self.top.max(lowest).min(self.selected).min(last_top)
     }
 
     /// Moves the selection. Going past either end comes back at the other one.
@@ -411,6 +412,12 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_list_copes_without_room_for_a_single_row() {
+        let rows = vec![ListRow::new("a".to_owned(), Command::KillServer)];
+        assert_eq!(List::new(rows, 0).top(0), 0);
+    }
     use crate::input::{Event, Parser};
 
     fn key(bytes: &[u8]) -> KeyEvent {

@@ -9,11 +9,14 @@ use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs::{self, File};
+use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::Server;
 use super::buffers::{Buffer, Buffers};
@@ -25,6 +28,9 @@ use crate::command::SplitKind;
 use crate::ghostty::{OuterColors, Rgb, Terminal};
 use crate::proto::{self, Malformed, Reader, ServerMessage};
 use crate::sys;
+
+/// How long a binary gets to say whether it can take over.
+const SUCCESSOR_TIME: Duration = Duration::from_secs(2);
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
@@ -38,12 +44,37 @@ pub struct Restored {
 }
 
 /// Whether this binary can read what this server is about to write.
+///
+/// This holds up the event loop, so it gets a little time and a little output.
+/// Whatever it is might never finish, or be an old kl that connects to this very
+/// server, which is not answering.
 fn check_successor(binary: &Path) -> Result<(), String> {
-    let output = Command::new(binary)
+    let failed = |error: io::Error| format!("{}: {error}", binary.display());
+    let mut child = Command::new(binary)
         .arg("--state-version")
-        .output()
-        .map_err(|error| format!("{}: {error}", binary.display()))?;
-    if String::from_utf8_lossy(&output.stdout).trim() == STATE_VERSION.to_string() {
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(failed)?;
+    let deadline = Instant::now() + SUCCESSOR_TIME;
+    let finished = loop {
+        if child.try_wait().map_err(failed)?.is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(2));
+    };
+    let mut version = String::new();
+    if finished && let Some(stdout) = child.stdout.take() {
+        drop(stdout.take(32).read_to_string(&mut version));
+    } else {
+        drop(child.kill());
+        drop(child.wait());
+    }
+    if version.trim() == STATE_VERSION.to_string() {
         Ok(())
     } else {
         Err(format!(
@@ -477,6 +508,19 @@ mod tests {
         assert_eq!(restored.palette, colors.palette);
         assert_eq!(restored.dark, colors.dark);
         assert_eq!(restored.cursor_style, colors.cursor_style);
+    }
+
+    #[test]
+    fn gives_up_on_a_binary_that_never_answers() {
+        let script = env::temp_dir().join(format!("kl-yes-{}", std::process::id()));
+        fs::write(&script, "#!/bin/sh\nexec yes\n").unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        fs::set_permissions(&script, mode).unwrap();
+        let started = Instant::now();
+        let result = check_successor(&script);
+        fs::remove_file(&script).unwrap();
+        assert!(result.is_err());
+        assert!(started.elapsed() < 2 * SUCCESSOR_TIME);
     }
 
     #[test]

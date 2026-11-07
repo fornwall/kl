@@ -660,6 +660,10 @@ fn parse_confirm_before(args: &[String]) -> Result<Command, String> {
     let flags = Flags::parse("confirm-before", args, "p:")?;
     let command = match flags.rest {
         [] => return Err("usage: confirm-before [-p prompt] command".to_owned()),
+        // Asking twice means nothing, and the server would recurse for each word.
+        [name, ..] if matches!(name.as_str(), "confirm-before" | "confirm") => {
+            return Err("confirm-before: cannot be nested".to_owned());
+        }
         [line] => parse_line(line)?,
         words => parse(words)?,
     };
@@ -1279,6 +1283,14 @@ mod tests {
                 )
             }
         }
+    }
+
+    #[test]
+    fn nesting_confirm_before_is_refused_before_it_can_run_out_of_stack() {
+        let mut command = vec!["confirm".to_owned(); 100_000];
+        command.push("kill-server".to_owned());
+        assert!(parse(&command).is_err());
+        assert!(parse(&words("confirm-before kill-server")).is_ok());
     }
 
     #[test]

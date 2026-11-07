@@ -11,6 +11,10 @@ use super::session::Session;
 use crate::base64;
 use crate::ghostty::{ImagePixels, ImagePlacement, ImageRect};
 
+/// How many images a client gets shown at once. A program can place any number,
+/// and comparing them on each frame takes time for the square of that.
+const MAX_PLACEMENTS: usize = 2000;
+
 /// Pixels per escape sequence, making the 4096 bytes of base64 the protocol
 /// allows.
 const CHUNK: usize = 3072;
@@ -142,6 +146,7 @@ impl Images {
         out: &mut Vec<u8>,
     ) {
         let mut wanted = wanted(session, view, cell_size);
+        wanted.truncate(MAX_PLACEMENTS);
         let Self {
             sent,
             transfers: queue,

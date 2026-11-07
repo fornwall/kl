@@ -736,7 +736,10 @@ impl Renderer {
 
 /// Text that came from a program, safe to put inside an OSC.
 pub fn osc_text(text: &str) -> impl Iterator<Item = u8> {
-    text.bytes().filter(|byte| !byte.is_ascii_control())
+    // By character, as a terminal that decodes UTF-8 first could take a C1
+    // control for the end of the sequence, and those are not ASCII.
+    let safe: String = text.chars().filter(|c| !c.is_control()).collect();
+    safe.into_bytes().into_iter()
 }
 
 /// Whether a cell of a border runs along this pane.
@@ -1062,6 +1065,12 @@ mod tests {
         let mut out = Vec::new();
         push_style(&mut out, style);
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn nothing_in_a_text_can_end_the_sequence_it_goes_in() {
+        let text: Vec<u8> = osc_text("a\x1b\x07\x7f\u{9c}\u{9d}b\u{e9}").collect();
+        assert_eq!(text, "ab\u{e9}".as_bytes());
     }
 
     #[test]

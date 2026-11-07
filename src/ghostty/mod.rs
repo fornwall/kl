@@ -37,6 +37,10 @@ const VERSION_REPLY: &str = concat!("kl ", env!("CARGO_PKG_VERSION"));
 
 const TEXT_PLAIN: &str = "text/plain";
 
+/// How much a single write can get in replies. A program can ask for one in a few
+/// bytes, or for all of a paste buffer, and it decides whether it reads them.
+const MAX_REPLIES: usize = 16 * 1024 * 1024;
+
 /// What programs in these terminals see as `TERM`.
 pub const TERM: &str = "xterm-ghostty";
 
@@ -599,7 +603,9 @@ unsafe extern "C" fn on_write_pty(
     let effects = unsafe { effects_of(userdata) };
     // SAFETY: libghostty-vt passes a buffer valid for the duration of the call.
     let data = unsafe { bytes_of(data, len) };
-    effects.replies.extend_from_slice(data);
+    if effects.replies.len() < MAX_REPLIES {
+        effects.replies.extend_from_slice(data);
+    }
 }
 
 /// What the Ghostty app says: a VT220 with color and clipboard access, the last
@@ -688,6 +694,7 @@ unsafe extern "C" fn on_clipboard_read(
     };
     let content = effects
         .readable_clipboard
+        .filter(|_| effects.replies.len() < MAX_REPLIES)
         .map(|data| ffi::ClipboardContent { mime, data });
     let reply = ffi::ClipboardReadReply {
         size: size_of::<ffi::ClipboardReadReply>(),
@@ -3035,6 +3042,15 @@ mod tests {
         // What was allowed for one write is gone by the next.
         terminal.write(query);
         assert_eq!(terminal.effects().replies, b"\x1b]52;c;\x1b\\");
+    }
+
+    #[test]
+    fn replies_stop_short_of_using_up_all_memory() {
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        let text = vec![b'a'; 10 * 1024 * 1024];
+        let queries = b"\x1b]52;c;?\x07".repeat(1000);
+        terminal.write_with_clipboard(&queries, Some(&text));
+        assert!(terminal.effects().replies.len() < 2 * MAX_REPLIES);
     }
 
     #[test]

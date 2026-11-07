@@ -47,7 +47,8 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets
-      - run: cargo test --locked
+      # All of them, as one failing binary would otherwise hide the next.
+      - run: cargo test --locked --no-fail-fast
 
       # A shared library would not even be found at runtime, and it is the
       # linker that picks, differently on each platform.

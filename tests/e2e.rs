@@ -3277,6 +3277,106 @@ fn a_failed_restart_leaves_the_server_running() {
     screen.wait_for_text("still-2");
 }
 
+/// A panic or an abort takes the server, and every pane with it.
+fn assert_server_is_alive(screen: &Screen) {
+    let output = screen.command(&["list-windows"]);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn a_list_survives_a_terminal_with_no_room_for_it() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("w");
+    screen.wait_for_text("0:");
+    for (cols, rows) in [(80, 1), (1, 1)] {
+        screen.resize(cols, rows);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_server_is_alive(&screen);
+    }
+    // A terminal that does not know its size. The stand-in cannot be one.
+    sys::set_winsize(screen.pty.as_fd(), WinSize::default()).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_server_is_alive(&screen);
+}
+
+#[test]
+#[expect(
+    clippy::literal_string_with_formatting_args,
+    reason = "these are formats, just not the ones of Rust"
+)]
+fn a_format_cannot_take_the_server_down() {
+    let screen = Screen::new(80, 24);
+    let rename = screen.command(&["rename-window", "#{E:window_name}"]);
+    assert!(rename.status.success());
+    screen.command(&["display-message", "-p", "#{E:window_name}"]);
+    screen.command(&["display-message", "-p", &"#{".repeat(10_000)]);
+    assert_server_is_alive(&screen);
+}
+
+#[test]
+fn nesting_commands_cannot_take_the_server_down() {
+    let screen = Screen::new(80, 24);
+    let mut args = vec!["confirm"; 20_000];
+    args.push("kill-server");
+    assert!(!screen.command(&args).status.success());
+    assert_server_is_alive(&screen);
+}
+
+#[test]
+fn asking_to_send_too_much_cannot_take_the_server_down() {
+    let screen = Screen::new(80, 24);
+    let keys = "x".repeat(64);
+    let output = screen.command(&["send-keys", "-N", "4294967295", &keys]);
+    assert!(!output.status.success());
+    assert_server_is_alive(&screen);
+}
+
+/// A few bytes can ask for all of a paste buffer. These ask for about 960 MB of
+/// replies from a program that reads none of them, which must not end the server.
+/// Queries take 9 bytes, and half of one would swallow what comes after it.
+#[test]
+#[expect(
+    clippy::literal_string_with_formatting_args,
+    reason = "these are formats, just not the ones of Rust"
+)]
+fn a_program_that_does_not_read_its_replies_stays_within_bounds() {
+    let mut screen = Screen::new(80, 24);
+    let buffer = "x".repeat(100_000);
+    assert!(screen.command(&["set-buffer", &buffer]).status.success());
+    screen.run(
+        r#"stty raw -echo; yes "$(printf '\033]52;c;?\007')" | tr -d '\n' | head -c 64998; printf 'fin''ished\r\n'; sleep 100"#,
+    );
+    screen.wait_for_text("finished");
+    let pid = screen.command(&["display-message", "-p", "#{pid}"]).stdout;
+    let pid = String::from_utf8_lossy(&pid).trim().to_owned();
+    let rss = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid])
+        .output()
+        .unwrap();
+    let rss: u64 = String::from_utf8_lossy(&rss.stdout).trim().parse().unwrap();
+    assert!(rss < 400_000, "the server uses {rss} kB");
+}
+
+#[test]
+fn panes_do_not_inherit_what_the_first_client_had_open() {
+    let dir = Rc::new(Scratch::new());
+    // Through a shell, so that no other test's child gets this descriptor.
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", r#"exec 9</dev/null; exec "$0""#, KL]);
+    let client = kl_command(&dir.0);
+    for (name, value) in client.get_envs() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let mut screen = Screen::attach_with(command, dir, 80, 24);
+    screen.run(r#"echo "[$(ls /dev/fd | tr '\n' ' ')]""#);
+    let lines = screen.wait_for_text("[0 1 2");
+    let listing = lines.iter().find(|line| line.contains("[0 1 2")).unwrap();
+    assert!(!listing.contains(" 9 "), "{listing}");
+}
+
 #[test]
 fn ends_when_the_last_shell_exits() {
     let mut screen = Screen::new(80, 24);
