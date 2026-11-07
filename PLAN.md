@@ -72,8 +72,6 @@ What is missing for daily use compared with tmux.
 
 ### 4. Copy mode
 
-- Search with `/`, `?`, `n` and `N`, which means adding libghostty-vt's `search`
-  feature to the build.
 - Scrolling while dragging a selection past the edge of a pane, which the
   library's selection gesture API already handles.
 - Jumping between shell prompts, with semantic prompts from OSC 133.

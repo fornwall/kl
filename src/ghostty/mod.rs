@@ -212,6 +212,23 @@ impl Line {
     }
 }
 
+/// A place a search found its text, as positions of the screen in reading order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Match {
+    /// Column and row of the first and last cell, with the row counted from
+    /// the top of the history.
+    pub start: (u16, u32),
+    pub end: (u16, u32),
+}
+
+impl Match {
+    /// Whether a position of the screen is in this match.
+    pub fn contains(&self, x: u16, y: u32) -> bool {
+        let after_start = (y, x) >= (self.start.1, self.start.0);
+        after_start && (y, x) <= (self.end.1, self.end.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     /// Position in the viewport, if the cursor is inside of it.
@@ -565,6 +582,8 @@ unsafe extern "C" fn on_render_hold(terminal: ffi::Handle, userdata: *mut c_void
 /// Owned handles for one libghostty-vt object each, freed on drop.
 struct Handles {
     terminal: ffi::Handle,
+    /// Made once something is searched for.
+    search: ffi::Handle,
     render_state: ffi::Handle,
     rows: ffi::Handle,
     cells: ffi::Handle,
@@ -578,6 +597,7 @@ impl Handles {
     const fn null() -> Self {
         Self {
             terminal: ptr::null_mut(),
+            search: ptr::null_mut(),
             render_state: ptr::null_mut(),
             rows: ptr::null_mut(),
             cells: ptr::null_mut(),
@@ -626,6 +646,8 @@ impl Drop for Handles {
         unsafe { ffi::ghostty_render_state_row_iterator_free(self.rows) };
         // SAFETY: As above.
         unsafe { ffi::ghostty_render_state_free(self.render_state) };
+        // SAFETY: As above. The search goes before the terminal it holds state in.
+        unsafe { ffi::ghostty_search_free(self.search) };
         // SAFETY: As above.
         unsafe { ffi::ghostty_terminal_free(self.terminal) };
     }
@@ -1365,6 +1387,113 @@ impl Terminal {
             ffi::ghostty_terminal_point_from_grid_ref(terminal, grid_ref, tag, &raw mut point)
         };
         (result == ffi::SUCCESS).then_some((point.x, point.y))
+    }
+
+    /// Finds some text in the whole screen, and goes on looking for it as the
+    /// terminal changes, until [`Terminal::end_search`]. Everything it found so
+    /// far comes back in reading order. Asking for the same text again only
+    /// looks at what changed.
+    pub fn search(&mut self, text: &str) -> Vec<Match> {
+        let needle = ffi::Bytes {
+            ptr: text.as_ptr(),
+            len: text.len(),
+        };
+        if self.ensure_search().is_err() {
+            return Vec::new();
+        }
+        let value = (&raw const needle).cast();
+        // SAFETY: The search is live, and the library copies the needle.
+        let result =
+            unsafe { ffi::ghostty_search_set(self.handles.search, ffi::SEARCH_OPT_NEEDLE, value) };
+        best_effort(check(result));
+        self.run_search();
+        self.matches(ffi::SEARCH_DATA_MATCHES)
+    }
+
+    /// The matches on and just around the viewport as of now, for drawing them.
+    /// Empty if nothing is being searched for.
+    pub fn visible_matches(&self) -> Vec<Match> {
+        if self.handles.search.is_null() {
+            return Vec::new();
+        }
+        self.run_search();
+        self.matches(ffi::SEARCH_DATA_VIEWPORT_MATCHES)
+    }
+
+    /// How many matches the search has, as of the last time it was brought up
+    /// to date.
+    pub fn match_count(&self) -> usize {
+        let mut count = 0_usize;
+        let out = (&raw mut count).cast();
+        let search = self.handles.search;
+        if !search.is_null() {
+            let data = ffi::SEARCH_DATA_TOTAL_MATCHES;
+            // SAFETY: The search is live, and `out` is valid for what this data
+            // documents.
+            best_effort(check(unsafe { ffi::ghostty_search_get(search, data, out) }));
+        }
+        count
+    }
+
+    /// Stops looking, which releases what the search holds in the terminal.
+    pub fn end_search(&mut self) {
+        let search = std::mem::replace(&mut self.handles.search, ptr::null_mut());
+        // SAFETY: Owned by this terminal and not used again. A null one is fine.
+        unsafe { ffi::ghostty_search_free(search) };
+    }
+
+    fn ensure_search(&mut self) -> Result<(), Error> {
+        if !self.handles.search.is_null() {
+            return Ok(());
+        }
+        let handles = &mut self.handles;
+        let none = ptr::null();
+        // SAFETY: A null allocator selects the default, the out pointer is
+        // valid, and the terminal is live.
+        check(unsafe { ffi::ghostty_search_new(none, &raw mut handles.search, handles.terminal) })
+    }
+
+    fn run_search(&self) {
+        // SAFETY: The search is live, and nothing else uses the terminal now.
+        best_effort(check(unsafe {
+            ffi::ghostty_search_run(self.handles.search)
+        }));
+    }
+
+    fn matches(&self, data: c_int) -> Vec<Match> {
+        let mut found = Vec::new();
+        let mut buffer = ffi::SelectionBuffer {
+            ptr: ptr::null_mut(),
+            cap: 0,
+            len: 0,
+        };
+        let search = self.handles.search;
+        // SAFETY: The search is live, and an empty buffer asks for the size.
+        let result = unsafe { ffi::ghostty_search_get(search, data, (&raw mut buffer).cast()) };
+        if result == ffi::OUT_OF_SPACE {
+            found.resize(buffer.len, selection_at(NO_REF));
+            buffer = ffi::SelectionBuffer {
+                ptr: found.as_mut_ptr(),
+                cap: found.len(),
+                len: 0,
+            };
+            // SAFETY: As above, with room for `cap` entries.
+            let result = unsafe { ffi::ghostty_search_get(search, data, (&raw mut buffer).cast()) };
+            if result != ffi::SUCCESS {
+                return Vec::new();
+            }
+            found.truncate(buffer.len);
+        }
+        let mut matches: Vec<Match> = found
+            .iter()
+            .filter_map(|selection| {
+                let start = self.screen_position(&selection.start)?;
+                let end = self.screen_position(&selection.end)?;
+                Some(Match { start, end })
+            })
+            .collect();
+        matches.sort_unstable_by_key(|found| (found.start.1, found.start.0));
+        matches
     }
 
     /// Selects what `find` comes up with for a viewport position.

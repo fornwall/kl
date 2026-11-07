@@ -5,8 +5,8 @@ use super::layout::{Divider, Rect};
 use super::session::{Session, Window};
 use super::ui::{List, Ui};
 use crate::ghostty::{
-    self, Cell, CursorShape, DEFAULT_POINTER_SHAPE, Progress, STYLE_BLINK, STYLE_BOLD, STYLE_FAINT,
-    STYLE_INVERSE, STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH,
+    self, Cell, CursorShape, DEFAULT_POINTER_SHAPE, Match, Progress, STYLE_BLINK, STYLE_BOLD,
+    STYLE_FAINT, STYLE_INVERSE, STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH,
     STYLE_UNDERLINE_MASK, STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text, Width,
 };
 use crate::sys;
@@ -16,6 +16,8 @@ const RED: u8 = 1;
 const GREEN: u8 = 2;
 const YELLOW: u8 = 3;
 const BLUE: u8 = 4;
+const MAGENTA: u8 = 5;
+const CYAN: u8 = 6;
 
 /// The digits of tmux's clock and `display-panes`, five bits for each row.
 const BIG_DIGITS: [[u8; 5]; 10] = [
@@ -54,6 +56,11 @@ fn alert_style() -> Style {
 
 fn mode_style() -> Style {
     colored(BLACK, YELLOW)
+}
+
+/// tmux's `copy-mode-match-style` and `copy-mode-current-match-style`.
+fn match_style(current: bool) -> Style {
+    colored(BLACK, if current { MAGENTA } else { CYAN })
 }
 
 fn border_style(active: bool) -> Style {
@@ -96,6 +103,15 @@ impl Grid {
 
     fn clear(&mut self) {
         self.cells.fill(Cell::default());
+    }
+
+    /// Gives a cell another style, unless it is selected, which goes first.
+    fn highlight(&mut self, x: u16, y: u16, style: Style) {
+        if let Some(cell) = self.index(x, y).and_then(|index| self.cells.get_mut(index))
+            && !cell.selected
+        {
+            cell.style = style;
+        }
     }
 
     /// Blanks the left half of a double width character whose right half is at
@@ -274,10 +290,14 @@ impl Renderer {
                 let next = &mut self.next;
                 pane.terminal
                     .draw_rows(all, |y, cells| draw_row(next, *rect, y, cells));
-                if pane.copy_mode.is_some() {
+                if let Some(mode) = pane.copy_mode {
                     pane.redraw = true;
                     let position = pane.terminal.scrollbar();
-                    draw_position(next, *rect, position);
+                    let matches = pane.terminal.visible_matches();
+                    let top = position.map_or(0, |bar| bar.offset);
+                    let top = u32::try_from(top).unwrap_or(u32::MAX);
+                    draw_matches(next, *rect, top, (mode.x, mode.y), &matches);
+                    draw_position(next, *rect, position, pane.terminal.match_count());
                 }
             }
         }
@@ -582,12 +602,52 @@ fn draw_pane_number(grid: &mut Grid, rect: Rect, number: usize, color: u8) {
     }
 }
 
-/// tmux's `[offset/history]` in the corner of a pane in copy mode.
-fn draw_position(grid: &mut Grid, rect: Rect, scrollbar: Option<ghostty::Scrollbar>) {
+/// Shows what a search found. `top` is the row of the screen at the top of the
+/// pane, and `cursor` is relative to the pane.
+fn draw_matches(grid: &mut Grid, rect: Rect, top: u32, cursor: (u16, u16), matches: &[Match]) {
+    let cursor_row = top.saturating_add(u32::from(cursor.1));
+    let last_column = rect.width.saturating_sub(1);
+    for found in matches {
+        let style = match_style(found.contains(cursor.0, cursor_row));
+        for row in found.start.1..=found.end.1 {
+            let y = row.checked_sub(top).and_then(|y| u16::try_from(y).ok());
+            let Some(y) = y.filter(|y| *y < rect.height) else {
+                continue;
+            };
+            let first = if row == found.start.1 {
+                found.start.0
+            } else {
+                0
+            };
+            let last = if row == found.end.1 {
+                found.end.0.min(last_column)
+            } else {
+                last_column
+            };
+            for x in first..=last {
+                grid.highlight(rect.x + x, rect.y + y, style);
+            }
+        }
+    }
+}
+
+/// tmux's `[offset/history]` in the corner of a pane in copy mode, with how much
+/// a search found.
+fn draw_position(
+    grid: &mut Grid,
+    rect: Rect,
+    scrollbar: Option<ghostty::Scrollbar>,
+    results: usize,
+) {
     let Some(scrollbar) = scrollbar else {
         return;
     };
-    let text = format!("[{}/{}]", scrollbar.lines_below(), scrollbar.history());
+    let results = match results {
+        0 => String::new(),
+        results => format!(" ({results} results)"),
+    };
+    let (below, history) = (scrollbar.lines_below(), scrollbar.history());
+    let text = format!("[{below}/{history}]{results}");
     let width = text_width(&text);
     let x = rect.x + rect.width.saturating_sub(width);
     grid.split_wide(x, rect.y);
@@ -924,7 +984,7 @@ mod tests {
             offset: 0,
             len: 1,
         };
-        draw_position(&mut grid, rect, Some(scrollbar));
+        draw_position(&mut grid, rect, Some(scrollbar), 0);
         assert_eq!(grid.cells[0], Cell::default());
         assert_eq!(grid.cells[1].text.as_str(), "[");
         assert_eq!(grid.cells[1].width, Width::Narrow);

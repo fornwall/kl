@@ -57,6 +57,16 @@ colors.
 Today: kl compares the colors of each frame with the last one, and draws every
 row if they differ. If the library sets the flag: that comparison can go.
 
+### Searching like tmux
+
+`GHOSTTY_SEARCH_OPT_NEEDLE` always ignores the case of ASCII letters, and takes
+the text literally. tmux only ignores case for text that is all lower case, and
+`/` in its copy mode takes a regular expression.
+
+Today: kl searches the way the library does. An option for case-sensitive
+matching would give it tmux's behavior for the case, and regular expressions
+would need a matcher in the library, since kl only sees the matches.
+
 ### Source tarballs for a commit
 
 `libghostty-vt-source.tar.gz` holds just what the library needs, but it is only

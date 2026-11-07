@@ -102,6 +102,11 @@ pub const STYLE_COLOR_RGB: u8 = 2;
 pub const MOUSE_OPT_SIZE: c_int = 3;
 pub const MOUSE_OPT_ANY_BUTTON_PRESSED: c_int = 4;
 
+pub const SEARCH_OPT_NEEDLE: c_int = 1;
+pub const SEARCH_DATA_TOTAL_MATCHES: c_int = 3;
+pub const SEARCH_DATA_MATCHES: c_int = 6;
+pub const SEARCH_DATA_VIEWPORT_MATCHES: c_int = 7;
+
 pub const FORMATTER_OPT_UNWRAP: c_int = 2;
 pub const FORMATTER_OPT_TRIM: c_int = 3;
 pub const FORMATTER_OPT_SELECTION: c_int = 4;
@@ -204,6 +209,13 @@ pub struct Selection {
     pub start: GridRef,
     pub end: GridRef,
     pub rectangle: bool,
+}
+
+#[repr(C)]
+pub struct SelectionBuffer {
+    pub ptr: *mut Selection,
+    pub cap: usize,
+    pub len: usize,
 }
 
 #[repr(C)]
@@ -379,6 +391,16 @@ unsafe extern "C" {
         options: *const SelectLineOptions,
         out: *mut Selection,
     ) -> c_int;
+
+    pub fn ghostty_search_new(
+        allocator: *const c_void,
+        search: *mut Handle,
+        terminal: Handle,
+    ) -> c_int;
+    pub fn ghostty_search_free(search: Handle);
+    pub fn ghostty_search_run(search: Handle) -> c_int;
+    pub fn ghostty_search_set(search: Handle, option: c_int, value: *const c_void) -> c_int;
+    pub fn ghostty_search_get(search: Handle, data: c_int, value: *mut c_void) -> c_int;
 
     pub fn ghostty_render_state_new(allocator: *const c_void, state: *mut Handle) -> c_int;
     pub fn ghostty_render_state_free(state: Handle);

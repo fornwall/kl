@@ -365,6 +365,13 @@ impl Server {
 
     fn copy_prompt_done(&mut self, prompt: CopyPrompt, text: &str) {
         match prompt {
+            CopyPrompt::Search(forward) => {
+                if let Some(pane) = self.session.active_pane_mut()
+                    && !text.is_empty()
+                {
+                    copy_mode::search(pane, text, forward);
+                }
+            }
             CopyPrompt::GotoLine => {
                 if let Ok(line) = text.trim().parse() {
                     self.copy_mode_action(Action::GotoLine(line));

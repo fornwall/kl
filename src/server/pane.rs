@@ -51,6 +51,8 @@ pub struct Pane {
     /// The area of the window this pane covers.
     pub rect: Rect,
     pub copy_mode: Option<CopyMode>,
+    /// What was last searched for, which copy mode goes on with later.
+    pub search: Option<String>,
     /// Set when every row must be drawn, not just the changed ones.
     pub redraw: bool,
     /// The program, which the server reaps along with any other child.
@@ -196,6 +198,7 @@ impl Pane {
             terminal,
             rect: Rect::default(),
             copy_mode: None,
+            search: None,
             redraw: true,
             pid,
             start_command,

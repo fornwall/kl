@@ -1958,6 +1958,160 @@ fn copy_mode_moves_within_the_view_and_by_paragraph() {
     assert!(copied[0].starts_with(b"\nthree\nfour"), "{copied:?}");
 }
 
+/// The background of the first cell of some text on the screen.
+fn background_of(screen: &mut Screen, text: &str) -> Option<u8> {
+    screen.pump();
+    screen.terminal.refresh();
+    let mut background = None;
+    screen.terminal.draw_rows(true, |_, cells| {
+        let line: String = cells.iter().map(|cell| cell.text.as_str()).collect();
+        if let Some(start) = line.find(text) {
+            background = background.or(cells[start].style.bg.as_palette());
+        }
+    });
+    background
+}
+
+#[test]
+fn searches_through_history_in_both_directions() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("seq 1 200 | sed 's/^/line /'");
+    screen.wait_for_line("line 200");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("?");
+    screen.wait_for_text("(search up)");
+    screen.run("line 7");
+    let lines = screen.wait_for("the search to go up", |lines| {
+        lines[0].contains("(11 results)") && lines.iter().any(|line| line.trim() == "line 79")
+    });
+    assert!(
+        lines.iter().any(|line| line.trim() == "line 70"),
+        "{lines:?}"
+    );
+
+    // The cursor is on what it found, for copying from there.
+    screen.type_text(" ");
+    screen.type_text("$");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"line 79".to_vec()]);
+
+    screen.prefix("[");
+    screen.wait_for_no_text("(11 results)");
+    screen.type_text("g/");
+    screen.wait_for_text("(search down)");
+    screen.run("line 7");
+    screen.wait_for_text("(11 results)");
+    screen.type_text("n ");
+    screen.type_text("$");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"line 70".to_vec()]);
+}
+
+#[test]
+fn searching_goes_around_the_ends_of_the_screen() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf 'one target\\ntwo target\\n'");
+    screen.wait_for_line("two target");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("/");
+    screen.run("target");
+    screen.wait_for_text("(2 results)");
+    // Down from the prompt there is nothing, so around to the first one. On to
+    // the second, down around to the first again, and up around to the second.
+    screen.type_text("nnN0 ");
+    screen.type_text("$");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"two target".to_vec()]);
+}
+
+#[test]
+fn search_highlights_matches_and_the_one_under_the_cursor() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo first-mark; echo second-mark");
+    screen.wait_for_line("second-mark");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("?");
+    screen.run("-mark");
+    screen.wait_for_text("(2 results)");
+    let cyan = 6;
+    let magenta = 5;
+    let start = std::time::Instant::now();
+    while background_of(&mut screen, "-mark") != Some(cyan)
+        && start.elapsed() < Duration::from_secs(5)
+    {
+        screen.pump();
+    }
+    assert_eq!(background_of(&mut screen, "-mark"), Some(cyan));
+    let lines = screen.lines();
+    let row = lines.iter().position(|line| line == "second-mark").unwrap();
+    let mut colors = Vec::new();
+    screen.terminal.draw_rows(true, |y, cells| {
+        if usize::from(y) == row {
+            colors = cells
+                .iter()
+                .map(|cell| cell.style.bg.as_palette())
+                .collect();
+        }
+    });
+    assert_eq!(colors[5], None, "the rest of the line stays as it is");
+    assert_eq!(colors[6], Some(magenta), "the cursor is on this match");
+
+    screen.type_text("q");
+    screen.wait_for_no_text("results)");
+    assert_eq!(background_of(&mut screen, "-mark"), None);
+}
+
+#[test]
+fn copying_without_a_selection_takes_the_match_under_the_cursor() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo some words here");
+    screen.wait_for_line("some words here");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("?");
+    screen.run("words");
+    screen.wait_for_text("(1 results)");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"words".to_vec()]);
+}
+
+#[test]
+fn star_searches_for_the_word_under_the_cursor() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf 'alpha beta\\ngamma alpha\\n'");
+    screen.wait_for_line("gamma alpha");
+    copy_last_output(&mut screen);
+    screen.type_text("w*");
+    screen.wait_for_text("(2 results)");
+    screen.type_text(" ");
+    screen.type_text("$");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"alpha beta".to_vec()]);
+}
+
+#[test]
+fn n_goes_on_with_the_last_search_in_a_later_copy_mode() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf 'mark one\\nmark two\\n'");
+    screen.wait_for_line("mark two");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("?");
+    screen.run("mark");
+    screen.wait_for_text("results)");
+    screen.type_text("q");
+    screen.wait_for_no_text("[0/");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("n");
+    screen.wait_for_text("results)");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"mark".to_vec()]);
+}
+
 #[test]
 fn pastes_from_the_outer_terminal_are_bracketed_for_those_who_ask() {
     let mut screen = Screen::new(80, 24);

@@ -5,7 +5,7 @@
 use super::motion::{self, Jump, Lines, Motion, NO_SEPARATORS, Position, SEPARATORS};
 use super::pane::Pane;
 use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
-use crate::ghostty::{Line, Scrollbar, Terminal};
+use crate::ghostty::{Line, Match, Scrollbar, Terminal};
 use crate::input::KeyEvent;
 
 impl Lines for Terminal {
@@ -62,6 +62,8 @@ pub struct CopyMode {
     last_jump: Option<(Jump, char)>,
     /// How many times to run the next command.
     repeat: u32,
+    /// The way `n` goes.
+    search_forward: bool,
 }
 
 /// What should happen after a command.
@@ -75,6 +77,17 @@ pub enum Outcome {
     Append,
 }
 
+/// Moving the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scroll {
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    HalfpageUp,
+    HalfpageDown,
+}
+
 /// The commands of copy mode, with the names of tmux's less their dashes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -84,13 +97,8 @@ pub enum Action {
     TopLine,
     MiddleLine,
     BottomLine,
-    ScrollUp,
-    ScrollDown,
+    Scroll(Scroll),
     ScrollMiddle,
-    PageUp,
-    PageDown,
-    HalfpageUp,
-    HalfpageDown,
     HistoryTop,
     HistoryBottom,
     PreviousParagraph,
@@ -99,6 +107,10 @@ pub enum Action {
     Jump(Jump, char),
     JumpAgain,
     JumpReverse,
+    SearchAgain,
+    SearchReverse,
+    /// Looks for the word under the cursor, forward if set.
+    SearchWord(bool),
     GotoLine(u32),
     BeginSelection,
     ClearSelection,
@@ -132,6 +144,8 @@ impl Action {
 /// What copy mode asks of the status line, as `command-prompt` does in tmux.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopyPrompt {
+    /// Takes the text to look for, downwards if set.
+    Search(bool),
     GotoLine,
     /// Takes one key, the character to jump to.
     Jump(Jump),
@@ -142,6 +156,8 @@ pub enum CopyPrompt {
 impl CopyPrompt {
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Search(true) => "(search down) ",
+            Self::Search(false) => "(search up) ",
             Self::GotoLine => "(goto line) ",
             Self::Jump(Jump::Forward) => "(jump forward) ",
             Self::Jump(Jump::Backward) => "(jump backward) ",
@@ -162,14 +178,14 @@ pub enum Binding {
 fn control_binding(event: &KeyEvent) -> Option<Action> {
     match event.char()? {
         'c' => Some(Action::Cancel),
-        'd' => Some(Action::HalfpageDown),
-        'e' => Some(Action::ScrollDown),
-        'f' => Some(Action::PageDown),
+        'd' => Some(Action::Scroll(Scroll::HalfpageDown)),
+        'e' => Some(Action::Scroll(Scroll::Down)),
+        'f' => Some(Action::Scroll(Scroll::PageDown)),
         'h' => Some(Action::Move(Motion::Left)),
         'j' => Some(Action::CopySelection),
-        'u' => Some(Action::HalfpageUp),
+        'u' => Some(Action::Scroll(Scroll::HalfpageUp)),
         'v' => Some(Action::RectangleToggle),
-        'y' => Some(Action::ScrollUp),
+        'y' => Some(Action::Scroll(Scroll::Up)),
         _ => None,
     }
 }
@@ -184,10 +200,10 @@ const fn named_binding(event: &KeyEvent) -> Option<Action> {
         (key::ARROW_RIGHT, 0) => Action::Move(Motion::Right { all: false }),
         (key::ARROW_UP, 0) => Action::CursorUp,
         (key::ARROW_DOWN, 0) => Action::CursorDown,
-        (key::ARROW_UP, MOD_CTRL) => Action::ScrollUp,
-        (key::ARROW_DOWN, MOD_CTRL) => Action::ScrollDown,
-        (key::PAGE_UP, 0) => Action::PageUp,
-        (key::PAGE_DOWN, 0) => Action::PageDown,
+        (key::ARROW_UP, MOD_CTRL) => Action::Scroll(Scroll::Up),
+        (key::ARROW_DOWN, MOD_CTRL) => Action::Scroll(Scroll::Down),
+        (key::PAGE_UP, 0) => Action::Scroll(Scroll::PageUp),
+        (key::PAGE_DOWN, 0) => Action::Scroll(Scroll::PageDown),
         (key::HOME, 0) => Action::Move(Motion::StartOfLine),
         (key::END, 0) => Action::Move(Motion::EndOfLine { all: false }),
         _ => return None,
@@ -199,14 +215,19 @@ fn char_binding(c: char) -> Option<Binding> {
     let run = |action| Some(Binding::Run(action));
     let go = |motion| Some(Binding::Run(Action::Move(motion)));
     let jump = |kind| Some(Binding::Prompt(CopyPrompt::Jump(kind), None));
+    let search = |down| Some(Binding::Prompt(CopyPrompt::Search(down), None));
     match c {
+        '#' => run(Action::SearchWord(false)),
         '$' => go(Motion::EndOfLine { all: false }),
         '%' => run(Action::NextMatchingBracket),
+        '*' => run(Action::SearchWord(true)),
         ',' => run(Action::JumpReverse),
+        '/' => search(true),
         '0' => go(Motion::StartOfLine),
         '1'..='9' => Some(Binding::Prompt(CopyPrompt::Repeat, Some(c))),
         ':' => Some(Binding::Prompt(CopyPrompt::GotoLine, None)),
         ';' => run(Action::JumpAgain),
+        '?' => search(false),
         'A' => run(Action::AppendSelection),
         'B' => go(Motion::PreviousWord(NO_SEPARATORS)),
         'D' => run(Action::CopyEndOfLine),
@@ -214,10 +235,11 @@ fn char_binding(c: char) -> Option<Binding> {
         'F' => jump(Jump::Backward),
         'G' => run(Action::HistoryBottom),
         'H' => run(Action::TopLine),
-        'J' => run(Action::ScrollDown),
-        'K' => run(Action::ScrollUp),
+        'J' => run(Action::Scroll(Scroll::Down)),
+        'K' => run(Action::Scroll(Scroll::Up)),
         'L' => run(Action::BottomLine),
         'M' => run(Action::MiddleLine),
+        'N' => run(Action::SearchReverse),
         'T' => jump(Jump::ToBackward),
         'V' => run(Action::SelectLine),
         'W' => go(Motion::NextWord(NO_SEPARATORS)),
@@ -230,6 +252,7 @@ fn char_binding(c: char) -> Option<Binding> {
         'j' => run(Action::CursorDown),
         'k' => run(Action::CursorUp),
         'l' => go(Motion::Right { all: false }),
+        'n' => run(Action::SearchAgain),
         'o' => run(Action::OtherEnd),
         'q' => run(Action::Cancel),
         't' => jump(Jump::ToForward),
@@ -275,12 +298,14 @@ impl CopyMode {
             rectangle: false,
             last_jump: None,
             repeat: 1,
+            search_forward: false,
         });
         pane.redraw = true;
     }
 
     pub fn exit(pane: &mut Pane) {
         pane.copy_mode = None;
+        pane.terminal.end_search();
         pane.terminal.clear_selection();
         pane.terminal.scroll_to_bottom();
         pane.redraw = true;
@@ -522,6 +547,55 @@ fn jump(pane: &mut Pane, mode: &mut CopyMode, kind: Jump, c: char) {
     }
 }
 
+/// Goes to the next match, in either direction, around the ends of the screen.
+fn find(pane: &mut Pane, mode: &mut CopyMode, forward: bool) {
+    let Some(text) = &pane.search else {
+        return;
+    };
+    let matches = pane.terminal.search(text);
+    let at = cursor(pane, mode);
+    let start = |found: &Match| Position::new(found.start.0, found.start.1);
+    let found = if forward {
+        let next = matches.iter().find(|found| start(found) > at);
+        next.or_else(|| matches.first())
+    } else {
+        let previous = matches.iter().rev().find(|found| start(found) < at);
+        previous.or_else(|| matches.last())
+    };
+    if let Some(found) = found {
+        go_far(pane, mode, start(found));
+    }
+}
+
+/// Looks for some text from the cursor on, for `n` and `N` to go on with.
+pub fn search(pane: &mut Pane, text: &str, forward: bool) {
+    let Some(mut mode) = pane.copy_mode.take() else {
+        return;
+    };
+    start_search(pane, &mut mode, text.to_owned(), forward);
+    update_selection(pane, &mode);
+    pane.copy_mode = Some(mode);
+    pane.redraw = true;
+}
+
+fn start_search(pane: &mut Pane, mode: &mut CopyMode, text: String, forward: bool) {
+    pane.search = Some(text);
+    mode.search_forward = forward;
+    find(pane, mode, forward);
+}
+
+/// Copying without a selection takes the match the cursor is on, if any.
+fn select_match(pane: &mut Pane, mode: &CopyMode) {
+    if mode.selecting == Selecting::No {
+        let at = cursor(pane, mode);
+        let matches = pane.terminal.visible_matches();
+        let found = matches.iter().find(|found| found.contains(at.x, at.y));
+        if let Some(found) = found {
+            pane.terminal.select_range(found.start, found.end);
+        }
+    }
+}
+
 fn select_line(pane: &mut Pane, mode: &mut CopyMode) {
     mode.rectangle = false;
     let at = cursor(pane, mode);
@@ -631,43 +705,69 @@ fn update_selection(pane: &mut Pane, mode: &CopyMode) {
     }
 }
 
+fn move_cursor(pane: &mut Pane, mode: &mut CopyMode, step: Motion) {
+    let step = match step {
+        Motion::Right { .. } => Motion::Right {
+            all: mode.rectangle_selection(),
+        },
+        Motion::EndOfLine { .. } => Motion::EndOfLine {
+            all: mode.rectangle_selection(),
+        },
+        step => step,
+    };
+    let at = motion::motion(&pane.terminal, cursor(pane, mode), step);
+    go_to(pane, mode, at);
+}
+
+fn scroll_action(pane: &mut Pane, mode: &mut CopyMode, scroll: Scroll) -> Outcome {
+    match scroll {
+        Scroll::Up => scroll_lines(pane, mode, -1),
+        Scroll::Down => scroll_lines(pane, mode, 1),
+        Scroll::PageUp => page(pane, mode, true, false),
+        Scroll::PageDown => page(pane, mode, false, false),
+        Scroll::HalfpageUp => page(pane, mode, true, true),
+        Scroll::HalfpageDown => page(pane, mode, false, true),
+    }
+    let down = matches!(
+        scroll,
+        Scroll::Down | Scroll::PageDown | Scroll::HalfpageDown
+    );
+    if down && mode.exit_at_bottom && lines_below(pane) == 0 && mode.selecting == Selecting::No {
+        Outcome::Cancel
+    } else {
+        Outcome::Stay
+    }
+}
+
+fn repeat_jump(pane: &mut Pane, mode: &mut CopyMode, reverse: bool) {
+    if let Some((kind, c)) = mode.last_jump {
+        let kind = if reverse { kind.reverse() } else { kind };
+        jump(pane, mode, kind, c);
+    }
+}
+
+fn toggle_rectangle(pane: &mut Pane, mode: &mut CopyMode) {
+    mode.rectangle = !mode.rectangle;
+    if matches!(mode.selecting, Selecting::Lines(_)) {
+        mode.selecting = Selecting::Cells;
+    }
+    if mode.selecting == Selecting::Cells {
+        pane.terminal.set_selection_rectangle(mode.rectangle);
+    }
+    let y = cursor(pane, mode).y;
+    mode.x = limit_column(pane, mode, mode.x, y);
+}
+
 fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) -> Outcome {
     match action {
-        Action::Move(step) => {
-            let at = cursor(pane, mode);
-            let step = match step {
-                Motion::Right { .. } => Motion::Right {
-                    all: mode.rectangle_selection(),
-                },
-                Motion::EndOfLine { .. } => Motion::EndOfLine {
-                    all: mode.rectangle_selection(),
-                },
-                step => step,
-            };
-            let at = motion::motion(&pane.terminal, at, step);
-            go_to(pane, mode, at);
-        }
+        Action::Move(step) => move_cursor(pane, mode, step),
         Action::CursorUp => move_row(pane, mode, true),
         Action::CursorDown => move_row(pane, mode, false),
         Action::TopLine => to_row_of_view(pane, mode, 0),
         Action::MiddleLine => to_row_of_view(pane, mode, (height(pane) - 1) / 2),
         Action::BottomLine => to_row_of_view(pane, mode, height(pane) - 1),
-        Action::ScrollUp => scroll_lines(pane, mode, -1),
-        Action::ScrollDown => {
-            scroll_lines(pane, mode, 1);
-            return leave_at_bottom(pane, mode);
-        }
+        Action::Scroll(scroll) => return scroll_action(pane, mode, scroll),
         Action::ScrollMiddle => scroll_cursor_to(pane, mode, (height(pane) - 1) / 2),
-        Action::PageUp => page(pane, mode, true, false),
-        Action::PageDown => {
-            page(pane, mode, false, false);
-            return leave_at_bottom(pane, mode);
-        }
-        Action::HalfpageUp => page(pane, mode, true, true),
-        Action::HalfpageDown => {
-            page(pane, mode, false, true);
-            return leave_at_bottom(pane, mode);
-        }
         Action::HistoryTop => {
             pane.terminal.scroll_to_top();
             to_row_of_view(pane, mode, 0);
@@ -690,14 +790,13 @@ fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) ->
             mode.last_jump = Some((kind, c));
             jump(pane, mode, kind, c);
         }
-        Action::JumpAgain => {
-            if let Some((kind, c)) = mode.last_jump {
-                jump(pane, mode, kind, c);
-            }
-        }
-        Action::JumpReverse => {
-            if let Some((kind, c)) = mode.last_jump {
-                jump(pane, mode, kind.reverse(), c);
+        Action::JumpAgain => repeat_jump(pane, mode, false),
+        Action::JumpReverse => repeat_jump(pane, mode, true),
+        Action::SearchAgain => find(pane, mode, mode.search_forward),
+        Action::SearchReverse => find(pane, mode, !mode.search_forward),
+        Action::SearchWord(forward) => {
+            if let Some(word) = motion::word_at(&pane.terminal, cursor(pane, mode)) {
+                start_search(pane, mode, word, forward);
             }
         }
         Action::GotoLine(line) => {
@@ -706,37 +805,24 @@ fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) ->
         }
         Action::BeginSelection => begin_selection(pane, mode),
         Action::ClearSelection => clear_selection(pane, mode),
-        Action::RectangleToggle => {
-            mode.rectangle = !mode.rectangle;
-            if matches!(mode.selecting, Selecting::Lines(_)) {
-                mode.selecting = Selecting::Cells;
-            }
-            if mode.selecting == Selecting::Cells {
-                pane.terminal.set_selection_rectangle(mode.rectangle);
-            }
-            let y = cursor(pane, mode).y;
-            mode.x = limit_column(pane, mode, mode.x, y);
-        }
+        Action::RectangleToggle => toggle_rectangle(pane, mode),
         Action::SelectLine => select_line(pane, mode),
         Action::OtherEnd => other_end(pane, mode),
         Action::Cancel => return Outcome::Cancel,
-        Action::CopySelection => return Outcome::Copy,
-        Action::AppendSelection => return Outcome::Append,
+        Action::CopySelection => {
+            select_match(pane, mode);
+            return Outcome::Copy;
+        }
+        Action::AppendSelection => {
+            select_match(pane, mode);
+            return Outcome::Append;
+        }
         Action::CopyEndOfLine => {
             select_to_end_of_line(pane, mode, lines);
             return Outcome::Copy;
         }
     }
     Outcome::Stay
-}
-
-/// Scrolling down to the end leaves copy mode that the wheel started.
-fn leave_at_bottom(pane: &Pane, mode: &CopyMode) -> Outcome {
-    if mode.exit_at_bottom && lines_below(pane) == 0 && mode.selecting == Selecting::No {
-        Outcome::Cancel
-    } else {
-        Outcome::Stay
-    }
 }
 
 /// The text to copy from the selection. As in tmux, a selection that goes past
