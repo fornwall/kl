@@ -69,7 +69,8 @@ const UPDATE_ENVIRONMENT: [&str; 8] = [
 /// Undoes what panes got the outer terminal to show. It goes out whenever a
 /// server is gone, which is when nobody remembers what is showing: the renderer
 /// counts on this, whether the next server is a restart or a later attach.
-const FORGET_FRAMES: &[u8] = b"\x1b]9;4;0\x1b\\\x1b]22;\x1b\\\x1b[?1016l\x1b[?1006h";
+const FORGET_FRAMES: &[u8] =
+    b"\x1b]9;4;0\x1b\\\x1b]22;\x1b\\\x1b[?1016l\x1b[?1006h\x1b_Ga=d,d=A,q=2\x1b\\";
 
 /// Where the server's socket lives, in a directory only this user can enter.
 pub fn socket_path() -> io::Result<PathBuf> {

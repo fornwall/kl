@@ -110,6 +110,24 @@ colors.
 Today: kl compares the colors of each frame with the last one, and draws every
 row if they differ. If the library sets the flag: that comparison can go.
 
+### A PNG decoder for the library
+
+Most programs send images as PNG, which the library rejects unless the embedder
+brings a decoder. It has one though: the Ghostty app gets `decodePngWuffs` in
+`sys.zig` as its default, wuffs is linked in along with the `kitty-graphics`
+feature, and its PNG module is compiled. Only `artifact == .lib` leaves it out.
+
+Today: kl applies a one line patch, `patches/ghostty-decode-png-in-library.patch`,
+rather than writing a decoder for untrusted input in the server, or adding a
+dependency. An option to turn on the built-in decoder would replace it. The
+feature and the decoder together cost 388,120 bytes on kl's stripped release
+binary on Linux x86-64, which was 2,341,896 bytes without them.
+
+### Images in snapshots
+
+Snapshots leave out images and their placements, as `snapshot/grid.zig` says.
+Today: `restart-server` loses them, until their program sends them again.
+
 ### Selection gestures from a pointer that only knows cells
 
 The selection gesture wants pixels. For a drag by cell it goes by how far into

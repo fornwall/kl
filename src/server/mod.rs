@@ -5,6 +5,7 @@ mod buffers;
 mod copy_mode;
 mod dispatch;
 mod format;
+mod images;
 mod keys;
 mod layout;
 mod motion;
@@ -43,6 +44,10 @@ const FRAME_TIME: Duration = Duration::from_millis(8);
 
 /// How long a lone escape byte may wait for the rest of a sequence.
 const ESCAPE_TIME: Duration = Duration::from_millis(25);
+
+/// The most output to put in one message. Pixels of a large image would otherwise
+/// add up to more than a message can hold.
+const OUTPUT_PIECE: usize = 1024 * 1024;
 
 /// How often to refresh window names and the clock.
 const TICK_TIME: Duration = Duration::from_secs(1);
@@ -643,8 +648,8 @@ impl Server {
         self.dirty = false;
         self.last_frame = Instant::now();
         let frame = self.renderer.frame(&mut self.session, &self.ui);
-        if !frame.is_empty() {
-            self.send_output(&frame);
+        for part in frame.chunks(OUTPUT_PIECE) {
+            self.send_output(part);
         }
     }
 

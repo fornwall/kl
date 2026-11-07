@@ -27,6 +27,7 @@ pub const OPT_DEVICE_ATTRIBUTES: c_int = 9;
 pub const OPT_COLOR_FOREGROUND: c_int = 12;
 pub const OPT_COLOR_BACKGROUND: c_int = 13;
 pub const OPT_COLOR_PALETTE: c_int = 15;
+pub const OPT_KITTY_IMAGE_STORAGE_LIMIT: c_int = 16;
 pub const OPT_SELECTION: c_int = 22;
 pub const OPT_DEFAULT_CURSOR_STYLE: c_int = 23;
 pub const OPT_DEFAULT_CURSOR_BLINK: c_int = 24;
@@ -50,6 +51,7 @@ pub const DATA_COLOR_FOREGROUND_DEFAULT: c_int = 22;
 pub const DATA_COLOR_BACKGROUND_DEFAULT: c_int = 23;
 pub const DATA_COLOR_PALETTE_DEFAULT: c_int = 25;
 pub const DATA_SELECTION: c_int = 31;
+pub const DATA_KITTY_GRAPHICS: c_int = 30;
 pub const DATA_MODE: c_int = 37;
 pub const DATA_MOUSE_SHAPE: c_int = 41;
 #[cfg(test)]
@@ -74,6 +76,32 @@ pub const RENDER_DATA_DIRTY: c_int = 3;
 pub const RENDER_DATA_ROW_ITERATOR: c_int = 4;
 pub const RENDER_DATA_CURSOR: c_int = 18;
 pub const RENDER_DATA_COLORS: c_int = 19;
+pub const RENDER_DATA_IMAGE_ITERATOR: c_int = 22;
+
+pub const IMAGE_PROTOCOL_KITTY: c_int = 0;
+
+pub const IMAGE_DATA_PROTOCOL: c_int = 1;
+pub const IMAGE_DATA_IMAGE_ID: c_int = 2;
+pub const IMAGE_DATA_IMAGE_GENERATION: c_int = 3;
+pub const IMAGE_DATA_Z: c_int = 5;
+pub const IMAGE_DATA_VIEWPORT_COL: c_int = 6;
+pub const IMAGE_DATA_VIEWPORT_ROW: c_int = 7;
+pub const IMAGE_DATA_CELL_OFFSET_X: c_int = 10;
+pub const IMAGE_DATA_CELL_OFFSET_Y: c_int = 11;
+pub const IMAGE_DATA_PIXEL_WIDTH: c_int = 12;
+pub const IMAGE_DATA_PIXEL_HEIGHT: c_int = 13;
+pub const IMAGE_DATA_SOURCE_X: c_int = 14;
+pub const IMAGE_DATA_SOURCE_Y: c_int = 15;
+pub const IMAGE_DATA_SOURCE_WIDTH: c_int = 16;
+pub const IMAGE_DATA_SOURCE_HEIGHT: c_int = 17;
+
+pub const KITTY_IMAGE_DATA_WIDTH: c_int = 3;
+pub const KITTY_IMAGE_DATA_HEIGHT: c_int = 4;
+pub const KITTY_IMAGE_DATA_FORMAT: c_int = 5;
+pub const KITTY_IMAGE_DATA_PIXELS: c_int = 7;
+
+pub const KITTY_IMAGE_FORMAT_RGB: c_int = 0;
+pub const KITTY_IMAGE_FORMAT_RGBA: c_int = 1;
 
 pub const RENDER_DIRTY_FULL: c_int = 2;
 
@@ -98,6 +126,7 @@ pub const CELL_DATA_COLOR_RGB: c_int = 11;
 pub const SCREEN_ROW_DATA_WRAP: c_int = 1;
 pub const SCREEN_ROW_DATA_HYPERLINK: c_int = 5;
 pub const SCREEN_ROW_DATA_SEMANTIC_PROMPT: c_int = 6;
+pub const SCREEN_ROW_DATA_KITTY_VIRTUAL_PLACEHOLDER: c_int = 7;
 
 pub const ROW_SEMANTIC_PROMPT: c_int = 1;
 
@@ -491,6 +520,16 @@ unsafe extern "C" {
     pub fn ghostty_render_state_update(state: Handle, terminal: Handle) -> c_int;
     pub fn ghostty_render_state_clean(state: Handle) -> c_int;
     pub fn ghostty_render_state_get(state: Handle, data: c_int, out: *mut c_void) -> c_int;
+    pub fn ghostty_render_state_image_iterator_new(
+        allocator: *const c_void,
+        iterator: *mut Handle,
+    ) -> c_int;
+    pub fn ghostty_render_state_image_iterator_free(iterator: Handle);
+    pub fn ghostty_render_state_image_iterator_next(iterator: Handle) -> bool;
+    pub fn ghostty_render_state_image_get(iterator: Handle, data: c_int, out: *mut c_void)
+    -> c_int;
+    pub fn ghostty_kitty_graphics_image(graphics: Handle, image_id: u32) -> Handle;
+    pub fn ghostty_kitty_graphics_image_get(image: Handle, data: c_int, out: *mut c_void) -> c_int;
     pub fn ghostty_render_state_row_iterator_new(
         allocator: *const c_void,
         iterator: *mut Handle,

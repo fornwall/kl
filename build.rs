@@ -4,7 +4,7 @@
 //! Everything lands in `<target>/ghostty/<commit>/`, shared between profiles,
 //! so the slow part only runs once per pin. Moving the pin means updating
 //! [`GHOSTTY_COMMIT`] to a newer commit on `main`, and checking that
-//! [`GHOSTTY_PATCH`] still applies.
+//! [`GHOSTTY_PATCHES`] still apply.
 
 use std::env;
 use std::fmt::Display;
@@ -17,23 +17,32 @@ const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
 /// A commit on ghostty's `main` branch. Never another branch, fork or tag.
 const GHOSTTY_COMMIT: &str = "5813c9461d5af78b6307a1254d00b1bc190eaccd";
 
-/// Applied on top of the pinned commit, which stays a plain commit on `main`.
+/// Applied in order on top of the pinned commit, which stays a plain commit on
+/// `main`.
 ///
-/// Puts each function and data item of the static library in its own section,
-/// so that the linker's `--gc-sections` drops the parts of the C API kl does not
-/// call. Vendored as the net diff of
+/// The first puts each function and data item of the static library in its own
+/// section, so that the linker's `--gc-sections` drops the parts of the C API kl
+/// does not call. Vendored as the net diff of
 /// <https://github.com/ghostty-org/ghostty/pull/13708>, which was closed
 /// unmerged, so that the build depends on nothing but the pin.
-const GHOSTTY_PATCH: &str = "patches/ghostty-split-static-sections.patch";
+///
+/// The second keeps the PNG decoder of the Ghostty app in the library, since most
+/// programs send their images as PNG. See UPSTREAM.md.
+const GHOSTTY_PATCHES: [&str; 2] = [
+    "patches/ghostty-split-static-sections.patch",
+    "patches/ghostty-decode-png-in-library.patch",
+];
 
 /// Only the parts of libghostty-vt that kl calls. Functions of a left-out
 /// feature stay exported but return `GHOSTTY_UNSUPPORTED`.
-const VT_FEATURES: &str =
-    "-all,+render-state,+input-encode,+selection,+formatter,+grid-introspection,+snapshot,+search";
+const VT_FEATURES: &str = "-all,+render-state,+input-encode,+selection,+formatter,+grid-introspection,+snapshot,+search,\
+     +kitty-graphics";
 
 fn main() -> Result<(), String> {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={GHOSTTY_PATCH}");
+    for patch in GHOSTTY_PATCHES {
+        println!("cargo:rerun-if-changed={patch}");
+    }
 
     let target = context(env::var("TARGET"), "reading TARGET")?;
     let zig_target = zig_target(&target)?;
@@ -49,15 +58,21 @@ fn main() -> Result<(), String> {
     context(lock.lock(), "locking the ghostty directory")?;
 
     let manifest_dir = context(env::var("CARGO_MANIFEST_DIR"), "reading CARGO_MANIFEST_DIR")?;
-    let patch_path = Path::new(&manifest_dir).join(GHOSTTY_PATCH);
-    let patch = context(fs::read_to_string(&patch_path), "reading the ghostty patch")?;
+    let patch_paths = GHOSTTY_PATCHES.map(|patch| Path::new(&manifest_dir).join(patch));
+    let mut patches = String::new();
+    for path in &patch_paths {
+        patches.push_str(&context(
+            fs::read_to_string(path),
+            "reading a ghostty patch",
+        )?);
+    }
 
     let src = root.join("src");
     fetch_source(&src)?;
-    apply_patch(&src, &patch_path, &patch)?;
+    apply_patches(&src, &patch_paths, &patches)?;
     check_zig_version(&src)?;
     let packages = fetch_packages(&root, &src)?;
-    let inputs = format!("{VT_FEATURES}\n{patch}");
+    let inputs = format!("{VT_FEATURES}\n{patches}");
     let prefix = build_library(&root, &src, &packages, zig_target, &inputs)?;
 
     println!(
@@ -158,9 +173,9 @@ fn fetch_source(src: &Path) -> Result<(), String> {
 
 /// Starts from a pristine checkout, so that a changed patch is not applied on
 /// top of its previous version.
-fn apply_patch(src: &Path, patch_path: &Path, patch: &str) -> Result<(), String> {
+fn apply_patches(src: &Path, paths: &[PathBuf], patches: &str) -> Result<(), String> {
     let stamp = src.join(".kl-patched");
-    if fs::read_to_string(&stamp).is_ok_and(|applied| applied == patch) {
+    if fs::read_to_string(&stamp).is_ok_and(|applied| applied == patches) {
         return Ok(());
     }
     git(
@@ -168,11 +183,11 @@ fn apply_patch(src: &Path, patch_path: &Path, patch: &str) -> Result<(), String>
         &["checkout", "-q", "--force", "--detach", GHOSTTY_COMMIT],
         "resetting ghostty to the pin",
     )?;
-    let patch_path = patch_path
-        .to_str()
-        .ok_or("the ghostty patch path is not UTF-8")?;
-    git(src, &["apply", patch_path], "applying the ghostty patch")?;
-    context(fs::write(stamp, patch), "recording the ghostty patch")
+    for path in paths {
+        let path = path.to_str().ok_or("a ghostty patch path is not UTF-8")?;
+        git(src, &["apply", path], "applying a ghostty patch")?;
+    }
+    context(fs::write(stamp, patches), "recording the ghostty patches")
 }
 
 fn major_minor(version: &str) -> Option<(&str, &str)> {

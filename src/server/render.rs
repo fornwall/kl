@@ -1,6 +1,7 @@
 //! Composes the panes, borders and status line into one grid, then sends the
 //! outer terminal only what changed since the last frame.
 
+use super::images::Images;
 use super::layout::{Divider, Rect};
 use super::session::{Session, Window};
 use super::ui::{List, Ui};
@@ -220,6 +221,7 @@ pub struct Renderer {
     pointer_shape: Option<&'static str>,
     /// Mouse reports were asked to come in pixels.
     pixel_mouse: bool,
+    images: Images,
     pub status_entries: Vec<StatusEntry>,
 }
 
@@ -233,6 +235,7 @@ impl Renderer {
         self.progress = None;
         self.pointer_shape = None;
         self.pixel_mouse = false;
+        self.images = Images::default();
     }
 
     fn resize(&mut self, cols: u16, rows: u16) -> bool {
@@ -263,22 +266,28 @@ impl Renderer {
         let mut out = Vec::new();
         if self.reset {
             push_link(&mut out, None);
-            out.extend_from_slice(b"\x1b[0m\x1b[H\x1b[2J");
+            // Not `2J`, which would take all images along with it.
+            out.extend_from_slice(b"\x1b[0m\x1b[H\x1b[J");
             self.shown = Grid::new(cols, rows);
             self.reset = false;
+            self.images.forget_placements(&mut out);
         }
         self.emit_changes(|link| session.link_uri(link), &mut out);
+        let mut transfers = Vec::new();
+        let covered = ui.list.is_some() || ui.pane_numbers.is_some();
+        self.images
+            .update(session, covered, &mut transfers, &mut out);
         self.emit_cursor(session, ui, &mut out);
         self.emit_title(session, &mut out);
         self.emit_progress(session, &mut out);
         self.emit_pointer_shape(session, &mut out);
         self.emit_mouse_format(session, &mut out);
-        if out.is_empty() {
-            return out;
+        let mut frame = transfers;
+        if !out.is_empty() {
+            frame.extend_from_slice(b"\x1b[?2026h");
+            frame.append(&mut out);
+            frame.extend_from_slice(b"\x1b[?2026l");
         }
-        let mut frame = b"\x1b[?2026h".to_vec();
-        frame.append(&mut out);
-        frame.extend_from_slice(b"\x1b[?2026l");
         frame
     }
 
@@ -727,7 +736,7 @@ fn cursor_target(session: &Session, ui: &Ui) -> CursorTarget {
     Some((rect.x + x, rect.y + y, shape + steady))
 }
 
-fn push_move(out: &mut Vec<u8>, x: u16, y: u16) {
+pub fn push_move(out: &mut Vec<u8>, x: u16, y: u16) {
     out.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
 }
 

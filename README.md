@@ -53,7 +53,10 @@ What does not work today. [PLAN.md](PLAN.md) has what is planned, and how far
 each target has been verified.
 
 - **One client at a time.** A new client takes over from the one attached.
-- **Not everything programs ask for gets through.** Kitty graphics stop at kl.
+- **Images have some limits.** Animations stay on their current frame, images
+  have to be sent inline rather than from a file, and pixels go out uncompressed,
+  so they are slow over a slow link. An image scaled to a size that is not a whole
+  number of cells can come out up to half a cell off.
 - **Hyperlinks only go by their URI.** libghostty-vt does not give out their
   `id`, so links in a pane with the same URI highlight together, even if the
   program kept them apart. A URI with anything but printable ASCII in it arrives
@@ -79,6 +82,7 @@ each target has been verified.
   - A key typed at the moment of the restart can be lost, along with input a
     program had not read yet.
   - Copy mode ends, and so do open prompts.
+  - Images are gone until their program sends them again.
   - A pane in the middle of an escape sequence longer than 64 KiB comes back
     blank. Its program keeps running.
   - The binary has to be able to read the running server's state, and is refused

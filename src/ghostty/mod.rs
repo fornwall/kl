@@ -99,6 +99,14 @@ const POINTER_SHAPES: [&str; 34] = [
 /// The pointer shape of a terminal nobody asked anything of.
 pub const DEFAULT_POINTER_SHAPE: &str = "text";
 
+/// The character that shows a piece of an image in a cell.
+const IMAGE_PLACEHOLDER: char = '\u{10EEEE}';
+
+/// How much image data a program can keep in the terminal, which matches the
+/// default of the Ghostty app. The library's default of 10 MB would not hold one
+/// screenful of pixels.
+const IMAGE_STORAGE_BYTES: u64 = 320_000_000;
+
 /// A `GhosttyResult` other than success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error(c_int);
@@ -339,6 +347,45 @@ pub struct MouseInput {
     /// The size of a cell in pixels.
     pub cell_size: (u16, u16),
     pub any_pressed: bool,
+}
+
+/// A rectangle of pixels in an image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImageRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One rectangle of one image a program wants to see.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImagePlacement {
+    pub image: u32,
+    /// Changes along with the pixels of the image.
+    pub generation: u64,
+    /// Which side of the text it is on, and of other images.
+    pub z: i32,
+    /// Its top-left cell in the viewport, which is negative for the part of an
+    /// image that scrolled off. It is reported at full size either way.
+    pub col: i32,
+    pub row: i32,
+    /// Where it starts within that cell, in pixels.
+    pub cell_offset: (u32, u32),
+    /// Its size on the screen, in pixels.
+    pub size: (u32, u32),
+    /// The part of the image to show, scaled to `size`.
+    pub source: ImageRect,
+}
+
+/// The pixels of an image, as the kitty graphics protocol takes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImagePixels<'a> {
+    pub width: u32,
+    pub height: u32,
+    /// The `f` key: 24 for RGB and 32 for RGBA.
+    pub format: u8,
+    pub data: &'a [u8],
 }
 
 /// What the outer terminal said about its colors.
@@ -688,6 +735,7 @@ unsafe extern "C" fn on_render_hold(terminal: ffi::Handle, userdata: *mut c_void
 /// Owned handles for one libghostty-vt object each, freed on drop.
 struct Handles {
     terminal: ffi::Handle,
+    images: ffi::Handle,
     /// Made once something is searched for.
     search: ffi::Handle,
     /// What the pointer is up to in selecting text.
@@ -705,6 +753,7 @@ impl Handles {
     const fn null() -> Self {
         Self {
             terminal: ptr::null_mut(),
+            images: ptr::null_mut(),
             search: ptr::null_mut(),
             gesture: ptr::null_mut(),
             render_state: ptr::null_mut(),
@@ -727,6 +776,8 @@ impl Handles {
         check(unsafe { ffi::ghostty_render_state_new(none, &raw mut self.render_state) })?;
         // SAFETY: As above.
         check(unsafe { ffi::ghostty_render_state_row_iterator_new(none, &raw mut self.rows) })?;
+        // SAFETY: As above.
+        check(unsafe { ffi::ghostty_render_state_image_iterator_new(none, &raw mut self.images) })?;
         // SAFETY: As above.
         check(unsafe { ffi::ghostty_render_state_row_cells_new(none, &raw mut self.cells) })?;
         // SAFETY: As above.
@@ -755,6 +806,8 @@ impl Drop for Handles {
         unsafe { ffi::ghostty_render_state_row_cells_free(self.cells) };
         // SAFETY: As above.
         unsafe { ffi::ghostty_render_state_row_iterator_free(self.rows) };
+        // SAFETY: As above.
+        unsafe { ffi::ghostty_render_state_image_iterator_free(self.images) };
         // SAFETY: As above.
         unsafe { ffi::ghostty_render_state_free(self.render_state) };
         // SAFETY: As above. The search goes before the terminal it holds state in.
@@ -864,6 +917,11 @@ impl Terminal {
             compression: Compression::default(),
         };
         terminal.register_effects()?;
+        let images = IMAGE_STORAGE_BYTES;
+        terminal.set(
+            ffi::OPT_KITTY_IMAGE_STORAGE_LIMIT,
+            (&raw const images).cast(),
+        )?;
         let scrollback = SCROLLBACK_BYTES;
         terminal.set(
             ffi::OPT_SCROLLBACK_MAX_BYTES,
@@ -1211,6 +1269,64 @@ impl Terminal {
         }
     }
 
+    /// The images to show as of the last [`Terminal::refresh`].
+    pub fn image_placements(&self) -> Vec<ImagePlacement> {
+        let mut images = self.handles.images;
+        let out = (&raw mut images).cast();
+        let state = self.handles.render_state;
+        // SAFETY: The render state and iterator are live. The call points the
+        // iterator at this state's images, and `out` is valid for a handle.
+        let result =
+            unsafe { ffi::ghostty_render_state_get(state, ffi::RENDER_DATA_IMAGE_ITERATOR, out) };
+        let mut placements = Vec::new();
+        if result != ffi::SUCCESS {
+            return placements;
+        }
+        // SAFETY: The iterator was populated above and the state is unchanged.
+        while unsafe { ffi::ghostty_render_state_image_iterator_next(images) } {
+            // New protocols may come along, whose pixels kl would not find.
+            if image_value::<c_int>(images, ffi::IMAGE_DATA_PROTOCOL) == ffi::IMAGE_PROTOCOL_KITTY {
+                placements.push(read_placement(images));
+            }
+        }
+        placements
+    }
+
+    /// The pixels of an image, unless they are gone by now or still on the way.
+    pub fn image_pixels(&self, id: u32) -> Option<ImagePixels<'_>> {
+        let mut graphics: ffi::Handle = ptr::null_mut();
+        if !self.read(ffi::DATA_KITTY_GRAPHICS, &mut graphics) {
+            return None;
+        }
+        // SAFETY: The storage was read above, and the terminal is unchanged.
+        let image = unsafe { ffi::ghostty_kitty_graphics_image(graphics, id) };
+        let format = match kitty_image_value::<c_int>(image, ffi::KITTY_IMAGE_DATA_FORMAT)? {
+            ffi::KITTY_IMAGE_FORMAT_RGB => 24,
+            ffi::KITTY_IMAGE_FORMAT_RGBA => 32,
+            // The protocol has no gray to send. Only the library's own
+            // conversions make these, and it has none it keeps for kl.
+            _ => return None,
+        };
+        let mut pixels = ffi::Bytes {
+            ptr: ptr::null(),
+            len: 0,
+        };
+        let out = (&raw mut pixels).cast();
+        let data = ffi::KITTY_IMAGE_DATA_PIXELS;
+        // SAFETY: `image` is live as the terminal is unchanged, and `out` is
+        // valid for a string.
+        let result = unsafe { ffi::ghostty_kitty_graphics_image_get(image, data, out) };
+        check(result).ok()?;
+        Some(ImagePixels {
+            width: kitty_image_value(image, ffi::KITTY_IMAGE_DATA_WIDTH)?,
+            height: kitty_image_value(image, ffi::KITTY_IMAGE_DATA_HEIGHT)?,
+            format,
+            // SAFETY: The string stays valid until the terminal changes, which
+            // takes `&mut self`, so not for as long as this borrow lasts.
+            data: unsafe { bytes_of(pixels.ptr, pixels.len) },
+        })
+    }
+
     /// The cursor as of the last [`Terminal::refresh`].
     pub fn cursor(&self) -> Option<Cursor> {
         let mut cursor = ffi::RenderCursor {
@@ -1299,16 +1415,38 @@ impl Terminal {
             return;
         }
         let selection = self.row_selection();
+        let placeholders = self.row_has_image_placeholders();
         let mut x: u16 = 0;
         // SAFETY: The cells were populated above and the state is unchanged.
         while unsafe { ffi::ghostty_render_state_row_cells_next(cells) } {
             let mut cell = read_cell(cells);
             self.own_colors.apply(&mut cell.style);
+            if placeholders && cell.text.as_str().starts_with(IMAGE_PLACEHOLDER) {
+                cell.text = Text::Blank;
+            }
             cell.selected = selection.is_some_and(|(start, end)| (start..=end).contains(&x));
             row.push(cell);
             x = x.saturating_add(1);
         }
         self.links().apply(usize::from(y), row);
+    }
+
+    /// Whether the current row may show an image with placeholder characters.
+    /// The image is placed by itself, and the characters would mean nothing to
+    /// the outer terminal, which knows it by another id.
+    fn row_has_image_placeholders(&self) -> bool {
+        let mut row = 0_u64;
+        let out = (&raw mut row).cast();
+        let rows = self.handles.rows;
+        // SAFETY: The iterator points at a row, and `out` is valid for its value.
+        let result = unsafe { ffi::ghostty_render_state_row_get(rows, ffi::ROW_DATA_RAW, out) };
+        let mut flagged = false;
+        let out = (&raw mut flagged).cast();
+        let data = ffi::SCREEN_ROW_DATA_KITTY_VIRTUAL_PLACEHOLDER;
+        // SAFETY: `row` holds a row value, and `out` is valid for a bool.
+        result == ffi::SUCCESS
+            && unsafe { ffi::ghostty_row_get(row, data, out) } == ffi::SUCCESS
+            && flagged
     }
 
     const fn links(&self) -> &Links {
@@ -2038,6 +2176,52 @@ fn raw_cells<'a>(rows: ffi::Handle) -> &'a [u64] {
     }
     // SAFETY: The library guarantees `len` values at `ptr`.
     unsafe { slice::from_raw_parts(view.ptr, view.len) }
+}
+
+/// Reads a value of the type `data` documents, as callers pick `T` to match.
+fn image_value<T: Default>(images: ffi::Handle, data: c_int) -> T {
+    let mut value = T::default();
+    let out = (&raw mut value).cast();
+    // SAFETY: The iterator points at a placement, and `out` is valid for `T`.
+    best_effort(check(unsafe {
+        ffi::ghostty_render_state_image_get(images, data, out)
+    }));
+    value
+}
+
+fn read_placement(images: ffi::Handle) -> ImagePlacement {
+    ImagePlacement {
+        image: image_value(images, ffi::IMAGE_DATA_IMAGE_ID),
+        generation: image_value(images, ffi::IMAGE_DATA_IMAGE_GENERATION),
+        z: image_value(images, ffi::IMAGE_DATA_Z),
+        col: image_value(images, ffi::IMAGE_DATA_VIEWPORT_COL),
+        row: image_value(images, ffi::IMAGE_DATA_VIEWPORT_ROW),
+        cell_offset: (
+            image_value(images, ffi::IMAGE_DATA_CELL_OFFSET_X),
+            image_value(images, ffi::IMAGE_DATA_CELL_OFFSET_Y),
+        ),
+        size: (
+            image_value(images, ffi::IMAGE_DATA_PIXEL_WIDTH),
+            image_value(images, ffi::IMAGE_DATA_PIXEL_HEIGHT),
+        ),
+        source: ImageRect {
+            x: image_value(images, ffi::IMAGE_DATA_SOURCE_X),
+            y: image_value(images, ffi::IMAGE_DATA_SOURCE_Y),
+            width: image_value(images, ffi::IMAGE_DATA_SOURCE_WIDTH),
+            height: image_value(images, ffi::IMAGE_DATA_SOURCE_HEIGHT),
+        },
+    }
+}
+
+/// Reads a value of the type `data` documents, as callers pick `T` to match. A
+/// null `image` is what looking up a missing one gives, and comes back as `None`.
+fn kitty_image_value<T: Default>(image: ffi::Handle, data: c_int) -> Option<T> {
+    let mut value = T::default();
+    let out = (&raw mut value).cast();
+    // SAFETY: The caller got `image` from a terminal it has not changed since,
+    // and `out` is valid for `T`.
+    check(unsafe { ffi::ghostty_kitty_graphics_image_get(image, data, out) }).ok()?;
+    Some(value)
 }
 
 fn read_cell(cells: ffi::Handle) -> Cell {
@@ -2892,6 +3076,69 @@ mod tests {
         }
         terminal.write(b"\x1b]22;\x1b\\");
         assert_eq!(terminal.pointer_shape(), DEFAULT_POINTER_SHAPE);
+    }
+
+    /// Two by one pixels of RGB, as base64.
+    const TWO_PIXELS: &str = "AQIDBAUG";
+
+    /// A terminal with real cells, without which there is nothing to draw.
+    fn image_terminal() -> Terminal {
+        let mut terminal = Terminal::new(20, 5).unwrap();
+        terminal.resize(20, 5, 10, 20).unwrap();
+        terminal
+    }
+
+    #[test]
+    fn lists_images_and_reads_their_pixels() {
+        let mut terminal = image_terminal();
+        let image = format!("\x1b_Ga=T,f=24,s=2,v=1,i=7;{TWO_PIXELS}\x1b\\");
+        terminal.write(image.as_bytes());
+        terminal.refresh();
+        let placements = terminal.image_placements();
+        assert_eq!(placements.len(), 1, "{placements:?}");
+        let placement = placements[0];
+        assert_eq!(placement.image, 7);
+        assert_eq!((placement.col, placement.row), (0, 0));
+        assert_eq!(placement.size, (2, 1));
+        let pixels = terminal.image_pixels(7).unwrap();
+        assert_eq!((pixels.width, pixels.height, pixels.format), (2, 1, 24));
+        assert_eq!(pixels.data, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(terminal.image_pixels(8), None);
+    }
+
+    #[test]
+    fn decodes_png_images() {
+        // One red pixel, made with a real encoder.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+        let mut terminal = image_terminal();
+        terminal.write(format!("\x1b_Ga=T,f=100,i=7;{png}\x1b\\").as_bytes());
+        let reply = String::from_utf8_lossy(&terminal.effects().replies).into_owned();
+        assert!(reply.contains("i=7;OK"), "{reply:?}");
+        terminal.refresh();
+        assert_eq!(terminal.image_placements().len(), 1);
+        let pixels = terminal.image_pixels(7).unwrap();
+        assert_eq!((pixels.width, pixels.height, pixels.format), (1, 1, 32));
+        assert_eq!(pixels.data, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn programs_are_told_when_an_image_arrived() {
+        let mut terminal = image_terminal();
+        let image = format!("\x1b_Ga=t,f=24,s=2,v=1,i=7;{TWO_PIXELS}\x1b\\");
+        terminal.write(image.as_bytes());
+        let reply = String::from_utf8_lossy(&terminal.effects().replies).into_owned();
+        assert!(reply.contains("i=7;OK"), "{reply:?}");
+    }
+
+    #[test]
+    fn placeholder_characters_do_not_reach_the_screen() {
+        let mut terminal = image_terminal();
+        let image = format!("\x1b_Ga=T,U=1,c=1,r=1,f=24,s=2,v=1,i=7,q=2;{TWO_PIXELS}\x1b\\");
+        terminal.write(image.as_bytes());
+        terminal.write("\x1b[38;5;7m\u{10EEEE}\u{305}\u{305}x".as_bytes());
+        terminal.refresh();
+        assert_eq!(terminal.image_placements().len(), 1);
+        assert_eq!(lines(&mut terminal)[0], " x");
     }
 
     #[test]

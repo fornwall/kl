@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use ghostty::{
-    CursorShape, KeyAction, KeyInput, Notification, OuterColors, Progress, Rgb, Style, Terminal,
-    Width,
+    CursorShape, ImagePlacement, KeyAction, KeyInput, Notification, OuterColors, Progress, Rgb,
+    Style, Terminal, Width,
 };
 use sys::WinSize;
 
@@ -323,6 +323,49 @@ impl Screen {
         }
     }
 
+    /// Writes pixels where a program can get at them, and returns a shell command
+    /// showing them as an image of this size. The pixels make a pattern, so that
+    /// getting one out of place shows.
+    fn image_command(&self, width: u32, height: u32, keys: &str) -> (String, Vec<u8>) {
+        let pixels: Vec<u8> = (0..width * height * 3)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
+        let file = self.dir.0.join("pixels");
+        fs::write(&file, &pixels).unwrap();
+        let file = file.display();
+        let command = format!(
+            r"printf '\033_Ga=T,f=24,s={width},v={height},i=1,q=2{keys};'; base64 < {file} | tr -d '\n'; printf '\033\\'"
+        );
+        (command, pixels)
+    }
+
+    /// What the outer terminal shows of images right now.
+    fn images(&mut self) -> Vec<ImagePlacement> {
+        self.pump();
+        self.terminal.refresh();
+        self.terminal.image_placements()
+    }
+
+    fn wait_for_images(
+        &mut self,
+        what: &str,
+        done: impl Fn(&[ImagePlacement]) -> bool,
+    ) -> Vec<ImagePlacement> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let images = self.images();
+            if done(&images) {
+                return images;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}. The outer terminal shows {images:?}. The screen shows:\n{}",
+                self.lines().join("\n")
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Waits for the outer terminal to show this pointer shape.
     fn wait_for_pointer_shape(&mut self, shape: &str) {
         let deadline = Instant::now() + TIMEOUT;
@@ -469,7 +512,7 @@ impl Screen {
         let start = self.raw.len();
         let output = self.command(&["restart-server"]);
         assert!(output.status.success(), "{output:?}");
-        let cleared = |raw: &[u8]| raw.windows(4).any(|bytes| bytes == b"\x1b[2J");
+        let cleared = |raw: &[u8]| raw.windows(6).any(|bytes| bytes == b"\x1b[H\x1b[J");
         let deadline = Instant::now() + TIMEOUT;
         while !cleared(&self.raw[start..]) {
             self.pump();
@@ -2520,6 +2563,156 @@ fn programs_get_real_pixels_when_they_ask() {
     screen.prefix("d");
     screen.wait_for_exit();
     assert!(!screen.terminal.mode(1006));
+}
+
+#[test]
+fn images_show_where_their_program_put_them() {
+    let mut screen = two_panes();
+    screen.prefix("o");
+    let (command, pixels) = screen.image_command(30, 40, "");
+    screen.run(&command);
+    let images = screen.wait_for_images("an image", |images| !images.is_empty());
+
+    assert_eq!(images.len(), 1, "{images:?}");
+    let border = screen.lines()[0].chars().position(|c| c == '│').unwrap();
+    assert_eq!(usize::try_from(images[0].col).unwrap(), border + 1);
+    assert_eq!(images[0].size, (30, 40));
+
+    // Far more than fits in one escape sequence, and nothing lost on the way.
+    let outer = screen.terminal.image_pixels(images[0].image).unwrap();
+    assert_eq!((outer.width, outer.height), (30, 40));
+    assert_eq!(outer.data, pixels);
+}
+
+#[test]
+fn images_are_cut_off_at_the_edges_of_their_pane() {
+    let mut screen = two_panes();
+    let border = screen.lines()[0].chars().position(|c| c == '│').unwrap();
+    let pane_width = u32::try_from(border).unwrap() * 10;
+    let (command, _) = screen.image_command(1000, 20, "");
+    screen.run(&command);
+    let images = screen.wait_for_images("an image", |images| !images.is_empty());
+    assert_eq!(images[0].col, 0);
+    assert_eq!(images[0].size, (pane_width, 20));
+    assert_eq!(images[0].source.width, pane_width);
+}
+
+#[test]
+fn images_scroll_with_the_text_and_back_from_the_history() {
+    let mut screen = Screen::new(80, 24);
+    let (command, _) = screen.image_command(100, 100, "");
+    screen.run(&command);
+    let first = screen.wait_for_images("an image", |images| !images.is_empty())[0];
+    // The command wraps, so where it starts depends on how long it is.
+    let start = first.row;
+
+    // Enough to leave the last of its five rows at the top of the pane.
+    let lines = 22 - start;
+    screen.run(&format!("seq 1 {lines}"));
+    let cut = screen.wait_for_images("the top to scroll off", |images| {
+        images.first().is_some_and(|image| image.source.y > 0)
+    })[0];
+    assert_eq!(cut.row, 0);
+    assert_eq!(cut.source.y + cut.source.height, 100);
+
+    screen.run("seq 1 20");
+    screen.wait_for_images("it to scroll away", <[_]>::is_empty);
+
+    screen.prefix("[");
+    screen.key(key::PAGE_UP, 0, "", 0);
+    screen.wait_for_images("it to come back", |images| !images.is_empty());
+}
+
+#[test]
+fn images_go_away_with_their_window_and_come_back() {
+    let mut screen = Screen::new(80, 24);
+    let (command, pixels) = screen.image_command(30, 40, "");
+    screen.run(&command);
+    screen.wait_for_images("an image", |images| !images.is_empty());
+
+    screen.prefix("c");
+    screen.wait_for_images("it to go", <[_]>::is_empty);
+    screen.prefix("0");
+    let images = screen.wait_for_images("it to return", |images| !images.is_empty());
+    let outer = screen.terminal.image_pixels(images[0].image).unwrap();
+    assert_eq!(outer.data, pixels);
+}
+
+#[test]
+fn images_make_way_for_what_covers_the_panes() {
+    let mut screen = Screen::new(80, 24);
+    let (command, _) = screen.image_command(30, 40, "");
+    screen.run(&command);
+    screen.wait_for_images("an image", |images| !images.is_empty());
+
+    let before = screen.raw_text().matches("a=t,").count();
+    screen.prefix("w");
+    screen.wait_for_images("it to make way", <[_]>::is_empty);
+    screen.key(key::ESCAPE, 0, "", 0);
+    screen.wait_for_images("it to return", |images| !images.is_empty());
+    assert_eq!(
+        screen.raw_text().matches("a=t,").count(),
+        before,
+        "the pixels are still there"
+    );
+}
+
+#[test]
+fn images_survive_a_new_client_but_not_on_the_old_terminal() {
+    let mut screen = Screen::new(80, 24);
+    let (command, _) = screen.image_command(30, 40, "");
+    screen.run(&command);
+    screen.wait_for_images("an image", |images| !images.is_empty());
+
+    screen.prefix("d");
+    screen.wait_for_exit();
+    assert!(screen.raw_text().contains("\x1b_Ga=d,d=A"));
+
+    let dir = Rc::clone(&screen.dir);
+    let mut again = Screen::attach(dir, 80, 24);
+    again.wait_for_images("the image on the new terminal", |images| !images.is_empty());
+}
+
+#[test]
+fn resizing_the_terminal_keeps_images_without_sending_them_again() {
+    let mut screen = Screen::new(80, 24);
+    let (command, _) = screen.image_command(30, 40, "");
+    screen.run(&command);
+    screen.wait_for_images("an image", |images| !images.is_empty());
+    let sent = screen.raw_text().matches("a=t,").count();
+
+    screen.resize(100, 30);
+    screen.wait_for("the new size", |lines| lines.len() == 30);
+    screen.wait_for_images("it to stay", |images| !images.is_empty());
+    assert_eq!(screen.raw_text().matches("a=t,").count(), sent);
+}
+
+#[test]
+fn closing_a_pane_frees_its_images_in_the_outer_terminal() {
+    let mut screen = two_panes();
+    let (command, _) = screen.image_command(30, 40, "");
+    screen.run(&command);
+    let images = screen.wait_for_images("an image", |images| !images.is_empty());
+    let image = images[0].image;
+
+    screen.run("exit");
+    screen.wait_for_images("it to go", <[_]>::is_empty);
+    assert_eq!(screen.terminal.image_pixels(image), None);
+}
+
+#[test]
+fn placeholder_characters_become_an_image_and_not_text() {
+    let mut screen = Screen::new(80, 24);
+    let (command, _) = screen.image_command(20, 20, ",U=1,c=2,r=1");
+    // Typing any sooner than this would echo into the middle of the image.
+    screen.run(&format!("{command}; echo do''ne"));
+    screen.wait_for_text("done");
+    // The foreground color carries the image id, and the marks the row and column.
+    screen.run(r"printf '\033[38;5;1m\364\216\273\256\314\205\314\205\033[0mtex''t\n'");
+    screen.wait_for_images("an image", |images| !images.is_empty());
+    let lines = screen.wait_for_text("text");
+    let line = lines.iter().find(|line| line.ends_with("text")).unwrap();
+    assert_eq!(line, " text");
 }
 
 #[test]

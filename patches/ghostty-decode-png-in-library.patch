@@ -1,0 +1,11 @@
+--- a/src/terminal/sys.zig
++++ b/src/terminal/sys.zig
+@@ -16,7 +16,7 @@ const build_options = @import("terminal_options");
+ /// and the exact semantics are up to callers. For example, the Kitty Graphics
+ /// Protocol will work but cannot accept PNG images.
+ pub var decode_png: ?DecodePngFn = png: {
+-    if (build_options.artifact == .lib) break :png null;
++    if (build_options.artifact == .lib and !build_options.kitty_graphics) break :png null;
+     break :png &decodePngWuffs;
+ };
+ 

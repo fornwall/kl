@@ -29,6 +29,8 @@ The first iteration has the core of tmux, with no configuration:
   the pointer. Its colors and color scheme reach programs that ask for them, also
   when they change. Colors a program changes for itself, with OSC 4, 10 and 11 or
   reverse video, stay in its pane.
+- Images with the kitty graphics protocol, PNG included, clipped to their pane and
+  following the text as it scrolls.
 
 ### What has and has not been verified
 
@@ -89,10 +91,18 @@ What is left of tmux's `copy-mode-vi` table, and the differences that remain:
 
 Things panes can ask for that stop at kl today.
 
-- Kitty graphics, which is a project of its own: placements have to be clipped to
-  panes and follow scrolling. libghostty-vt's `kitty_graphics` feature tracks
-  images and placements.
 - Reading the clipboard (OSC 52 `?`), which needs a decision on who may do that.
+- Trying images in the Ghostty app. Everything so far ran against libghostty-vt
+  as the outer terminal, and palette queries have shown that the two can differ.
+- Playing animations, which stay on their current frame. It takes calling
+  `ghostty_kitty_graphics_animation_tick` from the event loop, and each frame
+  means sending all its pixels again, so measure that first.
+- Images from files and shared memory (`OPT_KITTY_IMAGE_MEDIUM_*`), which are
+  refused for now. Programs that try fall back to sending them inline.
+- Asking the outer terminal whether it takes images at all. Programs are told yes
+  either way, and pixels go out to a terminal that ignores them.
+- Going easy on slow links. Pixels go out uncompressed, 72 MB took 2.3 seconds
+  locally, and an image that left the screen is sent again when it comes back.
 
 ### 6. Clients and persistence
 
