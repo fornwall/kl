@@ -5,9 +5,9 @@ use super::layout::{Divider, Rect};
 use super::session::{Session, Window};
 use super::ui::Ui;
 use crate::ghostty::{
-    self, Cell, CursorShape, STYLE_BLINK, STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE, STYLE_INVISIBLE,
-    STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH, STYLE_UNDERLINE_MASK, STYLE_UNDERLINE_SHIFT,
-    Style, StyleColor, Text, Width,
+    self, Cell, CursorShape, Progress, STYLE_BLINK, STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE,
+    STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH, STYLE_UNDERLINE_MASK,
+    STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text, Width,
 };
 use crate::sys;
 
@@ -174,6 +174,8 @@ pub struct Renderer {
     /// The cursor as last sent, if the terminal's can be trusted.
     cursor: Option<CursorTarget>,
     title: String,
+    /// The progress the terminal is showing.
+    progress: Option<Progress>,
     pub status_entries: Vec<StatusEntry>,
 }
 
@@ -183,6 +185,8 @@ impl Renderer {
         self.reset = true;
         self.cursor = None;
         self.title.clear();
+        // The client cleared it on leaving.
+        self.progress = None;
     }
 
     fn resize(&mut self, cols: u16, rows: u16) -> bool {
@@ -213,6 +217,7 @@ impl Renderer {
         self.emit_changes(&mut out);
         self.emit_cursor(session, ui, &mut out);
         self.emit_title(session, &mut out);
+        self.emit_progress(session, &mut out);
         if out.is_empty() {
             return out;
         }
@@ -371,11 +376,37 @@ impl Renderer {
             .unwrap_or_default();
         if title != self.title {
             out.extend_from_slice(b"\x1b]2;");
-            out.extend(title.bytes().filter(|byte| !byte.is_ascii_control()));
+            out.extend(osc_text(&title));
             out.extend_from_slice(b"\x1b\\");
             self.title = title;
         }
     }
+
+    fn emit_progress(&mut self, session: &mut Session, out: &mut Vec<u8>) {
+        let reported = std::mem::take(&mut session.progress_reported);
+        let wanted = session.progress();
+        if wanted == self.progress && !(reported && wanted.is_some()) {
+            return;
+        }
+        self.progress = wanted;
+        let sequence = match wanted {
+            None => "\x1b]9;4;0\x1b\\".to_owned(),
+            Some(Progress {
+                state,
+                percent: None,
+            }) => format!("\x1b]9;4;{state}\x1b\\"),
+            Some(Progress {
+                state,
+                percent: Some(percent),
+            }) => format!("\x1b]9;4;{state};{percent}\x1b\\"),
+        };
+        out.extend_from_slice(sequence.as_bytes());
+    }
+}
+
+/// Text that came from a program, safe to put inside an OSC.
+pub fn osc_text(text: &str) -> impl Iterator<Item = u8> {
+    text.bytes().filter(|byte| !byte.is_ascii_control())
 }
 
 /// Whether a cell of a border runs along this pane.

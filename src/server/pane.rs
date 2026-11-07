@@ -10,7 +10,7 @@ use std::process::Command;
 
 use super::copy_mode::CopyMode;
 use super::layout::{PaneId, Rect};
-use crate::ghostty::{Rgb, Terminal};
+use crate::ghostty::{Notification, Rgb, Terminal};
 use crate::sys::{self, WinSize};
 
 /// How much to read from a pty at a time.
@@ -39,6 +39,8 @@ pub struct Activity {
     pub bell: bool,
     pub title_changed: bool,
     pub clipboard: Vec<Vec<u8>>,
+    pub notifications: Vec<Notification>,
+    pub progress_reported: bool,
 }
 
 pub struct Pane {
@@ -207,6 +209,8 @@ impl Pane {
             bell: std::mem::take(&mut effects.bell),
             title_changed: std::mem::take(&mut effects.title_changed),
             clipboard: std::mem::take(&mut effects.clipboard),
+            notifications: std::mem::take(&mut effects.notifications),
+            progress_reported: std::mem::take(&mut effects.progress_reported),
         };
         if !replies.is_empty() {
             self.send(&replies);

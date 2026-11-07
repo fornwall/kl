@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use super::layout::{self, Node, PaneId, Rect};
 use super::pane::{Pane, Spawn};
 use crate::command::{Direction, SplitKind};
-use crate::ghostty::Rgb;
+use crate::ghostty::{Progress, Rgb};
 use crate::sys::WinSize;
 
 pub struct Window {
@@ -48,6 +48,9 @@ pub struct Session {
     /// What new panes get of the environment of the latest client, in the form
     /// of [`crate::proto::ClientMessage::Attach`].
     pub environment: Vec<String>,
+    /// A pane reported progress, which the outer terminal wants to hear even if
+    /// it is the same as before: it gives up on a report that stays quiet.
+    pub progress_reported: bool,
     socket: String,
     next_pane: PaneId,
 }
@@ -68,6 +71,7 @@ impl Session {
             repaint: true,
             colors: (None, None),
             environment: Vec::new(),
+            progress_reported: false,
             socket,
             next_pane: 0,
         }
@@ -121,6 +125,16 @@ impl Session {
     /// Whether this pane is on the screen right now.
     pub fn is_visible(&self, pane: PaneId) -> bool {
         self.visible_panes().iter().any(|(id, _)| *id == pane)
+    }
+
+    /// The progress to show, as there is room for just one: that of the active
+    /// pane, or failing that of another pane that can be seen.
+    pub fn progress(&self) -> Option<Progress> {
+        let of = |id: &PaneId| self.panes.get(id)?.terminal.progress();
+        let visible = self.visible_panes();
+        self.active_id()
+            .and_then(|id| of(&id))
+            .or_else(|| visible.iter().find_map(|(id, _)| of(id)))
     }
 
     /// Fits every pane of every window to the current size.

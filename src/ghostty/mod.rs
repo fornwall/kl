@@ -193,6 +193,23 @@ pub enum MouseButton {
     WheelRight = 7,
 }
 
+/// How far along a program says it is, from OSC 9;4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    /// The state as the sequence numbers it: 1 is plain progress, 2 an error,
+    /// 3 progress of unknown extent and 4 paused.
+    pub state: c_int,
+    pub percent: Option<u8>,
+}
+
+/// A desktop notification, from OSC 9 or OSC 777.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    /// Empty when the program gave none, which OSC 9 has no room for.
+    pub title: String,
+    pub body: String,
+}
+
 /// A mouse event at a cell position of a terminal.
 #[derive(Clone, Copy, Debug)]
 pub struct MouseInput {
@@ -214,10 +231,16 @@ pub struct Effects {
     pub title_changed: bool,
     /// Text a program wants on the clipboard, oldest first.
     pub clipboard: Vec<Vec<u8>>,
+    /// Oldest first.
+    pub notifications: Vec<Notification>,
+    /// The program said something about its progress, even if nothing changed.
+    pub progress_reported: bool,
+    progress: Option<Progress>,
     render_state: ffi::Handle,
     hold_started: Option<Instant>,
     size: (u16, u16, u32, u32),
-    dark: bool,
+    /// A `GhosttyColorScheme` value.
+    color_scheme: c_int,
 }
 
 /// # Safety
@@ -302,13 +325,8 @@ unsafe extern "C" fn on_color_scheme(
 ) -> bool {
     // SAFETY: Called by libghostty-vt with the registered userdata.
     let effects = unsafe { effects_of(userdata) };
-    let scheme = if effects.dark {
-        ffi::COLOR_SCHEME_DARK
-    } else {
-        ffi::COLOR_SCHEME_LIGHT
-    };
     // SAFETY: libghostty-vt passes a valid pointer to write the answer to.
-    unsafe { out.write(scheme) };
+    unsafe { out.write(effects.color_scheme) };
     true
 }
 
@@ -337,6 +355,41 @@ unsafe extern "C" fn on_clipboard_write(
     };
     // SAFETY: `reply` is the callback the request says to answer with.
     unsafe { (request.reply)(write, &raw const reply) };
+}
+
+unsafe extern "C" fn on_notification(
+    _terminal: ffi::Handle,
+    userdata: *mut c_void,
+    notification: *const ffi::DesktopNotification,
+) {
+    // SAFETY: Called by libghostty-vt with the registered userdata.
+    let effects = unsafe { effects_of(userdata) };
+    // SAFETY: libghostty-vt passes a request valid for the duration of the call.
+    let notification = unsafe { &*notification };
+    let text = |text: ffi::Bytes| {
+        // SAFETY: The strings are valid for the duration of the call.
+        String::from_utf8_lossy(unsafe { bytes_of(text.ptr, text.len) }).into_owned()
+    };
+    effects.notifications.push(Notification {
+        title: text(notification.title),
+        body: text(notification.body),
+    });
+}
+
+unsafe extern "C" fn on_progress(
+    _terminal: ffi::Handle,
+    userdata: *mut c_void,
+    report: *const ffi::ProgressReport,
+) {
+    // SAFETY: Called by libghostty-vt with the registered userdata.
+    let effects = unsafe { effects_of(userdata) };
+    // SAFETY: libghostty-vt passes a report valid for the duration of the call.
+    let report = unsafe { &*report };
+    effects.progress_reported = true;
+    effects.progress = (report.state != ffi::PROGRESS_STATE_REMOVE).then_some(Progress {
+        state: report.state,
+        percent: u8::try_from(report.progress).ok(),
+    });
 }
 
 /// # Safety
@@ -472,10 +525,13 @@ impl Terminal {
             bell: false,
             title_changed: false,
             clipboard: Vec::new(),
+            notifications: Vec::new(),
+            progress_reported: false,
+            progress: None,
             render_state: handles.render_state,
             hold_started: None,
             size: (cols, rows, 1, 1),
-            dark: true,
+            color_scheme: ffi::COLOR_SCHEME_DARK,
         }));
         let mut terminal = Self {
             handles,
@@ -504,6 +560,11 @@ impl Terminal {
             ffi::OPT_CLIPBOARD_WRITE,
             on_clipboard_write as *const c_void,
         )?;
+        self.set(
+            ffi::OPT_DESKTOP_NOTIFICATION,
+            on_notification as *const c_void,
+        )?;
+        self.set(ffi::OPT_PROGRESS_REPORT, on_progress as *const c_void)?;
         self.set(ffi::OPT_RENDER_HOLD, on_render_hold as *const c_void)
     }
 
@@ -603,7 +664,11 @@ impl Terminal {
         if let Some(rgb) = background {
             best_effort(self.set(ffi::OPT_COLOR_BACKGROUND, (&raw const rgb).cast()));
             let brightness = u16::from(rgb.r) + u16::from(rgb.g) + u16::from(rgb.b);
-            self.effects().dark = brightness < 3 * 128;
+            self.effects().color_scheme = if brightness < 3 * 128 {
+                ffi::COLOR_SCHEME_DARK
+            } else {
+                ffi::COLOR_SCHEME_LIGHT
+            };
         }
     }
 
@@ -637,6 +702,12 @@ impl Terminal {
 
     pub fn alternate_screen(&self) -> bool {
         self.get::<c_int>(ffi::DATA_ACTIVE_SCREEN) == Some(ffi::SCREEN_ALTERNATE)
+    }
+
+    /// How far along the program last said it was, unless it finished.
+    pub const fn progress(&self) -> Option<Progress> {
+        // SAFETY: Owned by `self`, and callbacks cannot run during this read.
+        unsafe { (*self.effects).progress }
     }
 
     /// Whether the program in this terminal wants mouse events.
@@ -1388,6 +1459,10 @@ mod tests {
             "ctx" => ctx, "reply" => reply);
         assert_layout!(m, "GhosttyClipboardWriteReply", ffi::ClipboardWriteReply,
             "size" => size, "result" => result, "remember" => remember);
+        assert_layout!(m, "GhosttyTerminalDesktopNotification", ffi::DesktopNotification,
+            "title" => title, "body" => body);
+        assert_layout!(m, "GhosttyTerminalProgressReport", ffi::ProgressReport,
+            "state" => state, "progress" => progress);
     }
 
     #[test]
@@ -1500,6 +1575,40 @@ mod tests {
         let mut terminal = Terminal::new(10, 2).unwrap();
         terminal.write(b"\x1b]52;c;aGVsbG8=\x07");
         assert_eq!(terminal.effects().clipboard, [b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn reports_notifications() {
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        terminal.write(b"\x1b]9;done\x1b\\\x1b]777;notify;build;failed\x1b\\");
+        let notification = |title: &str, body: &str| Notification {
+            title: title.to_owned(),
+            body: body.to_owned(),
+        };
+        assert_eq!(
+            terminal.effects().notifications,
+            [notification("", "done"), notification("build", "failed")]
+        );
+    }
+
+    #[test]
+    fn remembers_progress_until_it_is_removed() {
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        terminal.write(b"\x1b]9;4;1;50\x1b\\");
+        assert!(terminal.effects().progress_reported);
+        let half = Progress {
+            state: 1,
+            percent: Some(50),
+        };
+        assert_eq!(terminal.progress(), Some(half));
+        terminal.write(b"\x1b]9;4;3\x1b\\");
+        let unknown = Progress {
+            state: 3,
+            percent: None,
+        };
+        assert_eq!(terminal.progress(), Some(unknown));
+        terminal.write(b"\x1b]9;4;0\x1b\\");
+        assert_eq!(terminal.progress(), None);
     }
 
     #[test]

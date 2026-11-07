@@ -18,8 +18,9 @@ The first iteration has the core of tmux, with no configuration:
 - Full-fidelity input: the kitty keyboard protocol towards the outer terminal,
   and libghostty-vt's encoders towards panes. Programs get the encoding they
   asked for, as if no multiplexer was in between.
-- Clipboard writes, bells and titles reach the outer terminal, and its default
-  colors reach programs that ask for them.
+- Clipboard writes, bells, titles, desktop notifications and progress reports
+  reach the outer terminal, and its default colors reach programs that ask for
+  them.
 
 ### What has and has not been verified
 
@@ -83,7 +84,6 @@ Things panes can ask for that stop at kl today.
   panes and follow scrolling. libghostty-vt's `kitty_graphics` feature tracks
   images and placements.
 - Reading the clipboard (OSC 52 `?`), which needs a decision on who may do that.
-- Desktop notifications and progress reports (OSC 9, 777, 9;4).
 - Mouse pointer shapes (OSC 22), and SGR-pixels mouse reports at real pixels.
 - Palette changes (OSC 4). Colors are passed on by index, so a program that
   redefines the palette looks different from running it directly.

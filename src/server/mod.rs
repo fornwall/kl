@@ -19,13 +19,14 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::base64;
+use crate::ghostty::Notification;
 use crate::input::Parser;
 use crate::proto::{self, ClientMessage, ServerMessage};
 use crate::sys::{self, SIGCHLD, SIGHUP, SIGINT, SIGTERM, Selector, WinSize};
 use dispatch::{Click, Drag};
 use layout::PaneId;
 use pane::Activity;
-use render::Renderer;
+use render::{Renderer, osc_text};
 use session::Session;
 use ui::Ui;
 
@@ -144,6 +145,24 @@ enum Lifecycle {
     /// Running out of windows from here on means the end.
     Running,
     Quitting,
+}
+
+/// OSC 9 for what it can carry. It has no title, and a body starting with a
+/// digit would read as one of the numbered commands that share OSC 9 with it.
+fn notification_sequence(notification: &Notification) -> Vec<u8> {
+    let Notification { title, body } = notification;
+    let plain = title.is_empty() && !body.starts_with(|c: char| c.is_ascii_digit());
+    let mut osc = if plain {
+        b"\x1b]9;".to_vec()
+    } else {
+        let mut osc = b"\x1b]777;notify;".to_vec();
+        osc.extend(osc_text(title));
+        osc.push(b';');
+        osc
+    };
+    osc.extend(osc_text(body));
+    osc.extend_from_slice(b"\x1b\\");
+    osc
 }
 
 /// Binds the socket, taking over from a server that died. Returns `None` if a
@@ -429,6 +448,14 @@ impl Server {
         for text in &activity.clipboard {
             self.send_clipboard(text);
         }
+        // Reaching the user from a pane out of sight is what these are for.
+        for notification in &activity.notifications {
+            self.send_output(&notification_sequence(notification));
+        }
+        if activity.progress_reported {
+            self.session.progress_reported = true;
+            self.dirty = true;
+        }
         if activity.bell {
             if visible {
                 self.send_output(b"\x07");
@@ -562,5 +589,30 @@ impl Server {
                 sys::log(format_args!("goodbye to {}: {error}", connection.id));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sequence(title: &str, body: &str) -> String {
+        let notification = Notification {
+            title: title.to_owned(),
+            body: body.to_owned(),
+        };
+        String::from_utf8(notification_sequence(&notification)).unwrap()
+    }
+
+    #[test]
+    fn notifications_keep_the_form_they_need() {
+        assert_eq!(sequence("", "done"), "\x1b]9;done\x1b\\");
+        assert_eq!(sequence("make", "done"), "\x1b]777;notify;make;done\x1b\\");
+    }
+
+    #[test]
+    fn a_notification_cannot_turn_into_another_command() {
+        assert_eq!(sequence("", "4;1;50"), "\x1b]777;notify;;4;1;50\x1b\\");
+        assert_eq!(sequence("", "a\x1b]2;b"), "\x1b]9;a]2;b\x1b\\");
     }
 }

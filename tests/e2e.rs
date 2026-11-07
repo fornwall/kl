@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
-use ghostty::{KeyAction, KeyInput, Terminal, Width};
+use ghostty::{KeyAction, KeyInput, Notification, Progress, Terminal, Width};
 use sys::WinSize;
 
 const KL: &str = env!("CARGO_BIN_EXE_kl");
@@ -188,6 +188,29 @@ impl Screen {
             assert!(Instant::now() < deadline, "no clipboard write");
         }
         std::mem::take(&mut self.terminal.effects().clipboard)
+    }
+
+    /// Waits for a desktop notification to reach the outer terminal.
+    fn wait_for_notification(&mut self) -> Notification {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.terminal.effects().notifications.is_empty() {
+            self.pump();
+            assert!(Instant::now() < deadline, "no notification");
+        }
+        self.terminal.effects().notifications.remove(0)
+    }
+
+    /// Waits for the outer terminal to show this progress.
+    fn wait_for_progress(&mut self, progress: Option<Progress>) {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.terminal.progress() != progress {
+            self.pump();
+            assert!(
+                Instant::now() < deadline,
+                "the outer terminal shows {:?}",
+                self.terminal.progress()
+            );
+        }
     }
 
     fn wait_for_no_text(&mut self, text: &str) -> Vec<String> {
@@ -882,6 +905,62 @@ fn a_bell_in_another_window_is_flagged() {
     screen.wait_for("the bell flag to clear", |lines| {
         lines.last().is_some_and(|status| !status.contains('!'))
     });
+}
+
+#[test]
+fn notifications_get_out_of_windows_out_of_sight() {
+    let mut screen = Screen::new(80, 24);
+    screen.run(r"sleep 0.5; printf '\033]9;all done\033\\\033]777;notify;make;failed\033\\'");
+    screen.prefix("c");
+    let notification = screen.wait_for_notification();
+    assert_eq!(notification.title, "");
+    assert_eq!(notification.body, "all done");
+    let notification = screen.wait_for_notification();
+    assert_eq!(notification.title, "make");
+    assert_eq!(notification.body, "failed");
+}
+
+#[test]
+fn progress_follows_what_can_be_seen() {
+    let half = Some(Progress {
+        state: 1,
+        percent: Some(50),
+    });
+    let mut screen = Screen::new(80, 24);
+    screen.run(r"printf '\033]9;4;1;50\033\\'");
+    screen.wait_for_progress(half);
+
+    // Next to the pane it is still in view, in another window it is not.
+    screen.prefix("%");
+    screen.wait_for("a second pane", |lines| lines[0].contains('│'));
+    screen.prefix("c");
+    screen.wait_for_progress(None);
+    screen.prefix("0");
+    screen.wait_for_progress(half);
+
+    // The active pane goes first, and the other one is next in line.
+    let unknown = Some(Progress {
+        state: 3,
+        percent: None,
+    });
+    screen.run(r"printf '\033]9;4;3\033\\'");
+    screen.wait_for_progress(unknown);
+    screen.run(r"printf '\033]9;4;0\033\\'");
+    screen.wait_for_progress(half);
+
+    // The outer terminal drops a report that goes quiet, so repeats get through.
+    let sent = screen.raw_text().matches("9;4;1;50").count();
+    screen.prefix("o");
+    screen.run(r"printf '\033]9;4;1;50\033\\'");
+    let deadline = Instant::now() + TIMEOUT;
+    while screen.raw_text().matches("9;4;1;50").count() == sent {
+        screen.pump();
+        assert!(Instant::now() < deadline, "the repeated report got lost");
+    }
+
+    screen.prefix("d");
+    screen.wait_for_exit();
+    assert_eq!(screen.terminal.progress(), None);
 }
 
 #[test]

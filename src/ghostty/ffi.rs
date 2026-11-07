@@ -24,6 +24,8 @@ pub const OPT_COLOR_BACKGROUND: c_int = 13;
 pub const OPT_SELECTION: c_int = 22;
 pub const OPT_CLIPBOARD_WRITE: c_int = 27;
 pub const OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
+pub const OPT_DESKTOP_NOTIFICATION: c_int = 30;
+pub const OPT_PROGRESS_REPORT: c_int = 31;
 pub const OPT_MODE: c_int = 35;
 pub const OPT_RENDER_HOLD: c_int = 42;
 
@@ -84,6 +86,8 @@ pub const FORMATTER_OPT_UNWRAP: c_int = 2;
 pub const FORMATTER_OPT_SELECTION: c_int = 4;
 
 pub const CLIPBOARD_WRITE_SUCCESS: c_int = 0;
+
+pub const PROGRESS_STATE_REMOVE: c_int = 0;
 
 pub const COLOR_SCHEME_LIGHT: c_int = 0;
 pub const COLOR_SCHEME_DARK: c_int = 1;
@@ -288,6 +292,18 @@ pub struct ClipboardWriteReply {
     pub size: usize,
     pub result: c_int,
     pub remember: bool,
+}
+
+#[repr(C)]
+pub struct DesktopNotification {
+    pub title: Bytes,
+    pub body: Bytes,
+}
+
+#[repr(C)]
+pub struct ProgressReport {
+    pub state: c_int,
+    pub progress: i8,
 }
 
 unsafe extern "C" {
