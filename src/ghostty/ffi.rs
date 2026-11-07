@@ -48,6 +48,7 @@ pub const DATA_SCROLLBAR: c_int = 9;
 pub const DATA_MOUSE_TRACKING: c_int = 11;
 pub const DATA_TITLE: c_int = 12;
 pub const DATA_PWD: c_int = 13;
+pub const DATA_COLOR_CURSOR: c_int = 20;
 pub const DATA_COLOR_FOREGROUND_DEFAULT: c_int = 22;
 pub const DATA_COLOR_BACKGROUND_DEFAULT: c_int = 23;
 pub const DATA_COLOR_PALETTE_DEFAULT: c_int = 25;

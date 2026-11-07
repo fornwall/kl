@@ -6,9 +6,10 @@ use super::layout::{Divider, Rect};
 use super::session::{Session, Window};
 use super::ui::{List, Ui};
 use crate::ghostty::{
-    self, Cell, CursorShape, DEFAULT_POINTER_SHAPE, Link, Match, Progress, STYLE_BLINK, STYLE_BOLD,
-    STYLE_FAINT, STYLE_INVERSE, STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH,
-    STYLE_UNDERLINE_MASK, STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text, Width,
+    self, Cell, CursorShape, DEFAULT_POINTER_SHAPE, Link, Match, Progress, Rgb, STYLE_BLINK,
+    STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE, STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE,
+    STYLE_STRIKETHROUGH, STYLE_UNDERLINE_MASK, STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text,
+    Width,
 };
 use crate::sys;
 
@@ -214,6 +215,8 @@ pub struct Renderer {
     reset: bool,
     /// The cursor as last sent, if the terminal's can be trusted.
     cursor: Option<CursorTarget>,
+    /// The color the terminal is showing the cursor in, if not its own.
+    cursor_color: Option<Rgb>,
     title: String,
     /// The progress the terminal is showing.
     progress: Option<Progress>,
@@ -232,6 +235,7 @@ impl Renderer {
         self.cursor = None;
         self.title.clear();
         // The client undid these on leaving.
+        self.cursor_color = None;
         self.progress = None;
         self.pointer_shape = None;
         self.pixel_mouse = false;
@@ -280,6 +284,7 @@ impl Renderer {
         self.emit_cursor(session, ui, &mut out);
         self.emit_title(session, &mut out);
         self.emit_progress(session, &mut out);
+        self.emit_cursor_color(session, &mut out);
         self.emit_pointer_shape(session, &mut out);
         self.emit_mouse_format(session, &mut out);
         let mut frame = transfers;
@@ -489,6 +494,26 @@ impl Renderer {
         match shape(wanted) {
             Some(shape) => out.extend_from_slice(format!("\x1b[{shape} q\x1b[?25h").as_bytes()),
             None => out.extend_from_slice(b"\x1b[?25l"),
+        }
+    }
+
+    /// The outer terminal draws the cursor, so a color of the active pane's
+    /// program is the one thing about colors that has to go there.
+    fn emit_cursor_color(&mut self, session: &Session, out: &mut Vec<u8>) {
+        let wanted = session
+            .active_pane()
+            .and_then(|pane| pane.terminal.cursor_color());
+        if wanted == self.cursor_color {
+            return;
+        }
+        self.cursor_color = wanted;
+        match wanted {
+            Some(Rgb { r, g, b }) => {
+                out.extend_from_slice(
+                    format!("\x1b]12;rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\").as_bytes(),
+                );
+            }
+            None => out.extend_from_slice(b"\x1b]112\x1b\\"),
         }
     }
 

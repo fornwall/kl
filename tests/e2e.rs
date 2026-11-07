@@ -564,6 +564,20 @@ impl Screen {
         String::from_utf8_lossy(&self.raw).into_owned()
     }
 
+    /// Waits for the outer terminal to color its cursor like this.
+    fn wait_for_cursor_color(&mut self, color: Option<Rgb>) {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            self.pump();
+            let current = self.terminal.cursor_color();
+            if current == color {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the cursor color is {current:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Waits for the outer terminal to show this cursor.
     fn wait_for_cursor(&mut self, shape: CursorShape, blinking: bool) {
         let deadline = Instant::now() + TIMEOUT;
@@ -2115,6 +2129,29 @@ fn panes_get_the_cursor_of_the_terminal_until_a_program_picks_one() {
     screen.wait_for_cursor(CursorShape::Block, false);
     screen.run(r"printf '\033[0 q'");
     screen.wait_for_cursor(CursorShape::Bar, true);
+}
+
+#[test]
+fn a_cursor_color_follows_the_active_pane() {
+    let mut screen = Screen::new(80, 24);
+    screen.run(r"printf '\033]12;rgb:ff/00/80\033\\'");
+    screen.wait_for_cursor_color(Some(Rgb {
+        r: 0xff,
+        g: 0,
+        b: 0x80,
+    }));
+    screen.prefix("%");
+    screen.wait_for_cursor_color(None);
+    screen.prefix("o");
+    screen.wait_for_cursor_color(Some(Rgb {
+        r: 0xff,
+        g: 0,
+        b: 0x80,
+    }));
+    screen.prefix("d");
+    screen.wait_for_exit();
+    screen.pump();
+    assert_eq!(screen.terminal.cursor_color(), None);
 }
 
 #[test]

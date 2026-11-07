@@ -48,7 +48,7 @@ const LEAVE_TERMINAL: &[u8] = b"\x1b[?2031l\
     \x1b[?1006l\x1b[?1003l\
     \x1b[?2027r\
     \x1b[<u\
-    \x1b[0m\x1b[0 q\x1b[?25h\
+    \x1b[0m\x1b[0 q\x1b]112\x1b\\\x1b[?25h\
     \x1b[?1049l";
 
 /// Variables that come with the terminal a client runs in rather than with the

@@ -1282,6 +1282,11 @@ impl Terminal {
         }
     }
 
+    /// The color the program picked for the cursor, if it did.
+    pub fn cursor_color(&self) -> Option<Rgb> {
+        self.get(ffi::DATA_COLOR_CURSOR)
+    }
+
     /// The images to show as of the last [`Terminal::refresh`].
     pub fn image_placements(&self) -> Vec<ImagePlacement> {
         let mut images = self.handles.images;
