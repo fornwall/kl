@@ -538,8 +538,8 @@ impl Renderer {
             self.next.fill_row(y, style);
             if let Some(row) = list.rows.get(index) {
                 let line = match (&row.command, index) {
-                    (Some(_), 0..=9) => format!("({index}) {}", row.text),
-                    (Some(_), _) => format!("    {}", row.text),
+                    (Some(_), 0..=9) => format!("({index}) {}{}", row.marker(), row.text),
+                    (Some(_), _) => format!("    {}{}", row.marker(), row.text),
                     (None, _) => row.text.clone(),
                 };
                 self.next.put_str(area.x, y, &line, style, area.width);

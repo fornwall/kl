@@ -45,7 +45,8 @@ Windows:
   swap-window (swapw) [-d] [-s window] [-t window]
   kill-window (killw) [-a] [-t window]
   list-windows (lsw) [-a] [-F format] [-f filter]
-  choose-tree                                 pick a window from a list
+  choose-tree                                 pick a window or pane from a list,
+                                              with Right to show its panes
   find-window (findw) [-CiNTZ] pattern        pick from the panes that match
   set-window-option (setw) [-t window] monitor-activity [on|off]
 

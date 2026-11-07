@@ -1014,13 +1014,13 @@ fn needle_in_a_window() -> Screen {
 fn finds_what_a_pane_shows_and_goes_there() {
     let mut screen = needle_in_a_window();
     assert_eq!(output_of(&screen, &["find-window", "needle"]), "");
-    let lines = screen.wait_for_text("(0) 0: ");
+    let lines = screen.wait_for_text("(0) - 0: ");
     assert!(lines[1].starts_with("(1)     0: "), "{lines:?}");
     assert!(lines[2].trim().is_empty(), "{lines:?}");
 
     // It starts on the pane, rather than on its window.
     screen.enter();
-    screen.wait_for_no_text("(0) 0: ");
+    screen.wait_for_no_text("(0) - 0: ");
     let format = "#{window_index}.#{pane_index}";
     assert_eq!(output_of(&screen, &["display", "-p", format]), "0.0\n");
 }
@@ -1033,7 +1033,7 @@ fn finding_goes_by_case_and_flags_as_asked() {
         let lines = screen.wait_for_text("(0) ");
         screen.key(key::ESCAPE, 0, "", 0);
         screen.wait_for_no_text("(0) ");
-        lines[0].contains("(0) 0: ") && !lines[2].contains("(2) ")
+        lines[0].contains("(0) - 0: ") && !lines[2].contains("(2) ")
     };
     assert!(lists(&mut screen, &["find-window", "-i", "NEEDLE"]));
     assert!(lists(&mut screen, &["find-window", "-C", "n??dle"]));
@@ -1041,8 +1041,8 @@ fn finding_goes_by_case_and_flags_as_asked() {
 
     assert_eq!(output_of(&screen, &["find-window", "NEEDLE"]), "");
     let lines = screen.wait_for_text("filter: no matches");
-    assert!(lines[0].contains("(0) 0: "), "{lines:?}");
-    assert!(lines[1].contains("(1) 1: x*"), "{lines:?}");
+    assert!(lines[0].contains("(0) + 0: "), "{lines:?}");
+    assert!(lines[1].contains("(1) + 1: x*"), "{lines:?}");
 }
 
 #[test]
@@ -1053,7 +1053,7 @@ fn searches_for_a_pane_from_the_prompt() {
     screen.type_text("hay");
     screen.enter();
     let lines = screen.wait_for_text("(1)     1: ");
-    assert!(lines[0].contains("(0) 0: "), "{lines:?}");
+    assert!(lines[0].contains("(0) - 0: "), "{lines:?}");
 }
 
 #[test]
@@ -1062,7 +1062,6 @@ fn a_zoomed_window_stays_zoomed_going_to_another_of_its_panes() {
     let window = "0";
     assert_eq!(output_of(&screen, &["select-window", "-t", window]), "");
     assert_eq!(output_of(&screen, &["resize-pane", "-Z"]), "");
-    screen.wait_for_text("0:");
     assert_eq!(output_of(&screen, &["find-window", "needle"]), "");
     screen.wait_for_text("(1)     0: ");
     screen.enter();
@@ -1076,22 +1075,58 @@ fn a_zoomed_window_stays_zoomed_going_to_another_of_its_panes() {
 fn chooses_a_window_from_a_list() {
     let mut screen = three_windows();
     screen.prefix("w");
-    let lines = screen.wait_for_text("(0) 0: a");
-    assert!(lines[1].contains("(1) 1: b-"), "{lines:?}");
-    assert!(lines[2].contains("(2) 2: c*"), "{lines:?}");
+    let lines = screen.wait_for_text("(0) + 0: a");
+    assert!(lines[1].contains("(1) + 1: b-"), "{lines:?}");
+    assert!(lines[2].contains("(2) + 2: c*"), "{lines:?}");
 
     // It starts on the current window, and goes up from there.
     screen.type_text("kk");
     screen.enter();
     screen.wait_for_text("0:a*");
-    screen.wait_for_no_text("(0) 0: a");
+    screen.wait_for_no_text("(0) + 0: a");
+}
+
+#[test]
+fn goes_down_to_the_panes_of_a_window_in_the_list() {
+    let mut screen = needle_in_a_window();
+    screen.prefix("w");
+    screen.wait_for_text("(0) + 0: ");
+    screen.type_text("k");
+    screen.key(key::ARROW_RIGHT, 0, "", 0);
+    let lines = screen.wait_for_text("(0) - 0: ");
+    assert!(lines[1].starts_with("(1)     0: "), "{lines:?}");
+    assert!(lines[2].starts_with("(2)     1: "), "{lines:?}");
+    assert!(lines[3].starts_with("(3) + 1: x"), "{lines:?}");
+
+    // The first pane of the window, which is not the active one.
+    screen.key(key::ARROW_RIGHT, 0, "", 0);
+    screen.enter();
+    screen.wait_for_no_text("(0) - 0: ");
+    let format = "#{window_index}.#{pane_index}";
+    assert_eq!(output_of(&screen, &["display", "-p", format]), "0.0\n");
+}
+
+#[test]
+fn folds_the_panes_of_a_window_away_again() {
+    let mut screen = needle_in_a_window();
+    screen.prefix("w");
+    screen.wait_for_text("(0) + 0: ");
+    screen.type_text("kl");
+    screen.wait_for_text("(2)     1: ");
+    screen.type_text("jh");
+    screen.wait_for_text("(0) + 0: ");
+    screen.wait_for_no_text("(2) ");
+
+    // That leaves the window selected.
+    screen.enter();
+    screen.wait_for_text("0:sh*");
 }
 
 #[test]
 fn chooses_a_window_by_its_number_in_the_list() {
     let mut screen = three_windows();
     screen.prefix("w");
-    screen.wait_for_text("(0) 0: a");
+    screen.wait_for_text("(0) + 0: a");
     screen.type_text("1");
     screen.wait_for_text("1:b*");
 }
@@ -1100,10 +1135,10 @@ fn chooses_a_window_by_its_number_in_the_list() {
 fn leaving_the_window_list_chooses_nothing() {
     let mut screen = three_windows();
     screen.prefix("w");
-    screen.wait_for_text("(0) 0: a");
+    screen.wait_for_text("(0) + 0: a");
     screen.type_text("k");
     screen.key(key::ESCAPE, 0, "", 0);
-    screen.wait_for_no_text("(0) 0: a");
+    screen.wait_for_no_text("(0) + 0: a");
     assert!(screen.lines().last().unwrap().contains("2:c*"));
 }
 
@@ -1111,11 +1146,11 @@ fn leaving_the_window_list_chooses_nothing() {
 fn the_mouse_works_in_the_window_list() {
     let mut screen = three_windows();
     screen.prefix("w");
-    screen.wait_for_text("(0) 0: a");
+    screen.wait_for_text("(0) + 0: a");
     screen.click(5, 1);
     screen.click(5, 1);
     screen.wait_for_text("1:b*");
-    screen.wait_for_no_text("(0) 0: a");
+    screen.wait_for_no_text("(0) + 0: a");
 }
 
 /// Two panes side by side, numbered 0 and 1, with the second one active.
@@ -4315,6 +4350,17 @@ fn a_huge_count_does_not_hold_up_the_server() {
     assert_eq!(output_of(&screen, &["list-buffers"]), "");
 }
 
+/// The numbers from 1 to 100, with the prompt after them, as where copy mode
+/// starts depends on that.
+fn show_numbers(screen: &mut Screen) {
+    screen.run("clear; seq 1 100");
+    screen.wait_for("a prompt after the numbers", |lines| {
+        let line = lines.iter().position(|line| line.trim() == "100");
+        line.and_then(|line| lines.get(line + 1))
+            .is_some_and(|line| line.starts_with('$'))
+    });
+}
+
 /// `M-x`, to jump to the mark in copy mode.
 fn jump_to_mark(screen: &mut Screen) {
     screen.key(ghostty_key('x'), MOD_ALT, "", u32::from('x'));
@@ -4324,8 +4370,7 @@ fn jump_to_mark(screen: &mut Screen) {
 fn copy_mode_goes_back_to_a_mark_and_shows_it() {
     let (yellow, black) = (3, 0);
     let mut screen = Screen::new(80, 24);
-    screen.run("clear; seq 1 100");
-    screen.wait_for_line("100");
+    show_numbers(&mut screen);
     screen.prefix("[");
     screen.wait_for_text("[0/");
     assert_eq!(background_of(&mut screen, "100"), None);
@@ -4355,8 +4400,7 @@ fn copy_mode_goes_back_to_a_mark_and_shows_it() {
 #[test]
 fn a_mark_in_the_history_ends_up_on_top_of_the_view() {
     let mut screen = Screen::new(80, 24);
-    screen.run("clear; seq 1 100");
-    screen.wait_for_line("100");
+    show_numbers(&mut screen);
     screen.prefix("[");
     screen.wait_for_text("[0/");
     screen.key(key::PAGE_UP, 0, "", 0);
@@ -4372,8 +4416,7 @@ fn a_mark_in_the_history_ends_up_on_top_of_the_view() {
 #[test]
 fn the_mark_starts_out_where_copy_mode_did() {
     let mut screen = Screen::new(80, 24);
-    screen.run("clear; seq 1 100");
-    screen.wait_for_line("100");
+    show_numbers(&mut screen);
     screen.prefix("[");
     screen.wait_for_text("[0/");
     screen.type_text("kkk");
@@ -4406,8 +4449,7 @@ fn in_mode(screen: &Screen) -> String {
 /// Copy mode at the bottom of the numbers from 1 to 100.
 fn numbers_in_copy_mode() -> Screen {
     let mut screen = Screen::new(80, 24);
-    screen.run("clear; seq 1 100");
-    screen.wait_for_line("100");
+    show_numbers(&mut screen);
     assert_eq!(output_of(&screen, &["copy-mode"]), "");
     screen.wait_for_text("[0/");
     screen

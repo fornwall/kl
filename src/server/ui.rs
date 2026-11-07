@@ -140,14 +140,19 @@ pub struct ListRow {
     pub command: Option<Command>,
     /// What `d` does on this row.
     delete: Option<Command>,
+    /// The rows that go below this one once it unfolds.
+    folded: Vec<Self>,
+    /// The rows below this one are on display.
+    unfolded: bool,
+    /// It is one of those rows.
+    nested: bool,
 }
 
 impl ListRow {
-    pub const fn new(text: String, command: Command) -> Self {
+    pub fn new(text: String, command: Command) -> Self {
         Self {
-            text,
             command: Some(command),
-            delete: None,
+            ..Self::text(text)
         }
     }
 
@@ -156,6 +161,9 @@ impl ListRow {
             text,
             command: None,
             delete: None,
+            folded: Vec::new(),
+            unfolded: false,
+            nested: false,
         }
     }
 
@@ -163,6 +171,41 @@ impl ListRow {
         Self {
             delete: Some(command),
             ..self
+        }
+    }
+
+    /// This row with some rows below it, for `Right` to show.
+    pub fn with_folded(self, rows: Vec<Self>) -> Self {
+        Self {
+            folded: rows,
+            ..self
+        }
+    }
+
+    /// This row as one of the rows below another one.
+    pub fn nested(self) -> Self {
+        Self {
+            nested: true,
+            ..self
+        }
+    }
+
+    /// This row as one that has its rows on display below it already.
+    pub fn unfolded(self) -> Self {
+        Self {
+            unfolded: true,
+            ..self
+        }
+    }
+
+    /// What goes in front of the row, which says that it can fold, as in tmux.
+    pub const fn marker(&self) -> &'static str {
+        if self.unfolded {
+            "- "
+        } else if self.folded.is_empty() {
+            ""
+        } else {
+            "+ "
         }
     }
 }
@@ -222,6 +265,42 @@ impl List {
         self.selected = self.selected.saturating_add_signed(rows).min(last);
     }
 
+    /// Shows the rows below the selected row. With nothing to show, this goes
+    /// down a row, as tmux does.
+    fn unfold(&mut self) {
+        let below = self.selected + 1;
+        let row = self.rows.get_mut(self.selected);
+        match row.filter(|row| !row.folded.is_empty()) {
+            Some(row) => {
+                let rows = std::mem::take(&mut row.folded);
+                row.unfolded = true;
+                self.rows.splice(below..below, rows);
+            }
+            None => self.move_by(1),
+        }
+    }
+
+    /// Hides the rows below the selected row, or the rows it is one of, going to
+    /// the row they are below. With nothing to hide, this goes up a row.
+    fn fold(&mut self) {
+        let nested = |row: &ListRow| row.nested;
+        while self.selected > 0 && self.rows.get(self.selected).is_some_and(nested) {
+            self.selected -= 1;
+        }
+        let below = self.selected + 1;
+        let rest = self.rows.get(below..).unwrap_or_default();
+        let count = rest.iter().take_while(|row| nested(row)).count();
+        if count == 0 {
+            self.move_by(-1);
+            return;
+        }
+        let rows = self.rows.drain(below..below + count).collect();
+        if let Some(row) = self.rows.get_mut(self.selected) {
+            row.folded = rows;
+            row.unfolded = false;
+        }
+    }
+
     /// What choosing the selected row does.
     pub fn choose(&self) -> ListOutcome {
         let row = self.rows.get(self.selected);
@@ -241,6 +320,8 @@ impl List {
             (key::ENTER, _) => return self.choose(),
             (key::ARROW_UP, _) | (_, Some('k')) => self.step(false),
             (key::ARROW_DOWN, _) | (_, Some('j')) => self.step(true),
+            (key::ARROW_RIGHT, _) | (_, Some('l' | '+')) => self.unfold(),
+            (key::ARROW_LEFT, _) | (_, Some('h' | '-')) => self.fold(),
             (key::PAGE_UP, _) => self.move_by(-page),
             (key::PAGE_DOWN, _) => self.move_by(page),
             (key::HOME, _) | (_, Some('g')) => self.selected = 0,
@@ -472,6 +553,98 @@ mod tests {
         let mut list = List::new(vec![ListRow::text("a".to_owned())], 0);
         assert_eq!(list.handle_key(&key(b"0"), 5), ListOutcome::Stay);
         assert_eq!(list.handle_key(&key(b"\r"), 5), ListOutcome::Close);
+    }
+
+    /// A row with two rows below it, between two rows.
+    fn tree() -> List {
+        let row = |text: &str| ListRow::new(text.to_owned(), Command::LastWindow);
+        let nested = |text: &str| row(text).nested();
+        let rows = vec![
+            row("a"),
+            row("b").with_folded(vec![nested("b1"), nested("b2")]),
+            row("c"),
+        ];
+        List::new(rows, 1)
+    }
+
+    fn texts(list: &List) -> Vec<&str> {
+        list.rows.iter().map(|row| row.text.as_str()).collect()
+    }
+
+    #[test]
+    fn rows_unfold_and_fold_again() {
+        let mut list = tree();
+        assert_eq!(list.rows[1].marker(), "+ ");
+        list.handle_key(&key(b"\x1b[C"), 10);
+        assert_eq!(texts(&list), ["a", "b", "b1", "b2", "c"]);
+        assert_eq!(list.selected, 1);
+        assert_eq!(list.rows[1].marker(), "- ");
+        list.handle_key(&key(b"\x1b[D"), 10);
+        assert_eq!(texts(&list), ["a", "b", "c"]);
+        assert_eq!(list.selected, 1);
+        assert_eq!(list.rows[1].marker(), "+ ");
+    }
+
+    #[test]
+    fn letters_and_signs_fold_too() {
+        for (open, close) in [(b"l", b"h"), (b"+", b"-")] {
+            let mut list = tree();
+            list.handle_key(&key(open), 10);
+            assert_eq!(list.rows.len(), 5);
+            list.handle_key(&key(close), 10);
+            assert_eq!(list.rows.len(), 3);
+        }
+    }
+
+    #[test]
+    fn a_row_that_has_unfolded_goes_down_a_row() {
+        let mut list = tree();
+        list.handle_key(&key(b"l"), 10);
+        list.handle_key(&key(b"l"), 10);
+        assert_eq!(list.selected, 2);
+        list.handle_key(&key(b"l"), 10);
+        assert_eq!(list.selected, 3);
+        assert_eq!(list.rows.len(), 5);
+    }
+
+    #[test]
+    fn folding_goes_from_a_nested_row_to_the_row_above_it() {
+        let mut list = tree();
+        list.handle_key(&key(b"l"), 10);
+        list.handle_key(&key(b"j"), 10);
+        list.handle_key(&key(b"j"), 10);
+        assert_eq!(list.selected, 3);
+        list.handle_key(&key(b"h"), 10);
+        assert_eq!(texts(&list), ["a", "b", "c"]);
+        assert_eq!(list.selected, 1);
+    }
+
+    #[test]
+    fn nothing_to_fold_goes_up_a_row() {
+        let mut list = tree();
+        list.handle_key(&key(b"h"), 10);
+        assert_eq!(list.selected, 0);
+        list.handle_key(&key(b"h"), 10);
+        assert_eq!(list.selected, 0);
+    }
+
+    #[test]
+    fn a_list_without_rows_has_nothing_to_fold() {
+        let mut list = list(0);
+        assert_eq!(list.handle_key(&key(b"l"), 5), ListOutcome::Stay);
+        assert_eq!(list.handle_key(&key(b"h"), 5), ListOutcome::Stay);
+    }
+
+    #[test]
+    fn rows_can_start_out_unfolded() {
+        let row = |text: &str| ListRow::new(text.to_owned(), Command::LastWindow);
+        let rows = vec![row("a").unfolded(), row("a1").nested()];
+        let mut list = List::new(rows, 1);
+        assert_eq!(list.rows[0].marker(), "- ");
+        list.handle_key(&key(b"h"), 5);
+        assert_eq!(texts(&list), ["a"]);
+        list.handle_key(&key(b"l"), 5);
+        assert_eq!(texts(&list), ["a", "a1"]);
     }
 
     #[test]

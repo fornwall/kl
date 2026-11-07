@@ -115,7 +115,12 @@ Before adding much more, close the gaps in the table above.
 
 What is missing for daily use compared with tmux.
 
-- A preview in the list of `C-b w`, and going down to panes there, as in tmux.
+- A preview in the list of `C-b w`, as in tmux. It takes more than drawing in the
+  list. Reading a pane takes a terminal that can change, which only `Canvas`
+  gets, once for all clients and for panes on display, while which pane to preview
+  is up to each client. A hidden pane has to wake up the frame too, and lists need
+  to know their height for paging and clicks. `screen_line` could read one without
+  any of that, but only as plain text and too slowly for drawing.
 - `main-pane-width` and the like are fixed at their defaults for lack of settings.
 
 ### 4. Copy mode

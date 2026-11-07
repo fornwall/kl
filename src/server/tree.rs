@@ -20,7 +20,14 @@ fn pane_row(session: &Session, id: PaneId) -> ListRow {
     let format = "    #P: #{pane_current_command}#{?pane_active,*,}#{?pane_marked,M,}#{?pane_title, \"#T\",}";
     let text = Context::of_pane(session, id).expand(format);
     let target = Some(format!("%{id}"));
-    ListRow::new(text, Command::GoToPane { target })
+    ListRow::new(text, Command::GoToPane { target }).nested()
+}
+
+/// A window with its panes folded up below it.
+fn folded_window_row(session: &Session, window: &Window) -> ListRow {
+    let panes = window.root.panes(session.area());
+    let rows = panes.iter().map(|(id, _)| pane_row(session, *id));
+    window_row(session, window).with_folded(rows.collect())
 }
 
 /// The rows a pane shows, as text without what is empty at the end. Those are
@@ -78,7 +85,8 @@ impl Server {
     pub fn choose_tree(&mut self) {
         let session = &self.session;
         let windows = session.windows.iter();
-        let rows = windows.map(|window| window_row(session, window)).collect();
+        let rows = windows.map(|window| folded_window_row(session, window));
+        let rows = rows.collect();
         let current = session
             .windows
             .iter()
@@ -105,7 +113,7 @@ impl Server {
                 })
                 .collect();
             if !found.is_empty() {
-                rows.push(window_row(session, window));
+                rows.push(window_row(session, window).unfolded());
                 rows.extend(found.into_iter().map(|id| pane_row(session, id)));
             }
         }
