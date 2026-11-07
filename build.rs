@@ -79,7 +79,9 @@ fn main() -> Result<(), String> {
         "cargo:rustc-link-search=native={}",
         prefix.join("lib").display()
     );
-    println!("cargo:rustc-link-lib=static=ghostty-vt");
+    // By its exact name, since zig installs a shared library next to it, and
+    // given the choice the linker on macOS takes that one.
+    println!("cargo:rustc-link-lib=static:+verbatim=libghostty-vt.a");
     Ok(())
 }
 

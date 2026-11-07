@@ -27,6 +27,6 @@ fn main() -> Result<(), String> {
         return Err(format!("no {}: run cargo build first", lib.display()));
     }
     println!("cargo:rustc-link-search=native={}", lib.display());
-    println!("cargo:rustc-link-lib=static=ghostty-vt");
+    println!("cargo:rustc-link-lib=static:+verbatim=libghostty-vt.a");
     Ok(())
 }

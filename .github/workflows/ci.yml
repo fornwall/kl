@@ -49,6 +49,14 @@ jobs:
       - run: cargo clippy --locked --all-targets
       - run: cargo test --locked
 
+      # A shared library would not even be found at runtime, and it is the
+      # linker that picks, differently on each platform.
+      - name: Check that libghostty-vt is statically linked
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then deps=$(otool -L target/debug/kl); else deps=$(ldd target/debug/kl); fi
+          echo "$deps"
+          if echo "$deps" | grep ghostty; then exit 1; fi
+
       # The fuzz targets include kl's sources by path, and nothing above builds
       # them. This comes last, since it links the library built above.
       - run: cargo check --manifest-path fuzz/Cargo.toml
