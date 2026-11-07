@@ -138,6 +138,8 @@ pub enum Event {
     Foreground(Rgb),
     /// The terminal's default background color, from OSC 11.
     Background(Rgb),
+    /// An entry of the terminal's palette, from OSC 4.
+    Palette(u8, Rgb),
     /// The terminal's color scheme, as asked for or from mode 2031.
     ColorScheme {
         dark: bool,
@@ -148,7 +150,10 @@ impl Event {
     pub const fn is_about_colors(&self) -> bool {
         matches!(
             self,
-            Self::Foreground(_) | Self::Background(_) | Self::ColorScheme { .. }
+            Self::Foreground(_)
+                | Self::Background(_)
+                | Self::Palette(..)
+                | Self::ColorScheme { .. }
         )
     }
 }
@@ -385,11 +390,14 @@ const fn give_up_at_limit(rest: &[u8], prefix: usize) -> Step {
 /// Replies to the color queries the client sends on attaching.
 fn parse_osc(body: &[u8]) -> Option<Event> {
     let body = std::str::from_utf8(body).ok()?;
-    let (command, color) = body.split_once(';')?;
-    let rgb = parse_color(color)?;
+    let (command, rest) = body.split_once(';')?;
     match command {
-        "10" => Some(Event::Foreground(rgb)),
-        "11" => Some(Event::Background(rgb)),
+        "4" => {
+            let (index, color) = rest.split_once(';')?;
+            Some(Event::Palette(index.parse().ok()?, parse_color(color)?))
+        }
+        "10" => parse_color(rest).map(Event::Foreground),
+        "11" => parse_color(rest).map(Event::Background),
         _ => None,
     }
 }
@@ -886,6 +894,22 @@ mod tests {
             [Event::Background(background)]
         );
         assert_eq!(events(b"\x1b]11;rgb:fffffff/0/0\x07"), []);
+    }
+
+    #[test]
+    fn reads_palette_replies() {
+        let rgb = Rgb {
+            r: 17,
+            g: 34,
+            b: 51,
+        };
+        assert_eq!(
+            events(b"\x1b]4;200;rgb:1111/2222/3333\x1b\\"),
+            [Event::Palette(200, rgb)]
+        );
+        // Entries past the palette are the special colors of other sequences.
+        assert_eq!(events(b"\x1b]4;256;rgb:11/22/33\x1b\\"), []);
+        assert_eq!(events(b"\x1b]4;1\x1b\\"), []);
     }
 
     #[test]

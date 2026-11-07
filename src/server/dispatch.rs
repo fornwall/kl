@@ -10,7 +10,7 @@ use super::layout::{Divider, PaneId, Rect};
 use super::pane::Pane;
 use super::session::{Monitor, Window};
 use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
-use super::{COLOR_QUERIES, Lifecycle, Server};
+use super::{Lifecycle, Server, color_queries};
 use crate::command::{self, Command};
 use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
@@ -104,11 +104,14 @@ impl Server {
             Event::Focus(focused) => self.session.report_focus(focused),
             Event::Foreground(rgb) => self.session.colors.foreground = Some(rgb),
             Event::Background(rgb) => self.session.colors.background = Some(rgb),
+            Event::Palette(index, rgb) => {
+                self.session.colors.palette.insert(index, rgb);
+            }
             Event::ColorScheme { dark } => {
                 // A new scheme most likely brought new colors along.
                 let old = self.session.colors.dark.replace(dark);
                 if old.is_some_and(|old| old != dark) {
-                    self.send_output(COLOR_QUERIES);
+                    self.send_output(&color_queries());
                 }
             }
         }

@@ -5,6 +5,7 @@
 //! keeps taking connections. What is left to carry over is what lives in memory,
 //! which goes through a file next to the socket.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs::{self, File};
@@ -87,6 +88,10 @@ fn put_colors(out: &mut Vec<u8>, colors: &OuterColors) {
     put_color(out, colors.background);
     put_bool(out, colors.dark.is_some());
     put_bool(out, colors.dark.unwrap_or(false));
+    put_u32(out, u32::try_from(colors.palette.len()).unwrap_or(0));
+    for (index, Rgb { r, g, b }) in &colors.palette {
+        out.extend_from_slice(&[*index, *r, *g, *b]);
+    }
 }
 
 fn take_colors(reader: &mut Reader<'_>) -> Result<OuterColors, Malformed> {
@@ -94,9 +99,15 @@ fn take_colors(reader: &mut Reader<'_>) -> Result<OuterColors, Malformed> {
     let background = take_color(reader)?;
     let known = reader.take_bool()?;
     let dark = reader.take_bool()?;
+    let mut palette = BTreeMap::new();
+    for _ in 0..reader.take_u32()? {
+        let [index, r, g, b] = reader.take_array()?;
+        palette.insert(index, Rgb { r, g, b });
+    }
     Ok(OuterColors {
         foreground,
         background,
+        palette,
         dark: known.then_some(dark),
     })
 }
@@ -351,6 +362,24 @@ mod tests {
         put_node(&mut bytes, &node);
         bytes.pop();
         assert_eq!(take_node(&mut Reader::new(&bytes)), Err(Malformed));
+    }
+
+    #[test]
+    fn colors_survive_a_round_trip() {
+        let rgb = Rgb { r: 1, g: 2, b: 3 };
+        let colors = OuterColors {
+            foreground: Some(rgb),
+            background: None,
+            palette: BTreeMap::from([(0, rgb), (255, rgb)]),
+            dark: Some(false),
+        };
+        let mut bytes = Vec::new();
+        put_colors(&mut bytes, &colors);
+        let restored = take_colors(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(restored.foreground, colors.foreground);
+        assert_eq!(restored.background, colors.background);
+        assert_eq!(restored.palette, colors.palette);
+        assert_eq!(restored.dark, colors.dark);
     }
 
     #[test]

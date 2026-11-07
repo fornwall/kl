@@ -7,6 +7,7 @@
 mod ffi;
 pub mod key;
 
+use std::collections::BTreeMap;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::slice;
@@ -231,6 +232,8 @@ pub struct MouseInput {
 pub struct OuterColors {
     pub foreground: Option<Rgb>,
     pub background: Option<Rgb>,
+    /// The entries of its palette it told about.
+    pub palette: BTreeMap<u8, Rgb>,
     /// Whether it is in a dark color scheme, if it says.
     pub dark: Option<bool>,
 }
@@ -250,6 +253,37 @@ impl OuterColors {
         } else {
             ffi::COLOR_SCHEME_LIGHT
         }
+    }
+}
+
+/// Colors a program changed for itself. The outer terminal is shared with other
+/// panes, so it does not hear of them: they go out as RGB, while all other colors
+/// stay symbolic and follow the outer theme.
+#[derive(Default, PartialEq, Eq)]
+struct OwnColors {
+    foreground: Option<Rgb>,
+    background: Option<Rgb>,
+    /// One for each palette entry, or empty if the program changed none.
+    palette: Vec<Option<Rgb>>,
+}
+
+impl OwnColors {
+    fn resolve(&self, color: StyleColor, default: Option<Rgb>) -> StyleColor {
+        let own = match color.tag {
+            ffi::STYLE_COLOR_NONE => default,
+            ffi::STYLE_COLOR_PALETTE => {
+                let entry = self.palette.get(usize::from(color.value[0]));
+                entry.copied().flatten()
+            }
+            _ => None,
+        };
+        own.map_or(color, StyleColor::rgb)
+    }
+
+    fn apply(&self, style: &mut Style) {
+        style.fg = self.resolve(style.fg, self.foreground);
+        style.bg = self.resolve(style.bg, self.background);
+        style.underline_color = self.resolve(style.underline_color, None);
     }
 }
 
@@ -534,6 +568,8 @@ pub struct Terminal {
     effects: *mut Effects,
     /// Reused between rows to avoid allocating for each one.
     row: Vec<Cell>,
+    /// As of the frame being drawn.
+    own_colors: OwnColors,
     compression: Compression,
 }
 
@@ -590,6 +626,7 @@ impl Terminal {
             handles,
             effects,
             row: Vec::new(),
+            own_colors: OwnColors::default(),
             compression: Compression::default(),
         };
         terminal.register_effects()?;
@@ -742,6 +779,7 @@ impl Terminal {
         if let Some(rgb) = colors.background {
             best_effort(self.set(ffi::OPT_COLOR_BACKGROUND, (&raw const rgb).cast()));
         }
+        self.set_default_palette(&colors.palette);
         let scheme = colors.color_scheme();
         let changed = std::mem::replace(&mut self.effects().color_scheme, scheme) != scheme;
         if !changed || !self.mode(MODE_REPORT_COLOR_SCHEME) {
@@ -751,6 +789,20 @@ impl Terminal {
             // SAFETY: `buf` is valid for `len` bytes, and `written` for a write.
             unsafe { ffi::ghostty_color_scheme_report_encode(scheme, buf, len, written) }
         })
+    }
+
+    /// The library keeps what programs changed, on top of whatever this sets.
+    fn set_default_palette(&mut self, entries: &BTreeMap<u8, Rgb>) {
+        let mut palette = [Rgb::default(); 256];
+        if entries.is_empty() || !self.read(ffi::DATA_COLOR_PALETTE_DEFAULT, &mut palette) {
+            return;
+        }
+        for (index, rgb) in entries {
+            if let Some(entry) = palette.get_mut(usize::from(*index)) {
+                *entry = *rgb;
+            }
+        }
+        best_effort(self.set(ffi::OPT_COLOR_PALETTE, palette.as_ptr().cast()));
     }
 
     fn string(&self, data: c_int) -> String {
@@ -863,6 +915,54 @@ impl Terminal {
         result != ffi::SUCCESS || dirty == ffi::RENDER_DIRTY_FULL
     }
 
+    /// What differs between the colors as of the last [`Terminal::refresh`] and
+    /// those of the outer terminal. Reverse video needs nothing of its own here,
+    /// since it shows up as a foreground and background that traded places.
+    fn read_own_colors(&self) -> OwnColors {
+        let mut colors = ffi::RenderColors {
+            size: size_of::<ffi::RenderColors>(),
+            background: Rgb::default(),
+            foreground: Rgb::default(),
+            cursor: Rgb::default(),
+            cursor_has_value: false,
+            palette: [Rgb::default(); 256],
+        };
+        let out = (&raw mut colors).cast();
+        let state = self.handles.render_state;
+        // SAFETY: The render state is live, and `out` is a sized colors struct.
+        let result = unsafe { ffi::ghostty_render_state_get(state, ffi::RENDER_DATA_COLORS, out) };
+        let mut defaults = [Rgb::default(); 256];
+        if result != ffi::SUCCESS || !self.read(ffi::DATA_COLOR_PALETTE_DEFAULT, &mut defaults) {
+            return OwnColors::default();
+        }
+        let own = |color: Rgb, default: Rgb| (color != default).then_some(color);
+        let palette = if colors.palette == defaults {
+            Vec::new()
+        } else {
+            let entries = colors.palette.iter().zip(&defaults);
+            entries
+                .map(|(color, default)| own(*color, *default))
+                .collect()
+        };
+        // Without knowing the outer colors, there is nothing to tell them from.
+        let foreground = self.get(ffi::DATA_COLOR_FOREGROUND_DEFAULT);
+        let background = self.get(ffi::DATA_COLOR_BACKGROUND_DEFAULT);
+        let (foreground, background) =
+            foreground
+                .zip(background)
+                .map_or((None, None), |(foreground, background)| {
+                    (
+                        own(colors.foreground, foreground),
+                        own(colors.background, background),
+                    )
+                });
+        OwnColors {
+            foreground,
+            background,
+            palette,
+        }
+    }
+
     /// The cursor as of the last [`Terminal::refresh`].
     pub fn cursor(&self) -> Option<Cursor> {
         let mut cursor = ffi::RenderCursor {
@@ -907,7 +1007,10 @@ impl Terminal {
         if result != ffi::SUCCESS {
             return;
         }
-        let all = all || self.fully_dirty();
+        // Rows do not always hear of it: see UPSTREAM.md on reverse video.
+        let own_colors = self.read_own_colors();
+        let all = all || self.fully_dirty() || own_colors != self.own_colors;
+        self.own_colors = own_colors;
         let mut y = 0;
         // SAFETY: The iterator was populated above and the state is unchanged.
         while unsafe { ffi::ghostty_render_state_row_iterator_next(rows) } {
@@ -961,6 +1064,7 @@ impl Terminal {
         // SAFETY: The cells were populated above and the state is unchanged.
         while unsafe { ffi::ghostty_render_state_row_cells_next(cells) } {
             let mut cell = read_cell(cells);
+            self.own_colors.apply(&mut cell.style);
             cell.selected = selection.is_some_and(|(start, end)| (start..=end).contains(&x));
             row.push(cell);
             x = x.saturating_add(1);
@@ -1564,6 +1668,9 @@ mod tests {
             "ctx" => ctx, "reply" => reply);
         assert_layout!(m, "GhosttyClipboardWriteReply", ffi::ClipboardWriteReply,
             "size" => size, "result" => result, "remember" => remember);
+        assert_layout!(m, "GhosttyRenderStateColors", ffi::RenderColors,
+            "size" => size, "background" => background, "foreground" => foreground,
+            "cursor" => cursor, "cursor_has_value" => cursor_has_value, "palette" => palette);
         assert_layout!(m, "GhosttyTerminalDesktopNotification", ffi::DesktopNotification,
             "title" => title, "body" => body);
         assert_layout!(m, "GhosttyTerminalProgressReport", ffi::ProgressReport,
@@ -1731,15 +1838,134 @@ mod tests {
         assert_eq!(terminal.effects().clipboard, [b"hello".to_vec()]);
     }
 
+    const WHITE: Rgb = Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
+    const BLACK: Rgb = Rgb { r: 0, g: 0, b: 0 };
+
+    fn outer_terminal() -> Terminal {
+        let mut terminal = Terminal::new(4, 1).unwrap();
+        terminal.set_outer_colors(&OuterColors {
+            foreground: Some(WHITE),
+            background: Some(BLACK),
+            ..OuterColors::default()
+        });
+        terminal
+    }
+
+    fn first_cell(terminal: &mut Terminal) -> Style {
+        terminal.refresh();
+        let mut style = Style::default();
+        terminal.draw_rows(true, |_, cells| style = cells[0].style);
+        style
+    }
+
+    #[test]
+    fn colors_nobody_changed_stay_symbolic() {
+        let mut terminal = outer_terminal();
+        terminal.write(b"\x1b[31;4:1;58:5:2mx");
+        let style = first_cell(&mut terminal);
+        assert_eq!(style.fg.as_palette(), Some(1));
+        assert_eq!(style.underline_color.as_palette(), Some(2));
+        assert_eq!(style.bg, StyleColor::default());
+    }
+
+    #[test]
+    fn a_redefined_palette_entry_becomes_rgb() {
+        let mut terminal = outer_terminal();
+        terminal.write(b"\x1b]4;1;rgb:01/02/03\x1b\\\x1b[31;42;4:1;58:5:1mx");
+        let style = first_cell(&mut terminal);
+        assert_eq!(style.fg.as_rgb(), Some([1, 2, 3]));
+        assert_eq!(style.underline_color.as_rgb(), Some([1, 2, 3]));
+        assert_eq!(style.bg.as_palette(), Some(2));
+        terminal.write(b"\x1b]104;1\x1b\\");
+        assert_eq!(first_cell(&mut terminal).fg.as_palette(), Some(1));
+    }
+
+    #[test]
+    fn erased_cells_follow_a_redefined_palette_entry() {
+        let mut terminal = outer_terminal();
+        terminal.write(b"\x1b]4;1;rgb:01/02/03\x1b\\\x1b[41m\x1b[K");
+        assert_eq!(first_cell(&mut terminal).bg.as_rgb(), Some([1, 2, 3]));
+    }
+
+    #[test]
+    fn the_outer_palette_is_not_mistaken_for_a_program_changing_it() {
+        let mut terminal = outer_terminal();
+        let rgb = Rgb { r: 9, g: 8, b: 7 };
+        terminal.set_outer_colors(&OuterColors {
+            palette: BTreeMap::from([(1, rgb)]),
+            ..OuterColors::default()
+        });
+        terminal.write(b"\x1b[31mx\x1b]4;1;?\x1b\\");
+        assert_eq!(first_cell(&mut terminal).fg.as_palette(), Some(1));
+        let reply = String::from_utf8_lossy(&terminal.effects().replies).into_owned();
+        assert!(reply.contains("rgb:0909/0808/0707"), "{reply:?}");
+    }
+
+    #[test]
+    fn a_program_keeps_its_palette_entry_when_the_outer_one_changes() {
+        let mut terminal = outer_terminal();
+        terminal.write(b"\x1b]4;1;rgb:01/02/03\x1b\\\x1b[31mx");
+        terminal.set_outer_colors(&OuterColors {
+            palette: BTreeMap::from([(1, WHITE)]),
+            ..OuterColors::default()
+        });
+        assert_eq!(first_cell(&mut terminal).fg.as_rgb(), Some([1, 2, 3]));
+    }
+
+    #[test]
+    fn changed_default_colors_become_rgb() {
+        let mut terminal = outer_terminal();
+        terminal.write(b"\x1b]10;rgb:01/02/03\x1b\\\x1b]11;rgb:04/05/06\x1b\\x");
+        let style = first_cell(&mut terminal);
+        assert_eq!(style.fg.as_rgb(), Some([1, 2, 3]));
+        assert_eq!(style.bg.as_rgb(), Some([4, 5, 6]));
+        terminal.write(b"\x1b]110\x1b\\\x1b]111\x1b\\");
+        assert_eq!(first_cell(&mut terminal), Style::default());
+    }
+
+    #[test]
+    fn reverse_video_trades_the_default_colors() {
+        let mut terminal = outer_terminal();
+        terminal.write(b"\x1b[?5hx");
+        let style = first_cell(&mut terminal);
+        assert_eq!(style.fg.as_rgb(), Some([0, 0, 0]));
+        assert_eq!(style.bg.as_rgb(), Some([255, 255, 255]));
+        terminal.write(b"\x1b[?5l");
+        assert_eq!(first_cell(&mut terminal), Style::default());
+    }
+
+    #[test]
+    fn reverse_video_redraws_rows_nothing_wrote_to() {
+        let mut terminal = outer_terminal();
+        terminal.write(b"x");
+        first_cell(&mut terminal);
+        terminal.write(b"\x1b[?5h");
+        terminal.refresh();
+        let mut drawn = 0;
+        terminal.draw_rows(false, |_, _| drawn += 1);
+        assert_eq!(drawn, 1);
+        terminal.refresh();
+        terminal.draw_rows(false, |_, _| drawn += 1);
+        assert_eq!(drawn, 1, "nothing changed the second time");
+    }
+
+    #[test]
+    fn reverse_video_leaves_explicit_colors_alone() {
+        let mut terminal = outer_terminal();
+        terminal.write(b"\x1b[?5h\x1b[31mx");
+        let style = first_cell(&mut terminal);
+        assert_eq!(style.fg.as_palette(), Some(1));
+        assert_eq!(style.bg.as_rgb(), Some([255, 255, 255]));
+    }
+
     #[test]
     fn prefers_the_scheme_the_outer_terminal_reports() {
-        let white = Rgb {
-            r: 255,
-            g: 255,
-            b: 255,
-        };
         let guessed = OuterColors {
-            background: Some(white),
+            background: Some(WHITE),
             ..OuterColors::default()
         };
         assert_eq!(guessed.color_scheme(), ffi::COLOR_SCHEME_LIGHT);

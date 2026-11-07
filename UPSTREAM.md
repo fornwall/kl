@@ -45,6 +45,18 @@ grid reference lookup for each linked cell, which the documentation of
 `grid-introspection` warns against using in render loops. A hyperlink getter on
 the render state's cells would fit a renderer better. Not implemented in kl yet.
 
+### Reverse video does not mark anything dirty
+
+`Terminal.Dirty` has a `reverse_colors` flag, documented as set when the mode is
+modified, but only the Ghostty app's stream handler sets it. `setMode` in
+`stream_terminal.zig`, which is what libghostty-vt runs, does nothing for the
+mode. The foreground and background of the render state do trade places, but no
+row is marked dirty, so a renderer leaves everything nothing wrote to in the old
+colors.
+
+Today: kl compares the colors of each frame with the last one, and draws every
+row if they differ. If the library sets the flag: that comparison can go.
+
 ### Source tarballs for a commit
 
 `libghostty-vt-source.tar.gz` holds just what the library needs, but it is only

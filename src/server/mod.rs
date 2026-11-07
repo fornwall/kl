@@ -55,11 +55,6 @@ const STARTUP_TIME: Duration = Duration::from_secs(10);
 /// must not keep the server alive.
 const GOODBYE_TIME: Duration = Duration::from_secs(1);
 
-/// Asks the outer terminal about its colors, for programs that want to know.
-/// The server does this rather than the client, since it needs to ask again
-/// when the color scheme changes.
-const COLOR_QUERIES: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n";
-
 struct Connection {
     id: u64,
     stream: UnixStream,
@@ -163,6 +158,18 @@ enum Lifecycle {
     /// Running out of windows from here on means the end.
     Running,
     Quitting,
+}
+
+/// Asks the outer terminal about its colors, for programs that want to know.
+/// The server does this rather than the client, since it needs to ask again
+/// when the color scheme changes.
+fn color_queries() -> Vec<u8> {
+    let mut queries = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b]4".to_vec();
+    for index in 0..=u8::MAX {
+        queries.extend_from_slice(format!(";{index};?").as_bytes());
+    }
+    queries.extend_from_slice(b"\x1b\\");
+    queries
 }
 
 /// OSC 9 for what it can carry. It has no title, and a body starting with a
@@ -449,7 +456,7 @@ impl Server {
         }
         self.renderer.invalidate();
         self.dirty = true;
-        self.send_output(COLOR_QUERIES);
+        self.send_output(&color_queries());
     }
 
     fn run_client_command(&mut self, id: u64, version: u32, args: &[String]) {

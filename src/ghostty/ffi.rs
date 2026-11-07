@@ -21,6 +21,7 @@ pub const OPT_SIZE: c_int = 7;
 pub const OPT_COLOR_SCHEME: c_int = 8;
 pub const OPT_COLOR_FOREGROUND: c_int = 12;
 pub const OPT_COLOR_BACKGROUND: c_int = 13;
+pub const OPT_COLOR_PALETTE: c_int = 15;
 pub const OPT_SELECTION: c_int = 22;
 pub const OPT_CLIPBOARD_WRITE: c_int = 27;
 pub const OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
@@ -37,6 +38,9 @@ pub const DATA_SCROLLBAR: c_int = 9;
 pub const DATA_MOUSE_TRACKING: c_int = 11;
 pub const DATA_TITLE: c_int = 12;
 pub const DATA_PWD: c_int = 13;
+pub const DATA_COLOR_FOREGROUND_DEFAULT: c_int = 22;
+pub const DATA_COLOR_BACKGROUND_DEFAULT: c_int = 23;
+pub const DATA_COLOR_PALETTE_DEFAULT: c_int = 25;
 pub const DATA_SELECTION: c_int = 31;
 pub const DATA_MODE: c_int = 37;
 #[cfg(test)]
@@ -58,6 +62,7 @@ pub const POINT_VIEWPORT: c_int = 1;
 pub const RENDER_DATA_DIRTY: c_int = 3;
 pub const RENDER_DATA_ROW_ITERATOR: c_int = 4;
 pub const RENDER_DATA_CURSOR: c_int = 18;
+pub const RENDER_DATA_COLORS: c_int = 19;
 
 pub const RENDER_DIRTY_FULL: c_int = 2;
 
@@ -81,6 +86,7 @@ pub const CELL_CONTENT_BG_RGB: c_int = 3;
 pub const CELL_WIDE_WIDE: c_int = 1;
 pub const CELL_WIDE_SPACER_TAIL: c_int = 2;
 
+pub const STYLE_COLOR_NONE: u8 = 0;
 pub const STYLE_COLOR_PALETTE: u8 = 1;
 pub const STYLE_COLOR_RGB: u8 = 2;
 
@@ -230,6 +236,16 @@ pub struct RenderCursor {
     pub blinking: bool,
     pub password_input: bool,
     pub visual_style: c_int,
+}
+
+#[repr(C)]
+pub struct RenderColors {
+    pub size: usize,
+    pub background: Rgb,
+    pub foreground: Rgb,
+    pub cursor: Rgb,
+    pub cursor_has_value: bool,
+    pub palette: [Rgb; 256],
 }
 
 #[repr(C)]

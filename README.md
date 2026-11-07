@@ -54,8 +54,8 @@ each target has been verified.
 
 - **One client at a time.** A new client takes over from the one attached.
 - **Not everything programs ask for gets through.** OSC 8 hyperlinks, Kitty
-  graphics, mouse pointer shapes, palette changes and reverse video stop at kl,
-  and SGR-pixels mouse reports give cells rather than real pixels.
+  graphics and mouse pointer shapes stop at kl, and SGR-pixels mouse reports give
+  cells rather than real pixels.
 - **Programs cannot read the clipboard.** They can write to it, but who should be
   allowed to read it is undecided, so OSC 52 queries get no answer.
 - **`restart-server` has some rough edges:**

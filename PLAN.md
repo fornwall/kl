@@ -22,8 +22,9 @@ The first iteration has the core of tmux, with no configuration:
   and libghostty-vt's encoders towards panes. Programs get the encoding they
   asked for, as if no multiplexer was in between.
 - Clipboard writes, bells, titles, desktop notifications and progress reports
-  reach the outer terminal, and its default colors and color scheme reach
-  programs that ask for them, also when they change.
+  reach the outer terminal, and its colors and color scheme reach programs that
+  ask for them, also when they change. Colors a program changes for itself, with
+  OSC 4, 10 and 11 or reverse video, stay in its pane.
 
 ### What has and has not been verified
 
@@ -90,9 +91,6 @@ Things panes can ask for that stop at kl today.
   images and placements.
 - Reading the clipboard (OSC 52 `?`), which needs a decision on who may do that.
 - Mouse pointer shapes (OSC 22), and SGR-pixels mouse reports at real pixels.
-- Palette changes (OSC 4). Colors are passed on by index, so a program that
-  redefines the palette looks different from running it directly.
-- Reverse video (DECSCNM).
 
 ### 6. Clients and persistence
 

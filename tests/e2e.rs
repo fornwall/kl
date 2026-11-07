@@ -19,6 +19,7 @@ mod ghostty;
 #[path = "../src/sys.rs"]
 mod sys;
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
@@ -31,7 +32,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
-use ghostty::{KeyAction, KeyInput, Notification, OuterColors, Progress, Rgb, Terminal, Width};
+use ghostty::{
+    KeyAction, KeyInput, Notification, OuterColors, Progress, Rgb, Style, Terminal, Width,
+};
 use sys::WinSize;
 
 const KL: &str = env!("CARGO_BIN_EXE_kl");
@@ -46,6 +49,11 @@ const OUTER_BACKGROUND: Rgb = Rgb {
     r: 0x11,
     g: 0x22,
     b: 0x33,
+};
+const OUTER_RED: Rgb = Rgb {
+    r: 0xaa,
+    g: 0xbb,
+    b: 0xcc,
 };
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
@@ -117,6 +125,7 @@ impl Screen {
         terminal.set_outer_colors(&OuterColors {
             foreground: Some(OUTER_FOREGROUND),
             background: Some(OUTER_BACKGROUND),
+            palette: BTreeMap::from([(1, OUTER_RED)]),
             dark: Some(true),
         });
         let mut screen = Self {
@@ -227,6 +236,43 @@ impl Screen {
                 Instant::now() < deadline,
                 "the outer terminal shows {:?}",
                 self.terminal.progress()
+            );
+        }
+    }
+
+    /// The style of the first character of `text`, once it is on the screen.
+    fn style_of(&mut self, text: &str) -> Style {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            self.pump();
+            self.terminal.refresh();
+            let mut found = None;
+            self.terminal.draw_rows(true, |_, cells| {
+                let line: String = cells.iter().map(|cell| cell.text.as_str()).collect();
+                if let Some(at) = line.find(text) {
+                    let x = line.get(..at).unwrap().chars().count();
+                    found = Some(cells[x].style);
+                }
+            });
+            if let Some(style) = found {
+                return style;
+            }
+            assert!(Instant::now() < deadline, "no {text} on the screen");
+        }
+    }
+
+    /// Waits for `text` to get this style, which can lag behind the text.
+    fn wait_for_style(&mut self, text: &str, done: impl Fn(Style) -> bool) -> Style {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let style = self.style_of(text);
+            if done(style) {
+                return style;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{text} has the style {style:?}. The screen shows:\n{}",
+                self.lines().join("\n")
             );
         }
     }
@@ -1403,8 +1449,8 @@ fn forwards_clipboard_writes_to_the_outer_terminal() {
 #[test]
 fn programs_can_query_the_outer_colors() {
     let mut screen = Screen::new(80, 24);
-    screen.run(r"printf '\033]11;?\033\\'; cat -v");
-    screen.enter();
+    // The tty echoes the reply, which is all this needs to see.
+    screen.run(r"printf '\033]11;?\033\\'");
     screen.wait_for_text("rgb:1111/2222/3333");
 }
 
@@ -1424,16 +1470,82 @@ fn programs_hear_when_the_color_scheme_changes() {
         foreground: Some(OUTER_BACKGROUND),
         background: Some(OUTER_FOREGROUND),
         dark: Some(false),
+        ..OuterColors::default()
     });
     screen.prefix("0");
     screen.wait_for_text("^[[?997;2n");
 
     // The query is answered from the same knowledge, and the new colors are in.
     screen.prefix("o");
-    screen.run(r"printf '\033[?996n\033]11;?\033\\'; cat -v");
-    screen.enter();
+    screen.run(r"printf '\033[?996n\033]11;?\033\\'");
     let lines = screen.wait_for_text("rgb:eeee/dddd/cccc");
-    assert!(lines.iter().any(|line| line.contains("^[[?997;2n")));
+    let reply = lines.iter().find(|line| line.contains("rgb:eeee"));
+    assert!(reply.unwrap().contains("^[[?997;2n"), "{reply:?}");
+}
+
+#[test]
+fn programs_can_query_the_outer_palette() {
+    let mut screen = Screen::new(80, 24);
+    screen.run(r"printf '\033]4;1;?\033\\'");
+    screen.wait_for_text("rgb:aaaa/bbbb/cccc");
+}
+
+/// Splits the window and returns with the left pane active.
+fn two_panes() -> Screen {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("%");
+    screen.wait_for("a prompt in the new pane", |lines| lines[0].ends_with("│$"));
+    screen.prefix("o");
+    screen
+}
+
+#[test]
+fn a_redefined_color_stays_in_its_pane() {
+    let mut screen = two_panes();
+    screen.run(r"printf '\033]4;1;rgb:12/34/56\033\\\033[31mle''fty\033[0m\n'");
+    let style = screen.style_of("lefty");
+    assert_eq!(style.fg.as_rgb(), Some([0x12, 0x34, 0x56]));
+
+    screen.prefix("o");
+    screen.run(r"printf '\033[31mrigh''ty\033[0m\n'");
+    assert_eq!(screen.style_of("righty").fg.as_palette(), Some(1));
+    assert!(!screen.raw_text().contains("\x1b]4;1;rgb"));
+
+    screen.prefix("o");
+    screen.run(r"printf '\033]104;1\033\\'");
+    screen.wait_for_style("lefty", |style| style.fg.as_palette() == Some(1));
+}
+
+#[test]
+fn a_changed_background_stays_in_its_pane() {
+    let mut screen = two_panes();
+    screen.run(r"printf '\033]11;rgb:12/34/56\033\\le''fty\n'");
+    let style = screen.style_of("lefty");
+    assert_eq!(style.bg.as_rgb(), Some([0x12, 0x34, 0x56]));
+    screen.prefix("o");
+    screen.run("echo righ''ty");
+    assert_eq!(screen.style_of("righty"), Style::default());
+    assert!(!screen.raw_text().contains("\x1b]11;rgb"));
+}
+
+#[test]
+fn reverse_video_stays_in_its_pane() {
+    let mut screen = two_panes();
+    // Written first, so that only the change of mode can recolor it.
+    screen.run("echo le''fty");
+    assert_eq!(screen.style_of("lefty"), Style::default());
+    screen.run(r"printf '\033[?5h'");
+    let style = screen.wait_for_style("lefty", |style| style != Style::default());
+    assert_eq!(style.fg.as_rgb(), Some([0x11, 0x22, 0x33]));
+    assert_eq!(style.bg.as_rgb(), Some([0xee, 0xdd, 0xcc]));
+
+    screen.prefix("o");
+    screen.run("echo righ''ty");
+    assert_eq!(screen.style_of("righty"), Style::default());
+
+    screen.prefix("o");
+    screen.run(r"printf '\033[?5l'");
+    screen.wait_for_style("lefty", |style| style == Style::default());
 }
 
 #[test]
