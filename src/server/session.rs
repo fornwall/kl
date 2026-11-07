@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::layout::{self, Node, PaneId, Rect};
-use super::pane::{Pane, Spawn};
+use super::pane::{self, Pane, Spawn};
 use crate::command::{Direction, SplitKind};
 use crate::ghostty::{Progress, Rgb};
 use crate::sys::WinSize;
@@ -192,7 +192,7 @@ impl Session {
         let window = Window {
             index,
             automatic_name: name.is_none(),
-            name: name.unwrap_or_else(|| "kl".to_owned()),
+            name: name.unwrap_or_else(|| pane::default_name(program)),
             root: Node::Leaf(id),
             active: id,
             last_active: None,

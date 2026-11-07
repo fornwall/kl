@@ -39,6 +39,11 @@ const ESCAPE_TIME: Duration = Duration::from_millis(25);
 /// How often to refresh window names and the clock.
 const TICK_TIME: Duration = Duration::from_secs(1);
 
+/// How long after something happened to look at what runs in each window. A
+/// shell takes a moment to start what was typed, and may print nothing when it
+/// does, so looking right away would see the shell itself.
+const NAME_DELAY: Duration = Duration::from_millis(50);
+
 /// How long a server waits for its first client before giving up.
 const STARTUP_TIME: Duration = Duration::from_secs(10);
 
@@ -133,6 +138,8 @@ pub struct Server {
     last_tick: Instant,
     started_at: Instant,
     escape_since: Option<Instant>,
+    /// When to next look at what runs in each window, ahead of the tick.
+    names_due: Option<Instant>,
     lifecycle: Lifecycle,
     exit_message: &'static str,
 }
@@ -209,6 +216,7 @@ pub fn run(socket: &Path) -> Result<(), Box<dyn Error>> {
         last_tick: now,
         started_at: now,
         escape_since: None,
+        names_due: None,
         lifecycle: Lifecycle::Starting,
         exit_message: "[exited]",
     };
@@ -271,6 +279,9 @@ impl Server {
         }
         if let Some(deadline) = self.ui.message_deadline() {
             next = next.min(deadline);
+        }
+        if let Some(due) = self.names_due {
+            next = next.min(due);
         }
         next
     }
@@ -443,6 +454,7 @@ impl Server {
     }
 
     fn after_read(&mut self, id: PaneId, activity: &Activity) {
+        self.names_may_change();
         let visible = self.session.is_visible(id);
         self.dirty |= visible || activity.title_changed;
         for text in &activity.clipboard {
@@ -507,6 +519,9 @@ impl Server {
         }
         self.dirty |= self.ui.expire_message();
         self.dirty |= self.hold_deadline().is_some_and(|deadline| now >= deadline);
+        if self.names_due.is_some_and(|due| now >= due) {
+            self.refresh_window_names();
+        }
         if now >= self.last_tick + TICK_TIME {
             self.last_tick = now;
             self.refresh_window_names();
@@ -517,14 +532,24 @@ impl Server {
         }
     }
 
+    /// Something happened that may put another program in the foreground.
+    fn names_may_change(&mut self) {
+        self.names_due
+            .get_or_insert_with(|| Instant::now() + NAME_DELAY);
+    }
+
     fn refresh_window_names(&mut self) {
+        self.names_due = None;
         for window in &mut self.session.windows {
             if !window.automatic_name {
                 continue;
             }
             let pane = self.session.panes.get(&window.active);
-            if let Some(name) = pane.and_then(pane::Pane::foreground_name) {
+            if let Some(name) = pane.and_then(pane::Pane::foreground_name)
+                && name != window.name
+            {
                 window.name = name;
+                self.dirty = true;
             }
         }
     }

@@ -69,6 +69,20 @@ fn user_shell() -> String {
         .unwrap_or_else(|| "/bin/sh".to_owned())
 }
 
+/// What a window should be called before there is a foreground program to name
+/// it after, by the same rules as tmux.
+pub fn default_name(program: &[String]) -> String {
+    let line = program.join(" ");
+    let line = if line.is_empty() { user_shell() } else { line };
+    let line = line.trim_start_matches('"');
+    let line = line.split('"').next().unwrap_or(line);
+    let line = line.strip_prefix("exec ").unwrap_or(line);
+    let word = line.trim_start_matches([' ', '-']);
+    let word = word.split(' ').next().unwrap_or(word);
+    let name = word.rsplit('/').next().unwrap_or(word);
+    name.to_owned()
+}
+
 /// Starts the shell as a login shell, with the customary dash in `argv[0]`.
 fn shell_command() -> Command {
     let shell = user_shell();
@@ -312,6 +326,20 @@ fn percent_decode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn name_of(program: &[&str]) -> String {
+        let words: Vec<String> = program.iter().map(|word| (*word).to_owned()).collect();
+        default_name(&words)
+    }
+
+    #[test]
+    fn names_a_window_after_its_program() {
+        assert_eq!(name_of(&["top"]), "top");
+        assert_eq!(name_of(&["vim -p a b"]), "vim");
+        assert_eq!(name_of(&["/usr/bin/tail", "-f", "x"]), "tail");
+        assert_eq!(name_of(&["exec nvim"]), "nvim");
+        assert_eq!(name_of(&["\"/opt/tool\" -x"]), "tool");
+    }
 
     #[test]
     fn decodes_percent_escapes() {

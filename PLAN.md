@@ -62,7 +62,6 @@ What is missing for daily use compared with tmux.
 - `-t` targets for commands, and format strings for `list-*` and
   `display-message`.
 - Activity monitoring for windows, next to the bell flag.
-- Show a window's name right away, instead of at the next tick.
 
 ### 4. Copy mode
 

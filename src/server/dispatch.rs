@@ -161,6 +161,7 @@ impl Server {
     }
 
     pub fn handle_event(&mut self, event: Event) {
+        self.names_may_change();
         match event {
             Event::Key(event) => self.handle_key(&event),
             Event::Mouse(event) => self.handle_mouse(event),
@@ -318,6 +319,7 @@ impl Server {
     /// Runs a command, returning any output for the user.
     pub fn execute(&mut self, command: Command) -> Result<String, String> {
         self.dirty = true;
+        self.names_may_change();
         match command {
             Command::CopyMode { page_up } => self.start_copy_mode(page_up),
             Command::DetachClient => self.detach(),

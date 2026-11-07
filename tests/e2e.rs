@@ -500,6 +500,35 @@ fn renames_a_window() {
 }
 
 #[test]
+fn a_new_window_has_a_name_from_the_start() {
+    let screen = Screen::new(80, 24);
+    assert!(
+        screen
+            .command(&["new-window", "sleep 100"])
+            .status
+            .success()
+    );
+    let output = screen.command(&["list-windows"]);
+    let windows = String::from_utf8_lossy(&output.stdout);
+    assert!(windows.contains("1: sleep "), "{windows}");
+}
+
+#[test]
+fn window_names_follow_what_runs_in_the_foreground() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("sleep 100");
+    screen.wait_for("the name of the program", |lines| {
+        lines
+            .last()
+            .is_some_and(|status| status.contains("0:sleep*"))
+    });
+    screen.ctrl('c');
+    screen.wait_for("the name of the shell", |lines| {
+        lines.last().is_some_and(|status| status.contains("0:sh*"))
+    });
+}
+
+#[test]
 fn runs_commands_from_the_prompt() {
     let mut screen = Screen::new(80, 24);
     screen.prefix(":");
