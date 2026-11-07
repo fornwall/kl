@@ -35,6 +35,9 @@ const CONTINUATION_BYTES: usize = 64 * 1024;
 
 const VERSION_REPLY: &str = concat!("kl ", env!("CARGO_PKG_VERSION"));
 
+/// How close together clicks must be to count as a double or triple click.
+pub const MULTI_CLICK_TIME: Duration = Duration::from_millis(400);
+
 pub const STYLE_BOLD: u16 = 1 << 0;
 pub const STYLE_ITALIC: u16 = 1 << 1;
 pub const STYLE_FAINT: u16 = 1 << 2;
@@ -217,6 +220,13 @@ impl Line {
         }
         x
     }
+}
+
+/// A way the viewport can follow a pointer at its edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Autoscroll {
+    Up,
+    Down,
 }
 
 /// A place a search found its text, as positions of the screen in reading order.
@@ -679,6 +689,8 @@ struct Handles {
     terminal: ffi::Handle,
     /// Made once something is searched for.
     search: ffi::Handle,
+    /// What the pointer is up to in selecting text.
+    gesture: ffi::Handle,
     render_state: ffi::Handle,
     rows: ffi::Handle,
     cells: ffi::Handle,
@@ -693,6 +705,7 @@ impl Handles {
         Self {
             terminal: ptr::null_mut(),
             search: ptr::null_mut(),
+            gesture: ptr::null_mut(),
             render_state: ptr::null_mut(),
             rows: ptr::null_mut(),
             cells: ptr::null_mut(),
@@ -708,6 +721,8 @@ impl Handles {
     fn allocate(&mut self) -> Result<(), Error> {
         let none = ptr::null();
         // SAFETY: A null allocator selects the default, and the out pointer is valid.
+        check(unsafe { ffi::ghostty_selection_gesture_new(none, &raw mut self.gesture) })?;
+        // SAFETY: As above.
         check(unsafe { ffi::ghostty_render_state_new(none, &raw mut self.render_state) })?;
         // SAFETY: As above.
         check(unsafe { ffi::ghostty_render_state_row_iterator_new(none, &raw mut self.rows) })?;
@@ -743,6 +758,8 @@ impl Drop for Handles {
         unsafe { ffi::ghostty_render_state_free(self.render_state) };
         // SAFETY: As above. The search goes before the terminal it holds state in.
         unsafe { ffi::ghostty_search_free(self.search) };
+        // SAFETY: As above, and the gesture is passed the terminal it was used with.
+        unsafe { ffi::ghostty_selection_gesture_free(self.gesture, self.terminal) };
         // SAFETY: As above.
         unsafe { ffi::ghostty_terminal_free(self.terminal) };
     }
@@ -765,6 +782,8 @@ pub struct Terminal {
     row: Vec<Cell>,
     /// As of the frame being drawn.
     own_colors: OwnColors,
+    /// What times the clicks are told apart by start from.
+    clock: Instant,
     compression: Compression,
 }
 
@@ -840,6 +859,7 @@ impl Terminal {
             effects,
             row: Vec::new(),
             own_colors: OwnColors::default(),
+            clock: Instant::now(),
             compression: Compression::default(),
         };
         terminal.register_effects()?;
@@ -1593,51 +1613,120 @@ impl Terminal {
         matches
     }
 
-    /// Selects what `find` comes up with for a viewport position.
-    fn select_around(
-        &mut self,
-        x: u16,
-        y: u16,
-        find: impl FnOnce(ffi::GridRef, *mut ffi::Selection) -> c_int,
-    ) {
+    /// The left button went down at a viewport position, which starts selecting.
+    /// A second and a third press in that spot select a word and a line.
+    pub fn press_selection(&mut self, x: u16, y: u16) {
         let Some(grid_ref) = self.viewport_ref(x, y) else {
             return;
         };
-        let mut selection = selection_at(grid_ref);
-        if find(grid_ref, &raw mut selection) == ffi::SUCCESS {
+        let mut event = GestureEvent::new(ffi::GESTURE_EVENT_PRESS);
+        let now = self.clock.elapsed().as_nanos();
+        let now = u64::try_from(now).unwrap_or(u64::MAX);
+        let interval = u64::try_from(MULTI_CLICK_TIME.as_nanos()).unwrap_or(u64::MAX);
+        event.set(ffi::GESTURE_OPT_REF, &grid_ref);
+        event.set(ffi::GESTURE_OPT_POSITION, &cell_center(x, y));
+        event.set(ffi::GESTURE_OPT_REPEAT_DISTANCE, &0.5_f64);
+        event.set(ffi::GESTURE_OPT_TIME_NS, &now);
+        event.set(ffi::GESTURE_OPT_REPEAT_INTERVAL_NS, &interval);
+        match self.fire_gesture(&event) {
+            Some(selection) => self.set_selection(&selection),
+            None => self.clear_selection(),
+        }
+    }
+
+    /// The pointer moved to a viewport position with the button down. `edge`
+    /// says if it wants the viewport to move, for [`Terminal::autoscroll_selection`].
+    pub fn drag_selection(&mut self, x: u16, y: u16, edge: Option<Autoscroll>) {
+        let Some(grid_ref) = self.viewport_ref(x, y) else {
+            return;
+        };
+        let mut event = GestureEvent::new(ffi::GESTURE_EVENT_DRAG);
+        event.set(ffi::GESTURE_OPT_REF, &grid_ref);
+        self.continue_gesture(event, x, y, edge);
+    }
+
+    /// Scrolls a row further while the pointer stays at the edge it is at, and
+    /// takes the selection along. Returns whether there is more to do.
+    pub fn autoscroll_selection(&mut self, x: u16, y: u16, edge: Autoscroll) -> bool {
+        let mut event = GestureEvent::new(ffi::GESTURE_EVENT_AUTOSCROLL_TICK);
+        let viewport = ffi::PointCoordinate { x, y: u32::from(y) };
+        event.set(ffi::GESTURE_OPT_VIEWPORT, &viewport);
+        self.continue_gesture(event, x, y, Some(edge));
+        let none = ffi::GESTURE_AUTOSCROLL_NONE;
+        self.gesture_value(ffi::GESTURE_DATA_AUTOSCROLL, none)
+            .is_some_and(|scroll| scroll != none)
+    }
+
+    /// The button came up.
+    pub fn release_selection(&self) {
+        self.fire_gesture(&GestureEvent::new(ffi::GESTURE_EVENT_RELEASE));
+    }
+
+    /// Passes on a drag. The library cares about the height only for what it
+    /// makes of the position, so that is how `edge` gets there. Pointers are not
+    /// more precise than a cell here, where the library goes by how far into a
+    /// cell they are, so that a drag by cell has to be worked out here too.
+    fn continue_gesture(
+        &mut self,
+        mut event: GestureEvent,
+        x: u16,
+        y: u16,
+        edge: Option<Autoscroll>,
+    ) {
+        let height = match edge {
+            Some(Autoscroll::Up) => 0.0,
+            None => 1.5,
+            Some(Autoscroll::Down) => 3.0,
+        };
+        let geometry = ffi::GestureGeometry {
+            columns: u32::from(self.width()),
+            cell_width: 1,
+            padding_left: 0,
+            screen_height: 3,
+        };
+        let position = ffi::SurfacePosition {
+            x: f64::from(x),
+            y: height,
+        };
+        event.set(ffi::GESTURE_OPT_GEOMETRY, &geometry);
+        event.set(ffi::GESTURE_OPT_POSITION, &position);
+        let selection = self.fire_gesture(&event);
+        let cell = ffi::GESTURE_BEHAVIOR_CELL;
+        let by_cell = self.gesture_value(ffi::GESTURE_DATA_BEHAVIOR, cell) == Some(cell);
+        let anchor = self.gesture_value(ffi::GESTURE_DATA_ANCHOR, NO_REF);
+        if let (true, Some(start), Some(end)) = (by_cell, anchor, self.viewport_ref(x, y)) {
+            self.set_selection(&ffi::Selection {
+                start,
+                end,
+                rectangle: false,
+            });
+        } else if let Some(selection) = selection {
             self.set_selection(&selection);
         }
     }
 
-    /// Selects the word at a viewport position.
-    pub fn select_word(&mut self, x: u16, y: u16) {
-        let terminal = self.handles.terminal;
-        self.select_around(x, y, |grid_ref, selection| {
-            let options = ffi::SelectWordOptions {
-                size: size_of::<ffi::SelectWordOptions>(),
-                grid_ref,
-                boundary_codepoints: ptr::null(),
-                boundary_codepoints_len: 0,
-            };
-            // SAFETY: The terminal is live, and both pointers are valid.
-            unsafe { ffi::ghostty_terminal_select_word(terminal, &raw const options, selection) }
-        });
+    /// Hands the gesture an event, and returns the selection that comes of it.
+    fn fire_gesture(&self, event: &GestureEvent) -> Option<ffi::Selection> {
+        let mut selection = selection_at(NO_REF);
+        let handles = &self.handles;
+        let out = &raw mut selection;
+        // SAFETY: All three handles are live, and `out` is valid for a write.
+        let result = unsafe {
+            ffi::ghostty_selection_gesture_event(handles.gesture, handles.terminal, event.0, out)
+        };
+        (result == ffi::SUCCESS).then_some(selection)
     }
 
-    /// Selects the line at a viewport position.
-    pub fn select_line(&mut self, x: u16, y: u16) {
-        let terminal = self.handles.terminal;
-        self.select_around(x, y, |grid_ref, selection| {
-            let options = ffi::SelectLineOptions {
-                size: size_of::<ffi::SelectLineOptions>(),
-                grid_ref,
-                whitespace: ptr::null(),
-                whitespace_len: 0,
-                semantic_prompt_boundary: false,
-            };
-            // SAFETY: The terminal is live, and both pointers are valid.
-            unsafe { ffi::ghostty_terminal_select_line(terminal, &raw const options, selection) }
-        });
+    /// Reads something about the gesture, into a value of the type `data` has.
+    fn gesture_value<T>(&self, data: c_int, mut value: T) -> Option<T> {
+        let handles = &self.handles;
+        let out = (&raw mut value).cast();
+        // SAFETY: Both handles are live, and `out` is valid for what `data`
+        // documents, as each caller picks `T` to match.
+        let result = unsafe {
+            ffi::ghostty_selection_gesture_get(handles.gesture, handles.terminal, data, out)
+        };
+        (result == ffi::SUCCESS).then_some(value)
     }
 
     pub fn clear_selection(&mut self) {
@@ -1687,6 +1776,48 @@ fn decode_snapshot(snapshot: &[u8], terminal: &mut ffi::Handle) -> Result<(), Er
     // SAFETY: Created above and not used again. It only borrowed the terminal.
     unsafe { ffi::ghostty_snapshot_decoder_free(decoder) };
     result
+}
+
+/// One event for the selection gesture, which lives for as long as it takes to
+/// hand it over.
+struct GestureEvent(ffi::Handle);
+
+impl GestureEvent {
+    fn new(kind: c_int) -> Self {
+        let mut event = ptr::null_mut();
+        let none = ptr::null();
+        // SAFETY: A null allocator selects the default, and the out pointer is
+        // valid. A failure leaves a null event, which the gesture turns down.
+        best_effort(check(unsafe {
+            ffi::ghostty_selection_gesture_event_new(none, &raw mut event, kind)
+        }));
+        Self(event)
+    }
+
+    /// Sets an option to a value of the type it documents, which gets copied.
+    fn set<T>(&mut self, option: c_int, value: &T) {
+        let value = ptr::from_ref(value).cast();
+        // SAFETY: The event is live or null, which the library turns down, and
+        // `value` is valid for what `option` documents as each caller makes sure.
+        best_effort(check(unsafe {
+            ffi::ghostty_selection_gesture_event_set(self.0, option, value)
+        }));
+    }
+}
+
+impl Drop for GestureEvent {
+    fn drop(&mut self) {
+        // SAFETY: Owned by this struct and not used again. Null is fine.
+        unsafe { ffi::ghostty_selection_gesture_event_free(self.0) };
+    }
+}
+
+/// The middle of a cell, as the gesture's idea of where the pointer is.
+fn cell_center(x: u16, y: u16) -> ffi::SurfacePosition {
+    ffi::SurfacePosition {
+        x: f64::from(x) + 0.5,
+        y: f64::from(y) + 0.5,
+    }
 }
 
 const NO_REF: ffi::GridRef = ffi::GridRef {
@@ -2181,13 +2312,12 @@ mod tests {
         assert_layout!(m, "GhosttyGridRef", ffi::GridRef, "node" => node, "x" => x, "y" => y);
         assert_layout!(m, "GhosttySelection", ffi::Selection,
             "start" => start, "end" => end, "rectangle" => rectangle);
-        assert_layout!(m, "GhosttyTerminalSelectWordOptions", ffi::SelectWordOptions,
-            "size" => size, "ref" => grid_ref, "boundary_codepoints" => boundary_codepoints,
-            "boundary_codepoints_len" => boundary_codepoints_len);
-        assert_layout!(m, "GhosttyTerminalSelectLineOptions", ffi::SelectLineOptions,
-            "size" => size, "ref" => grid_ref, "whitespace" => whitespace,
-            "whitespace_len" => whitespace_len,
-            "semantic_prompt_boundary" => semantic_prompt_boundary);
+        assert_layout!(m, "GhosttySelectionBuffer", ffi::SelectionBuffer,
+            "ptr" => ptr, "cap" => cap, "len" => len);
+        assert_layout!(m, "GhosttySurfacePosition", ffi::SurfacePosition, "x" => x, "y" => y);
+        assert_layout!(m, "GhosttySelectionGestureGeometry", ffi::GestureGeometry,
+            "columns" => columns, "cell_width" => cell_width,
+            "padding_left" => padding_left, "screen_height" => screen_height);
         assert_layout!(m, "GhosttyTerminalModeConfig", ffi::ModeConfig,
             "mode" => mode, "value" => value);
         assert_layout!(m, "GhosttyDeviceAttributesPrimary", ffi::DeviceAttributesPrimary,
@@ -2792,10 +2922,123 @@ mod tests {
         terminal.select_start(0, 0);
         terminal.select_extend(4, 0);
         assert_eq!(terminal.selected_text().as_deref(), Some("hello"));
-        terminal.select_word(7, 0);
-        assert_eq!(terminal.selected_text().as_deref(), Some("world"));
         terminal.clear_selection();
         assert_eq!(terminal.selected_text(), None);
+    }
+
+    #[test]
+    fn a_second_and_third_press_select_a_word_and_a_line() {
+        let mut terminal = Terminal::new(20, 2).unwrap();
+        terminal.write(b"hello there world");
+        let press = |terminal: &mut Terminal| {
+            terminal.press_selection(7, 0);
+            terminal.release_selection();
+            terminal.selected_text()
+        };
+        assert_eq!(press(&mut terminal), None);
+        assert_eq!(press(&mut terminal).as_deref(), Some("there"));
+        assert_eq!(press(&mut terminal).as_deref(), Some("hello there world"));
+    }
+
+    #[test]
+    fn dragging_selects_from_the_pressed_cell_both_ways() {
+        let mut terminal = Terminal::new(20, 2).unwrap();
+        terminal.write(b"hello world");
+        terminal.press_selection(4, 0);
+        terminal.drag_selection(7, 0, None);
+        assert_eq!(terminal.selected_text().as_deref(), Some("o wo"));
+        terminal.drag_selection(1, 0, None);
+        assert_eq!(terminal.selected_text().as_deref(), Some("ello"));
+    }
+
+    #[test]
+    fn dragging_after_a_double_press_goes_by_word() {
+        let mut terminal = Terminal::new(40, 2).unwrap();
+        terminal.write(b"one two three four");
+        terminal.press_selection(5, 0);
+        terminal.release_selection();
+        terminal.press_selection(5, 0);
+        terminal.drag_selection(9, 0, None);
+        assert_eq!(terminal.selected_text().as_deref(), Some("two three"));
+    }
+
+    #[test]
+    fn a_drag_at_the_edge_scrolls_a_row_at_a_time() {
+        let mut terminal = Terminal::new(20, 3).unwrap();
+        for line in 0..20 {
+            terminal.write(format!("line {line}\r\n").as_bytes());
+        }
+        terminal.press_selection(0, 1);
+        terminal.drag_selection(0, 0, Some(Autoscroll::Up));
+        let below = |terminal: &Terminal| terminal.scrollbar().unwrap().lines_below();
+        assert_eq!(below(&terminal), 0, "ticks do the scrolling");
+        assert!(terminal.autoscroll_selection(0, 0, Autoscroll::Up));
+        assert!(terminal.autoscroll_selection(0, 0, Autoscroll::Up));
+        assert_eq!(below(&terminal), 2);
+        assert_eq!(
+            terminal.selected_text().as_deref(),
+            Some("line 16\nline 17\nline 18\nl"),
+            "the rows that scrolled in join the selection"
+        );
+    }
+
+    #[test]
+    fn searches_all_of_the_history() {
+        let mut terminal = Terminal::new(20, 3).unwrap();
+        for line in 0..50 {
+            terminal.write(format!("line {line}\r\n").as_bytes());
+        }
+        let matches = terminal.search("line 4");
+        assert_eq!(matches.len(), 11);
+        assert_eq!(terminal.match_count(), 11);
+        assert_eq!(matches[0].start, (0, 4));
+        assert_eq!(matches[0].end, (5, 4));
+        assert!(matches.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(terminal.visible_matches().iter().any(|m| m.start.1 == 49));
+
+        terminal.write(b"line 4 again");
+        assert_eq!(terminal.search("line 4").len(), 12);
+        terminal.end_search();
+        assert_eq!(terminal.match_count(), 0);
+        assert_eq!(terminal.visible_matches(), []);
+    }
+
+    #[test]
+    fn a_search_finds_text_across_a_wrapped_row() {
+        let mut terminal = Terminal::new(5, 3).unwrap();
+        terminal.write(b"abcdefgh");
+        let matches = terminal.search("defg");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].start, (3, 0));
+        assert_eq!(matches[0].end, (1, 1));
+        assert!(matches[0].contains(4, 0));
+        assert!(matches[0].contains(0, 1));
+        assert!(!matches[0].contains(2, 1));
+        assert!(!matches[0].contains(2, 0));
+    }
+
+    #[test]
+    fn reads_rows_of_the_screen() {
+        let mut terminal = Terminal::new(6, 3).unwrap();
+        terminal.write("ab \u{4e16}\r\nabcdefgh".as_bytes());
+        let line = terminal.screen_line(0);
+        assert_eq!(line.cells[..5], ['a', 'b', ' ', '\u{4e16}', '\0']);
+        assert_eq!(line.length(), 5);
+        assert_eq!(line.limit(), 3);
+        assert!(!line.wrapped);
+        assert!(terminal.screen_line(1).wrapped);
+        assert_eq!(terminal.screen_line(2).length(), 2);
+        assert_eq!(terminal.screen_line(9), Line::default());
+    }
+
+    #[test]
+    fn a_rectangle_keeps_its_rows_apart() {
+        let mut terminal = Terminal::new(4, 3).unwrap();
+        terminal.write(b"abcdefgh");
+        terminal.select_start(1, 0);
+        terminal.select_extend(2, 1);
+        terminal.set_selection_rectangle(true);
+        assert_eq!(terminal.selected_text().as_deref(), Some("bc\nfg"));
     }
 
     #[test]

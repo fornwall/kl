@@ -2308,6 +2308,100 @@ fn dragging_selects_and_copies_text() {
 }
 
 #[test]
+fn dragging_past_the_top_of_a_pane_scrolls_and_selects() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("seq 1 100");
+    let y = screen.wait_for_line("100");
+    screen.mouse(0, 2, y, true);
+    screen.mouse(32, 0, 0, true);
+    screen.wait_for("the view to scroll", |lines| lines[0].contains("[5/"));
+    screen.mouse(0, 0, 0, false);
+    let copied = screen.wait_for_clipboard();
+    let text = String::from_utf8_lossy(&copied[0]);
+    let first: u32 = text.lines().next().unwrap().parse().unwrap();
+    assert!(first < 78, "{text}");
+    assert!(text.ends_with("100"), "{text}");
+    screen.wait_for("the end of history", |lines| {
+        lines.iter().any(|line| line.trim() == "100") && !lines[0].contains('/')
+    });
+}
+
+#[test]
+fn dragging_past_the_bottom_of_a_pane_scrolls_back_down() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("seq 1 100");
+    screen.wait_for_line("100");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.key(key::PAGE_UP, 0, "", 0);
+    screen.key(key::PAGE_UP, 0, "", 0);
+    screen.wait_for("the view to scroll", |lines| lines[0].contains("[42/"));
+    screen.mouse(0, 0, 10, true);
+    // The status line is below the pane.
+    screen.mouse(32, 0, 23, true);
+    screen.wait_for("the view to scroll", |lines| lines[0].contains("[37/"));
+    screen.mouse(0, 0, 23, false);
+    let copied = screen.wait_for_clipboard();
+    let text = String::from_utf8_lossy(&copied[0]);
+    assert!(
+        text.lines().count() > 15,
+        "the rows that came into view count: {text}"
+    );
+}
+
+#[test]
+fn moving_along_the_top_row_while_dragging_does_not_scroll() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("seq 1 100");
+    let lines = screen.wait_for("the numbers", |lines| lines[22].trim() == "$");
+    let top = lines[0].trim().to_owned();
+    screen.mouse(0, 0, 0, true);
+    screen.mouse(32, 1, 0, true);
+    screen.wait_for_text("[0/");
+    std::thread::sleep(Duration::from_millis(120));
+    screen.mouse(0, 1, 0, false);
+    assert_eq!(screen.wait_for_clipboard(), [top.as_bytes()[..2].to_vec()]);
+}
+
+#[test]
+fn a_click_in_copy_mode_stays_in_copy_mode() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("seq 1 100");
+    screen.wait_for_line("100");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.click(3, 3);
+    screen.type_text("k");
+    screen.wait_for_text("[0/");
+    screen.type_text("q");
+    screen.wait_for_no_text("[0/");
+}
+
+#[test]
+fn dragging_after_a_double_click_selects_whole_words() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo one wordy three four");
+    let y = screen.wait_for_line("one wordy three four");
+    screen.click(6, y);
+    screen.mouse(0, 6, y, true);
+    screen.mouse(32, 11, y, true);
+    screen.mouse(0, 11, y, false);
+    assert_eq!(screen.wait_for_clipboard(), [b"wordy three".to_vec()]);
+}
+
+#[test]
+fn triple_click_selects_a_line() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo one wordy three");
+    let y = screen.wait_for_line("one wordy three");
+    screen.click(6, y);
+    screen.click(6, y);
+    assert_eq!(screen.wait_for_clipboard(), [b"wordy".to_vec()]);
+    screen.click(6, y);
+    assert_eq!(screen.wait_for_clipboard(), [b"one wordy three".to_vec()]);
+}
+
+#[test]
 fn double_click_selects_a_word() {
     let mut screen = Screen::new(80, 24);
     screen.run("clear; echo one wordy three");

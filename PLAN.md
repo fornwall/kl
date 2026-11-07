@@ -72,8 +72,6 @@ What is missing for daily use compared with tmux.
 
 ### 4. Copy mode
 
-- Scrolling while dragging a selection past the edge of a pane, which the
-  library's selection gesture API already handles.
 - Jumping between shell prompts, with semantic prompts from OSC 133.
 - Named paste buffers and `choose-buffer`.
 

@@ -851,6 +851,24 @@ pub fn selected_text(pane: &Pane) -> Option<String> {
     Some(text)
 }
 
+/// The selection is gone, for a new one to start with the mouse.
+pub const fn forget_selection(pane: &mut Pane) {
+    if let Some(mode) = &mut pane.copy_mode {
+        mode.selecting = Selecting::No;
+    }
+}
+
+/// A drag took the selection to where the pointer is, relative to the viewport.
+/// The cursor goes along, and keys go on from there.
+pub const fn follow_pointer(pane: &mut Pane, x: u16, y: u16) {
+    if let Some(mode) = &mut pane.copy_mode {
+        mode.x = x;
+        mode.y = y;
+        mode.selecting = Selecting::Cells;
+    }
+    pane.redraw = true;
+}
+
 /// Runs a command in a pane in copy mode.
 pub fn run(pane: &mut Pane, action: Action) -> Outcome {
     let Some(mut mode) = pane.copy_mode.take() else {

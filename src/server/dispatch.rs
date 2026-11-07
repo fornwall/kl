@@ -14,13 +14,14 @@ use super::{Lifecycle, Server, color_queries};
 use crate::command::{self, Command};
 use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
-    KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MouseAction, MouseButton, MouseInput,
+    Autoscroll, KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MULTI_CLICK_TIME, MouseAction,
+    MouseButton, MouseInput,
 };
 use crate::input::{Event, KeyEvent, MouseEvent};
 use crate::proto::ServerMessage;
 
-/// How close together clicks must be to count as a double or triple click.
-const MULTI_CLICK_TIME: Duration = Duration::from_millis(400);
+/// How long dragging at the edge of a pane takes to scroll a row, as in tmux.
+const AUTOSCROLL_TIME: Duration = Duration::from_millis(50);
 
 /// How long a repeatable binding keeps working without the prefix, which is
 /// tmux's `repeat-time`.
@@ -36,21 +37,43 @@ pub enum Drag {
     None,
     /// Moving the line between two panes.
     Divider(Divider),
-    /// Pressed in a pane, without having moved yet.
-    Pressed { pane: PaneId, x: u16, y: u16 },
-    /// Selecting text in a pane.
-    Selecting(PaneId),
+    /// Selecting text in a pane, from the press on.
+    Selecting(Selecting),
     /// A program asked for the mouse, so it gets everything until the release.
     Forwarding(PaneId),
 }
 
-/// The last click, for recognizing double and triple clicks.
+impl Drag {
+    /// When a pointer at the edge of a pane moves the text along next.
+    pub const fn next_scroll(&self) -> Option<Instant> {
+        match self {
+            Self::Selecting(Selecting {
+                scroll: Some((_, at)),
+                ..
+            }) => Some(*at),
+            _ => None,
+        }
+    }
+}
+
+/// The last click on a list, for recognizing double clicks.
 #[derive(Clone, Copy, Debug)]
 pub struct Click {
     at: Instant,
     x: u16,
     y: u16,
     count: u8,
+}
+
+/// The state of a drag that selects text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selecting {
+    pane: PaneId,
+    /// Where the pointer is, relative to the pane and inside of it.
+    x: u16,
+    y: u16,
+    /// Which way the view follows the pointer, and when it does so next.
+    scroll: Option<(Autoscroll, Instant)>,
 }
 
 const fn is_wheel(button: Option<MouseButton>) -> bool {
@@ -63,6 +86,20 @@ const fn is_wheel(button: Option<MouseButton>) -> bool {
                 | MouseButton::WheelRight
         )
     )
+}
+
+/// The way a pointer moving from `last` to `now` wants the view to go. Moving
+/// along the first or last row leaves it alone, for selecting text there.
+const fn edge_of(pane: &Pane, last: (u16, u16), now: (u16, u16)) -> Option<Autoscroll> {
+    if last.1 == now.1 && last.0 != now.0 {
+        None
+    } else if now.1 == 0 {
+        Some(Autoscroll::Up)
+    } else if now.1 + 1 >= pane.rect.height {
+        Some(Autoscroll::Down)
+    } else {
+        None
+    }
 }
 
 /// A position relative to a pane, held inside of it for drags that leave it.
@@ -680,8 +717,7 @@ impl Server {
                 }
             }
             Drag::Divider(divider) => self.drag_divider(&divider, event),
-            Drag::Pressed { pane, x, y } => self.drag_from_press(pane, (x, y), event),
-            Drag::Selecting(pane) => self.drag_selection(pane, event),
+            Drag::Selecting(selecting) => self.drag_selection(selecting, event),
             Drag::Forwarding(pane) => {
                 self.forward_mouse(pane, event);
                 if event.action == MouseAction::Release {
@@ -809,24 +845,19 @@ impl Server {
     }
 
     fn press_to_select(&mut self, id: PaneId, event: MouseEvent) {
-        let count = self.click_count(event);
         let Some(pane) = self.session.panes.get_mut(&id) else {
             return;
         };
         let (x, y) = in_pane(pane, event);
-        pane.terminal.clear_selection();
+        copy_mode::forget_selection(pane);
+        pane.terminal.press_selection(x, y);
         pane.redraw = true;
-        self.drag = match count {
-            1 => Drag::Pressed { pane: id, x, y },
-            2 => {
-                pane.terminal.select_word(x, y);
-                Drag::Selecting(id)
-            }
-            _ => {
-                pane.terminal.select_line(x, y);
-                Drag::Selecting(id)
-            }
-        };
+        self.drag = Drag::Selecting(Selecting {
+            pane: id,
+            x,
+            y,
+            scroll: None,
+        });
     }
 
     fn drag_divider(&mut self, divider: &Divider, event: MouseEvent) {
@@ -841,41 +872,67 @@ impl Server {
         }
     }
 
-    fn drag_from_press(&mut self, id: PaneId, start: (u16, u16), event: MouseEvent) {
-        match event.action {
-            MouseAction::Motion => {
-                if let Some(pane) = self.session.panes.get_mut(&id) {
-                    pane.terminal.select_start(start.0, start.1);
-                }
-                self.drag = Drag::Selecting(id);
-                self.drag_selection(id, event);
-            }
-            MouseAction::Release | MouseAction::Press => self.drag = Drag::None,
-        }
-    }
-
-    fn drag_selection(&mut self, id: PaneId, event: MouseEvent) {
-        let Some(pane) = self.session.panes.get_mut(&id) else {
+    fn drag_selection(&mut self, selecting: Selecting, event: MouseEvent) {
+        let Some(pane) = self.session.panes.get_mut(&selecting.pane) else {
             self.drag = Drag::None;
             return;
         };
-        if event.action == MouseAction::Motion {
-            let (x, y) = in_pane(pane, event);
-            pane.terminal.select_extend(x, y);
-            pane.redraw = true;
+        if event.action != MouseAction::Motion {
+            self.drag = Drag::None;
+            pane.terminal.release_selection();
+            let Some(text) = pane.terminal.selected_text() else {
+                return;
+            };
+            if pane.copy_mode.is_some() {
+                CopyMode::exit(pane);
+            } else {
+                pane.terminal.clear_selection();
+                pane.redraw = true;
+            }
+            self.store_buffer(text);
             return;
         }
-        self.drag = Drag::None;
-        let text = pane.terminal.selected_text();
-        if pane.copy_mode.is_some() {
-            CopyMode::exit(pane);
-        } else {
-            pane.terminal.clear_selection();
-            pane.redraw = true;
-        }
-        if let Some(text) = text {
-            self.store_buffer(text);
-        }
+        let (x, y) = in_pane(pane, event);
+        let edge = edge_of(pane, (selecting.x, selecting.y), (x, y));
+        // Going through copy mode as tmux does means that scrolling while
+        // selecting ends the way scrolling otherwise does.
+        CopyMode::enter(pane, false);
+        pane.terminal.drag_selection(x, y, edge);
+        copy_mode::follow_pointer(pane, x, y);
+        // It goes along right away, and at its own pace from there.
+        let scroll = edge.map(|edge| match selecting.scroll {
+            Some((current, at)) if current == edge => (edge, at),
+            _ => (edge, Instant::now()),
+        });
+        self.drag = Drag::Selecting(Selecting {
+            x,
+            y,
+            scroll,
+            ..selecting
+        });
+    }
+
+    /// Moves the text along with a pointer that stays at the edge of a pane.
+    pub fn autoscroll(&mut self) {
+        let Drag::Selecting(selecting) = self.drag else {
+            return;
+        };
+        let Some((edge, _)) = selecting.scroll else {
+            return;
+        };
+        let Some(pane) = self.session.panes.get_mut(&selecting.pane) else {
+            self.drag = Drag::None;
+            return;
+        };
+        let (x, y) = (selecting.x, selecting.y);
+        let goes_on = pane.terminal.autoscroll_selection(x, y, edge);
+        copy_mode::follow_pointer(pane, x, y);
+        self.dirty = true;
+        let next = Instant::now() + AUTOSCROLL_TIME;
+        self.drag = Drag::Selecting(Selecting {
+            scroll: goes_on.then_some((edge, next)),
+            ..selecting
+        });
     }
 
     fn wheel(&mut self, id: PaneId, event: MouseEvent) {

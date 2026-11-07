@@ -109,6 +109,20 @@ colors.
 Today: kl compares the colors of each frame with the last one, and draws every
 row if they differ. If the library sets the flag: that comparison can go.
 
+### Selection gestures from a pointer that only knows cells
+
+The selection gesture wants pixels. For a drag by cell it goes by how far into
+a cell the pointer is, and it asks to scroll when the pointer is within a pixel
+of the edge of the surface. A multiplexer only knows which cell the pointer is
+in, and its panes are not the surface.
+
+Today: kl uses the gesture for clicks, for dragging by word and line and for
+scrolling, and works around the rest in `continue_gesture`. It makes its own
+selection for a drag by cell, from `GHOSTTY_SELECTION_GESTURE_DATA_ANCHOR` to the
+cell under the pointer, and says which way to scroll through a made-up height. A
+cell-precise event would remove both, for example options that take the
+autoscroll direction and include both ends of a drag by cell.
+
 ### Searching like tmux
 
 `GHOSTTY_SEARCH_OPT_NEEDLE` always ignores the case of ASCII letters, and takes

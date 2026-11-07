@@ -308,6 +308,9 @@ impl Server {
         if let Some(since) = self.escape_since {
             next = next.min(since + ESCAPE_TIME);
         }
+        if let Some(at) = self.drag.next_scroll() {
+            next = next.min(at);
+        }
         if let Some(deadline) = self.ui.message_deadline() {
             next = next.min(deadline);
         }
@@ -567,6 +570,9 @@ impl Server {
             if let Some(event) = self.parser.flush_escape() {
                 self.handle_event(event);
             }
+        }
+        if self.drag.next_scroll().is_some_and(|at| now >= at) {
+            self.autoscroll();
         }
         self.dirty |= self.ui.expire_message();
         if self.ui.expire_pane_numbers() {

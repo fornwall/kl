@@ -108,6 +108,26 @@ pub const STYLE_COLOR_RGB: u8 = 2;
 pub const MOUSE_OPT_SIZE: c_int = 3;
 pub const MOUSE_OPT_ANY_BUTTON_PRESSED: c_int = 4;
 
+pub const GESTURE_EVENT_PRESS: c_int = 0;
+pub const GESTURE_EVENT_RELEASE: c_int = 1;
+pub const GESTURE_EVENT_DRAG: c_int = 2;
+pub const GESTURE_EVENT_AUTOSCROLL_TICK: c_int = 3;
+
+pub const GESTURE_OPT_REF: c_int = 1;
+pub const GESTURE_OPT_POSITION: c_int = 2;
+pub const GESTURE_OPT_REPEAT_DISTANCE: c_int = 3;
+pub const GESTURE_OPT_TIME_NS: c_int = 4;
+pub const GESTURE_OPT_REPEAT_INTERVAL_NS: c_int = 5;
+pub const GESTURE_OPT_GEOMETRY: c_int = 9;
+pub const GESTURE_OPT_VIEWPORT: c_int = 10;
+
+pub const GESTURE_DATA_AUTOSCROLL: c_int = 3;
+pub const GESTURE_DATA_BEHAVIOR: c_int = 4;
+pub const GESTURE_DATA_ANCHOR: c_int = 5;
+
+pub const GESTURE_AUTOSCROLL_NONE: c_int = 0;
+pub const GESTURE_BEHAVIOR_CELL: c_int = 0;
+
 pub const SEARCH_OPT_NEEDLE: c_int = 1;
 pub const SEARCH_DATA_TOTAL_MATCHES: c_int = 3;
 pub const SEARCH_DATA_MATCHES: c_int = 6;
@@ -217,28 +237,26 @@ pub struct Selection {
     pub rectangle: bool,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct SurfacePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[repr(C)]
+pub struct GestureGeometry {
+    pub columns: u32,
+    pub cell_width: u32,
+    pub padding_left: u32,
+    pub screen_height: u32,
+}
+
 #[repr(C)]
 pub struct SelectionBuffer {
     pub ptr: *mut Selection,
     pub cap: usize,
     pub len: usize,
-}
-
-#[repr(C)]
-pub struct SelectWordOptions {
-    pub size: usize,
-    pub grid_ref: GridRef,
-    pub boundary_codepoints: *const u32,
-    pub boundary_codepoints_len: usize,
-}
-
-#[repr(C)]
-pub struct SelectLineOptions {
-    pub size: usize,
-    pub grid_ref: GridRef,
-    pub whitespace: *const u32,
-    pub whitespace_len: usize,
-    pub semantic_prompt_boundary: bool,
 }
 
 #[repr(C)]
@@ -426,15 +444,30 @@ unsafe extern "C" {
         buf_len: usize,
         written: *mut usize,
     ) -> c_int;
-    pub fn ghostty_terminal_select_word(
+    pub fn ghostty_selection_gesture_new(allocator: *const c_void, gesture: *mut Handle) -> c_int;
+    pub fn ghostty_selection_gesture_free(gesture: Handle, terminal: Handle);
+    pub fn ghostty_selection_gesture_get(
+        gesture: Handle,
         terminal: Handle,
-        options: *const SelectWordOptions,
-        out: *mut Selection,
+        data: c_int,
+        value: *mut c_void,
     ) -> c_int;
-    pub fn ghostty_terminal_select_line(
+    pub fn ghostty_selection_gesture_event_new(
+        allocator: *const c_void,
+        event: *mut Handle,
+        kind: c_int,
+    ) -> c_int;
+    pub fn ghostty_selection_gesture_event_free(event: Handle);
+    pub fn ghostty_selection_gesture_event_set(
+        event: Handle,
+        option: c_int,
+        value: *const c_void,
+    ) -> c_int;
+    pub fn ghostty_selection_gesture_event(
+        gesture: Handle,
         terminal: Handle,
-        options: *const SelectLineOptions,
-        out: *mut Selection,
+        event: Handle,
+        selection: *mut Selection,
     ) -> c_int;
 
     pub fn ghostty_search_new(
