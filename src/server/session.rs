@@ -9,6 +9,19 @@ use crate::command::{Beside, Direction, MoveWindow, Place, Resize, SplitKind};
 use crate::ghostty::{DEFAULT_POINTER_SHAPE, Link, MODE_SGR_PIXELS, OuterColors, Progress};
 use crate::sys::WinSize;
 
+/// Where a view that is too small for what it shows goes, as tmux has it: the
+/// cursor stays in sight, around the middle unless that is past either end.
+const fn follow(cursor: u16, view: u16, window: u16) -> u16 {
+    let last = window.saturating_sub(view);
+    if cursor < view {
+        0
+    } else if cursor > last {
+        last
+    } else {
+        cursor - view / 2
+    }
+}
+
 /// What `#S` says, and the name a target can use for the session.
 pub const SESSION_NAME: &str = "kl";
 
@@ -125,17 +138,21 @@ pub struct Session {
     /// The index of the window on display.
     pub current: u32,
     pub last: Option<u32>,
-    /// The size of the attached client's terminal.
+    /// What the window is sized for: the terminal of the client active last.
     pub size: WinSize,
     /// The layout changed, so the whole screen must be composed again.
     pub repaint: bool,
+    /// What programs get to hear of the outer terminal's colors, which are those
+    /// of the client active last.
     pub colors: OuterColors,
+    /// Whether programs were last told that a terminal has the keyboard.
+    pub focused: bool,
     /// What new panes get of the environment of the latest client, in the form
     /// of [`crate::proto::ClientMessage::Attach`].
     pub environment: Vec<String>,
-    /// A pane reported progress, which the outer terminal wants to hear even if
-    /// it is the same as before: it gives up on a report that stays quiet.
-    pub progress_reported: bool,
+    /// How often a pane reported progress, which outer terminals want to hear
+    /// even if it is the same as before: they give up on a report that stays quiet.
+    pub progress_reports: u64,
     pub socket: String,
     pub next_pane: PaneId,
     pub next_window: u32,
@@ -160,8 +177,9 @@ impl Session {
             },
             repaint: true,
             colors: OuterColors::default(),
+            focused: true,
             environment: Vec::new(),
-            progress_reported: false,
+            progress_reports: 0,
             socket,
             next_pane: 0,
             next_window: 0,
@@ -180,11 +198,44 @@ impl Session {
         }
     }
 
-    pub fn cell_size(&self) -> (u16, u16) {
-        (
-            self.size.width_px.checked_div(self.size.cols).unwrap_or(0),
-            self.size.height_px.checked_div(self.size.rows).unwrap_or(0),
-        )
+    pub const fn cell_size(&self) -> (u16, u16) {
+        self.size.cell_size()
+    }
+
+    /// Where the cursor of the active pane is in the window, if it is to be seen.
+    fn cursor(&self) -> Option<(u16, u16)> {
+        let pane = self.active_pane()?;
+        let (x, y) = if let Some(mode) = pane.copy_mode {
+            (mode.x, mode.y)
+        } else {
+            let cursor = pane.terminal.cursor()?;
+            cursor.position.filter(|_| cursor.visible)?
+        };
+        Some((pane.rect.x + x, pane.rect.y + y))
+    }
+
+    /// The part of the window that a terminal of this size shows, in terms of the
+    /// window but for its size, which is all there is room for without the status
+    /// line. That can be more than the window, starting at its corner.
+    pub fn view(&self, size: WinSize) -> Rect {
+        let (width, height) = (size.cols, size.rows.saturating_sub(1));
+        let window = self.area();
+        let (x, y) = if width < window.width || height < window.height {
+            self.cursor().map_or((0, 0), |(x, y)| {
+                (
+                    follow(x, width, window.width),
+                    follow(y, height, window.height),
+                )
+            })
+        } else {
+            (0, 0)
+        };
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn window(&self) -> Option<&Window> {
@@ -244,22 +295,27 @@ impl Session {
         pane.map(|(id, _)| *id)
     }
 
-    /// The shape for the pointer, which is about what is under it: what that
-    /// pane asked for, or the active pane's while the pointer has not been seen.
-    pub fn pointer_shape(&self, pointer: Option<(u16, u16)>) -> &'static str {
-        let id = pointer.map_or_else(|| self.active_id(), |(x, y)| self.pane_at(x, y));
+    /// The shape for a pointer on a terminal showing this view, which is about
+    /// what is under it: what that pane asked for, or the active pane's while the
+    /// pointer has not been seen.
+    pub fn pointer_shape(&self, view: Rect, pointer: Option<(u16, u16)>) -> &'static str {
+        let under = |(x, y): (u16, u16)| {
+            (x < view.width && y < view.height)
+                .then(|| self.pane_at(x + view.x, y + view.y))
+                .flatten()
+        };
+        let id = pointer.map_or_else(|| self.active_id(), under);
         let pane = id.and_then(|id| self.panes.get(&id));
         pane.map_or(DEFAULT_POINTER_SHAPE, |pane| pane.terminal.pointer_shape())
     }
 
     /// Whether a program on display wants the mouse in pixels. Making anything
-    /// of those takes knowing the size of a cell.
-    pub fn wants_pixel_mouse(&self) -> bool {
+    /// of those takes knowing the size of a cell of the terminal they come from.
+    pub fn wants_pixel_mouse(&self, (width, height): (u16, u16)) -> bool {
         let wants = |id: &PaneId| {
             let pane = self.panes.get(id);
             pane.is_some_and(|pane| pane.terminal.mode(MODE_SGR_PIXELS))
         };
-        let (width, height) = self.cell_size();
         width > 0 && height > 0 && self.visible_panes().iter().any(|(id, _)| wants(id))
     }
 
@@ -273,8 +329,9 @@ impl Session {
             .or_else(|| visible.iter().find_map(|(id, _)| of(id)))
     }
 
-    /// Passes on what the outer terminal said about its colors.
-    pub fn apply_colors(&mut self) {
+    /// Goes by what this outer terminal said about its colors from here on.
+    pub fn set_colors(&mut self, colors: &OuterColors) {
+        self.colors.clone_from(colors);
         for pane in self.panes.values_mut() {
             pane.set_outer_colors(&self.colors);
         }

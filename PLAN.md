@@ -18,6 +18,9 @@ The first iteration has the core of tmux, with no configuration:
   the same commands from the command line.
 - Upgrading without losing anything: `restart-server` turns the server into a new
   binary, with programs still running and clients attached again.
+- Several clients at once, showing the same window at the size of the one active
+  last, each with its own prompt, keys and mouse. One that stops reading holds up
+  nobody else.
 - The mouse is always on: select panes and windows, drag borders, scroll, select
   text (double and triple click too), and paste with the middle button. Programs
   that ask for the mouse get it, and holding shift leaves it to Ghostty.
@@ -147,9 +150,8 @@ Things panes can ask for that stop at kl today.
 
 ### 6. Clients and persistence
 
-- Several clients at once. A new client currently takes over from the old one.
-  This raises the question of which size wins, and tmux's answers are a good
-  start.
+- Commands for several clients: `attach-session -d`, `detach-client -a` and `-t`,
+  `list-clients` and `C-b D`.
 
 ### Later: settings
 

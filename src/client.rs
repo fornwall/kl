@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::proto::{self, ClientMessage, ServerMessage};
+use crate::proto::{self, AttachMode, ClientMessage, ServerMessage};
 use crate::sys::{self, SIGHUP, SIGTERM, SIGWINCH, Selector};
 
 /// How long to wait for a newly started server to come up.
@@ -200,10 +200,12 @@ pub fn attach(socket: &Path) -> Result<String, Box<dyn Error>> {
     stdout.write_all(ENTER_TERMINAL)?;
     stdout.flush()?;
 
+    let mut mode = AttachMode::New;
     let result = loop {
-        match attached_loop(&stream, &signals) {
+        match attached_loop(&stream, &signals, mode) {
             Ok(Some(text)) => break Ok(text),
             Ok(None) => {
+                mode = AttachMode::Reattach;
                 stdout.write_all(FORGET_FRAMES)?;
                 stdout.flush()?;
                 match UnixStream::connect(socket) {
@@ -228,7 +230,11 @@ fn environment_entry(name: &str) -> String {
 
 /// Shows the session until it is over, returning what to tell the user, or
 /// `None` if the server asked to be attached to again.
-fn attached_loop(stream: &UnixStream, signals: &File) -> Result<Option<String>, Box<dyn Error>> {
+fn attached_loop(
+    stream: &UnixStream,
+    signals: &File,
+    mode: AttachMode,
+) -> Result<Option<String>, Box<dyn Error>> {
     let stdin = io::stdin();
     let terminal = stdin.as_fd();
     let mut input = File::from(terminal.try_clone_to_owned()?);
@@ -238,6 +244,7 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<Option<String>, 
     let attach = ClientMessage::Attach {
         version: proto::VERSION,
         size: sys::winsize(terminal)?,
+        mode,
         environment: UPDATE_ENVIRONMENT.map(environment_entry).to_vec(),
     };
     send(stream, &attach)?;

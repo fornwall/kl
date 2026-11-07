@@ -7,7 +7,7 @@
 use crate::sys::WinSize;
 
 /// Bumped on any change to the messages below.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// Larger than anything sent in practice, to catch a corrupt stream.
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
@@ -23,12 +23,41 @@ const TAG_EXIT: u8 = 6;
 const TAG_RESULT: u8 = 7;
 const TAG_REATTACH: u8 = 8;
 
+/// How a client comes to attach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachMode {
+    New,
+    /// It was attached to the server that this one replaced, so that coming back
+    /// is not something its user did.
+    Reattach,
+}
+
+impl AttachMode {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Reattach => "reattach",
+        }
+    }
+
+    /// Anything else is from a client of another version, which is not going to
+    /// get any further than being told so.
+    fn from_word(word: &str) -> Self {
+        if word == Self::Reattach.word() {
+            Self::Reattach
+        } else {
+            Self::New
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientMessage {
-    /// Makes this connection the one showing the session.
+    /// Makes this connection one of those showing the session.
     Attach {
         version: u32,
         size: WinSize,
+        mode: AttachMode,
         /// What new panes should get of the client's environment: `NAME=value`
         /// to set a variable, and a bare `NAME` to remove it.
         environment: Vec<String>,
@@ -199,10 +228,12 @@ impl ClientMessage {
             Self::Attach {
                 version,
                 size,
+                mode,
                 environment,
             } => {
                 let mut payload = version.to_le_bytes().to_vec();
                 payload.extend(size_bytes(*size));
+                put_bytes(&mut payload, mode.word().as_bytes());
                 put_texts(&mut payload, environment);
                 put_frame(out, TAG_ATTACH, &payload);
             }
@@ -233,11 +264,20 @@ impl ClientMessage {
         };
         let mut reader = Reader(payload);
         let message = match tag {
-            TAG_ATTACH => Self::Attach {
-                version: reader.take_u32()?,
-                size: reader.take_size()?,
-                environment: reader.take_texts()?,
-            },
+            TAG_ATTACH => {
+                let version = reader.take_u32()?;
+                let size = reader.take_size()?;
+                // Texts all the way, which has been the case in every version,
+                // so that any client gets as far as hearing that it does not fit.
+                let mut texts = reader.take_texts()?.into_iter();
+                let mode = texts.next().ok_or(Malformed)?;
+                Self::Attach {
+                    version,
+                    size,
+                    mode: AttachMode::from_word(&mode),
+                    environment: texts.collect(),
+                }
+            }
             TAG_INPUT => Self::Input(reader.take_rest().to_vec()),
             TAG_RESIZE => Self::Resize(reader.take_size()?),
             TAG_COMMAND => {
@@ -329,6 +369,7 @@ mod tests {
         round_trip_client(&ClientMessage::Attach {
             version: 7,
             size,
+            mode: AttachMode::Reattach,
             environment: vec!["DISPLAY=:0".to_owned(), "XAUTHORITY".to_owned()],
         });
         round_trip_client(&ClientMessage::Input(vec![0, 1, 255]));

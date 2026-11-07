@@ -13,7 +13,7 @@ use crate::ghostty::{
     STYLE_STRIKETHROUGH, STYLE_UNDERLINE_MASK, STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text,
     Width,
 };
-use crate::sys;
+use crate::sys::{self, WinSize};
 
 const BLACK: u8 = 0;
 const RED: u8 = 1;
@@ -118,6 +118,18 @@ impl Grid {
         self.cells.fill(Cell::default());
     }
 
+    fn row(&self, y: u16) -> &[Cell] {
+        let cols = usize::from(self.cols);
+        let start = usize::from(y) * cols;
+        self.cells.get(start..start + cols).unwrap_or(&[])
+    }
+
+    fn row_mut(&mut self, y: u16) -> &mut [Cell] {
+        let cols = usize::from(self.cols);
+        let start = usize::from(y) * cols;
+        self.cells.get_mut(start..start + cols).unwrap_or(&mut [])
+    }
+
     /// Gives a cell another style, unless it is selected, which goes first.
     fn highlight(&mut self, x: u16, y: u16, style: Style) {
         if let Some(cell) = self.index(x, y).and_then(|index| self.cells.get_mut(index))
@@ -205,6 +217,18 @@ impl Grid {
 /// How wide some text is on the terminal.
 fn text_width(text: &str) -> u16 {
     text.chars().map(ghostty::char_width).sum()
+}
+
+/// The end of some text, for as much as fits in some columns.
+fn last_columns(text: &str, columns: u16) -> String {
+    let mut used = 0;
+    let fits = |c: &char| {
+        used += ghostty::char_width(*c);
+        used <= columns
+    };
+    let mut chars: Vec<char> = text.chars().rev().take_while(fits).collect();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 /// Where each window is on the status line, for clicks.
@@ -308,6 +332,13 @@ impl Canvas {
     }
 }
 
+/// What a frame has to know of the client it is for.
+pub struct Viewer<'a> {
+    pub ui: &'a Ui,
+    pub size: WinSize,
+    pub pointer: Option<(u16, u16)>,
+}
+
 #[derive(Default)]
 pub struct Renderer {
     shown: Grid,
@@ -321,6 +352,8 @@ pub struct Renderer {
     title: String,
     /// The progress the terminal is showing.
     progress: Option<Progress>,
+    /// As in [`Session::progress_reports`], for the last one the terminal heard.
+    progress_reports: u64,
     /// The pointer shape the terminal is showing, if not the one it started with.
     pointer_shape: Option<&'static str>,
     /// Mouse reports were asked to come in pixels.
@@ -338,33 +371,100 @@ impl Renderer {
         }
     }
 
-    /// Starts the next frame from the panes, which leaves nothing of what was on
-    /// top of them in the last one.
-    fn copy_canvas(&mut self, canvas: &Canvas) {
-        for (cell, canvas) in self.next.cells.iter_mut().zip(&canvas.grid.cells) {
-            cell.clone_from(canvas);
+    /// Starts the next frame from the panes in view, which leaves nothing of what
+    /// was on top of them in the last one.
+    fn copy_canvas(&mut self, canvas: &Canvas, view: Rect) {
+        let start = usize::from(view.x);
+        let rows = (0..view.height).zip(view.y..canvas.grid.rows);
+        for (y, canvas_y) in rows {
+            let from = canvas.grid.row(canvas_y).get(start..).unwrap_or(&[]);
+            let to = self.next.row_mut(y);
+            let copied = from.len().min(to.len()).min(usize::from(view.width));
+            for (cell, canvas) in to.iter_mut().zip(from).take(copied) {
+                cell.clone_from(canvas);
+            }
+            // A character that the edge of the view cuts in two cannot be shown.
+            if to.first().is_some_and(|cell| cell.width == Width::Tail)
+                && let Some(cell) = to.first_mut()
+            {
+                *cell = Cell::blank(cell.style);
+            }
+            if let Some(cell) = copied.checked_sub(1).and_then(|last| to.get_mut(last))
+                && cell.width == Width::Wide
+                && from.len() > copied
+            {
+                *cell = Cell::blank(cell.style);
+            }
+        }
+    }
+
+    /// What a terminal larger than the window shows around it, as in tmux: a line
+    /// along its edges, joining the lines between its panes, and dots beyond.
+    fn draw_outside(&mut self, session: &Session, view: Rect) {
+        let window = session.area();
+        let (right, bottom) = (window.width, window.height);
+        if view.x.saturating_add(view.width) <= right
+            && view.y.saturating_add(view.height) <= bottom
+        {
+            return;
+        }
+        let dividers = session
+            .window()
+            .filter(|window| !window.zoomed)
+            .map_or_else(Vec::new, |window| window.root.dividers(session.area()));
+        let on_divider = |x: u16, y: u16| dividers.iter().any(|d| d.line.contains(x, y));
+        let active = session.active_pane().map(|pane| pane.rect);
+        let edge = |x: u16, y: u16| {
+            if x == right && y <= bottom {
+                let left = y < bottom && x > 0 && on_divider(x - 1, y);
+                Some([y > 0, y < bottom, left || y == bottom, false])
+            } else if y == bottom && x < right {
+                let up = y > 0 && on_divider(x, y - 1);
+                Some([up, false, x > 0, true])
+            } else {
+                None
+            }
+        };
+        for y in 0..view.height {
+            for x in 0..view.width {
+                let (window_x, window_y) = (x + view.x, y + view.y);
+                if window_x < right && window_y < bottom {
+                    continue;
+                }
+                let line = edge(window_x, window_y).map(border_char);
+                let active = active.is_some_and(|rect| touches(rect, window_x, window_y));
+                let style = border_style(line.is_some() && active);
+                let mut encoded = [0; 4];
+                let c = line.unwrap_or('·');
+                self.next.set(
+                    x,
+                    y,
+                    Cell {
+                        text: Text::new(c.encode_utf8(&mut encoded)),
+                        style,
+                        ..Cell::default()
+                    },
+                );
+            }
         }
     }
 
     /// Produces the bytes that bring the terminal up to date.
-    pub fn frame(
-        &mut self,
-        canvas: &Canvas,
-        session: &mut Session,
-        ui: &Ui,
-        pointer: Option<(u16, u16)>,
-        take_pixels: bool,
-    ) -> Vec<u8> {
-        let (cols, rows) = (session.size.cols, session.size.rows);
+    pub fn frame(&mut self, canvas: &Canvas, session: &Session, viewer: &Viewer<'_>) -> Vec<u8> {
+        let (ui, size) = (viewer.ui, viewer.size);
+        let (cols, rows) = (size.cols, size.rows);
+        let view = session.view(size);
         self.resize(cols, rows);
-        self.copy_canvas(canvas);
+        self.copy_canvas(canvas, view);
+        self.draw_outside(session, view);
         if ui.pane_numbers.is_some() {
-            self.draw_pane_numbers(session);
+            self.draw_pane_numbers(session, view);
         }
         if let Some(list) = &ui.list {
-            self.draw_list(list, session.area());
+            let area = Rect { x: 0, y: 0, ..view };
+            self.draw_list(list, area);
         }
-        self.draw_status(session, ui);
+        self.draw_status(session, ui, view);
 
         let mut out = Vec::new();
         if self.reset {
@@ -378,14 +478,15 @@ impl Renderer {
         self.emit_changes(|link| session.link_uri(link), &mut out);
         let mut transfers = Vec::new();
         let covered = ui.list.is_some() || ui.pane_numbers.is_some();
+        let terminal = (view, size.cell_size());
         self.images
-            .update(session, covered, take_pixels, &mut transfers, &mut out);
-        self.emit_cursor(session, ui, &mut out);
+            .update(session, terminal, covered, &mut transfers, &mut out);
+        self.emit_cursor(session, ui, view, &mut out);
         self.emit_title(session, &mut out);
         self.emit_progress(session, &mut out);
         self.emit_cursor_color(session, &mut out);
-        self.emit_pointer_shape(session, pointer, &mut out);
-        self.emit_mouse_format(session, &mut out);
+        self.emit_pointer_shape(session, view, viewer.pointer, &mut out);
+        self.emit_mouse_format(session, size.cell_size(), &mut out);
         let mut frame = transfers;
         if !out.is_empty() {
             frame.extend_from_slice(b"\x1b[?2026h");
@@ -400,16 +501,24 @@ impl Renderer {
         self.images.transferring()
     }
 
-    /// tmux's `display-panes`.
-    fn draw_pane_numbers(&mut self, session: &Session) {
+    /// tmux's `display-panes`, for what is in view of each pane.
+    fn draw_pane_numbers(&mut self, session: &Session, view: Rect) {
         let Some(window) = session.window() else {
             return;
         };
         let all = window.root.panes(session.area());
         for (id, rect) in session.visible_panes() {
-            if let Some(number) = all.iter().position(|(pane, _)| *pane == id) {
+            if let Some(number) = all.iter().position(|(pane, _)| *pane == id)
+                && let Some(part) = rect.intersection(view)
+            {
                 let color = if id == window.active { RED } else { BLUE };
-                draw_pane_number(&mut self.next, rect, number, color);
+                let shown = Rect {
+                    x: part.x - view.x,
+                    y: part.y - view.y,
+                    ..part
+                };
+                let size = (rect.width, rect.height);
+                draw_pane_number(&mut self.next, shown, size, number, color);
             }
         }
     }
@@ -444,9 +553,8 @@ impl Renderer {
         }
     }
 
-    fn draw_status(&mut self, session: &Session, ui: &Ui) {
-        let y = session.size.rows.saturating_sub(1);
-        let cols = session.size.cols;
+    fn draw_status(&mut self, session: &Session, ui: &Ui, view: Rect) {
+        let (y, cols) = (view.height, view.width);
         self.status_entries.clear();
 
         if let Some(prompt) = &ui.prompt {
@@ -463,9 +571,16 @@ impl Renderer {
 
         let style = status_style();
         self.next.fill_row(y, style);
-        let right = status_right(session);
-        let right_start = cols.saturating_sub(text_width(&right));
         let mut x = self.next.put_str(0, y, "[kl] ", style, cols);
+        let mut right = status_right(session);
+        // tmux tells where in the window a terminal too small for it is.
+        let window = session.area();
+        if view.width < window.width || view.height < window.height {
+            right = format!("[{},{}] {right}", view.x, view.y);
+        }
+        // On a narrow terminal this goes first, and the windows get what is left.
+        let right = last_columns(&right, cols.saturating_sub(x));
+        let right_start = cols.saturating_sub(text_width(&right));
         for window in &session.windows {
             let label = window_label(session, window);
             let start = x;
@@ -511,8 +626,8 @@ impl Renderer {
         self.shown.cells.clone_from(&self.next.cells);
     }
 
-    fn emit_cursor(&mut self, session: &Session, ui: &Ui, out: &mut Vec<u8>) {
-        let wanted = cursor_target(session, ui);
+    fn emit_cursor(&mut self, session: &Session, ui: &Ui, view: Rect, out: &mut Vec<u8>) {
+        let wanted = cursor_target(session, ui, view);
         let known = self.cursor.replace(wanted);
         // Drawing moves the cursor, so if anything was drawn it has to go back.
         if let Some((x, y, _)) = wanted
@@ -568,10 +683,11 @@ impl Renderer {
     fn emit_pointer_shape(
         &mut self,
         session: &Session,
+        view: Rect,
         pointer: Option<(u16, u16)>,
         out: &mut Vec<u8>,
     ) {
-        let wanted = session.pointer_shape(pointer);
+        let wanted = session.pointer_shape(view, pointer);
         if wanted != self.pointer_shape.unwrap_or(DEFAULT_POINTER_SHAPE) {
             out.extend_from_slice(format!("\x1b]22;{wanted}\x1b\\").as_bytes());
             self.pointer_shape = Some(wanted);
@@ -582,8 +698,8 @@ impl Renderer {
     /// everything else does not depend on them being what they seem to be. The
     /// reply to asking about the mode marks where in the input the format changes,
     /// and tells whether it did. Leaving the mode leaves no format at all.
-    fn emit_mouse_format(&mut self, session: &Session, out: &mut Vec<u8>) {
-        let wanted = session.wants_pixel_mouse();
+    fn emit_mouse_format(&mut self, session: &Session, cell: (u16, u16), out: &mut Vec<u8>) {
+        let wanted = session.wants_pixel_mouse(cell);
         if wanted != self.pixel_mouse {
             self.pixel_mouse = wanted;
             out.extend_from_slice(if wanted {
@@ -594,8 +710,9 @@ impl Renderer {
         }
     }
 
-    fn emit_progress(&mut self, session: &mut Session, out: &mut Vec<u8>) {
-        let reported = std::mem::take(&mut session.progress_reported);
+    fn emit_progress(&mut self, session: &Session, out: &mut Vec<u8>) {
+        let reports = session.progress_reports;
+        let reported = std::mem::replace(&mut self.progress_reports, reports) != reports;
         let wanted = session.progress();
         if wanted == self.progress && !(reported && wanted.is_some()) {
             return;
@@ -662,8 +779,9 @@ fn draw_row(grid: &mut Grid, rect: Rect, y: u16, cells: &[Cell]) {
     }
 }
 
-/// A pane's number in its middle, in big digits if they fit, and its size.
-fn draw_pane_number(grid: &mut Grid, rect: Rect, number: usize, color: u8) {
+/// A pane's number in the middle of what can be seen of it, in big digits if they
+/// fit, and its size.
+fn draw_pane_number(grid: &mut Grid, rect: Rect, size: (u16, u16), number: usize, color: u8) {
     let text = number.to_string();
     let len = text_width(&text);
     let (middle_x, middle_y) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
@@ -697,7 +815,7 @@ fn draw_pane_number(grid: &mut Grid, rect: Rect, number: usize, color: u8) {
             }
         }
     }
-    let size = format!("{}x{}", rect.width, rect.height);
+    let size = format!("{}x{}", size.0, size.1);
     let width = text_width(&size);
     if rect.height > 6 && rect.width >= width {
         let x = rect.x + rect.width - width;
@@ -789,28 +907,31 @@ fn status_right(session: &Session) -> String {
     format!("\"{title}\" {time}")
 }
 
-fn cursor_target(session: &Session, ui: &Ui) -> CursorTarget {
+fn cursor_target(session: &Session, ui: &Ui, view: Rect) -> CursorTarget {
     if let Some(prompt) = &ui.prompt {
         let x = text_width(&prompt.label) + text_width(&prompt.text_before_cursor());
-        return Some((x, session.size.rows.saturating_sub(1), 2));
+        return Some((x, view.height, 2));
     }
     if ui.list.is_some() {
         return None;
     }
     let pane = session.active_pane()?;
-    let rect = pane.rect;
-    if let Some(mode) = pane.copy_mode {
-        return Some((rect.x + mode.x, rect.y + mode.y, 2));
-    }
-    let cursor = pane.terminal.cursor()?;
-    let (x, y) = cursor.position.filter(|_| cursor.visible)?;
-    let steady = u8::from(!cursor.blinking);
-    let shape = match cursor.shape {
-        CursorShape::Block => 1,
-        CursorShape::Underline => 3,
-        CursorShape::Bar => 5,
+    let (x, y, shape) = if let Some(mode) = pane.copy_mode {
+        (mode.x, mode.y, 2)
+    } else {
+        let cursor = pane.terminal.cursor()?;
+        let (x, y) = cursor.position.filter(|_| cursor.visible)?;
+        let steady = u8::from(!cursor.blinking);
+        let shape = match cursor.shape {
+            CursorShape::Block => 1,
+            CursorShape::Underline => 3,
+            CursorShape::Bar => 5,
+        };
+        (x, y, shape + steady)
     };
-    Some((rect.x + x, rect.y + y, shape + steady))
+    let x = (pane.rect.x + x).checked_sub(view.x)?;
+    let y = (pane.rect.y + y).checked_sub(view.y)?;
+    (x < view.width && y < view.height).then_some((x, y, shape))
 }
 
 pub fn push_move(out: &mut Vec<u8>, x: u16, y: u16) {
@@ -1025,7 +1146,7 @@ mod tests {
             width: 11,
             height: 5,
         };
-        draw_pane_number(&mut grid, rect, 2, BLUE);
+        draw_pane_number(&mut grid, rect, (11, 5), 2, BLUE);
         assert_eq!(
             blocks(&grid),
             [
@@ -1047,7 +1168,7 @@ mod tests {
             width: 4,
             height: 3,
         };
-        draw_pane_number(&mut grid, rect, 12, RED);
+        draw_pane_number(&mut grid, rect, (4, 3), 12, RED);
         assert_eq!(grid.cells[5].text.as_str(), "1");
         assert_eq!(grid.cells[6].text.as_str(), "2");
     }
@@ -1061,7 +1182,7 @@ mod tests {
             width: 10,
             height: 7,
         };
-        draw_pane_number(&mut grid, rect, 1, RED);
+        draw_pane_number(&mut grid, rect, (10, 7), 1, RED);
         assert_eq!(grid.cells[6].text.as_str(), "1");
         assert_eq!(grid.cells[7].text.as_str(), "0");
         assert_eq!(grid.cells[8].text.as_str(), "x");
@@ -1116,6 +1237,14 @@ mod tests {
         };
         renderer.draw_list(&List::new((0..5).map(row).collect(), 4), area);
         assert_eq!(shown_rows(&renderer, 2), ["3      [5/5]", "4"]);
+    }
+
+    #[test]
+    fn keeps_the_end_of_what_does_not_fit() {
+        assert_eq!(last_columns("abc", 5), "abc");
+        assert_eq!(last_columns("abcdef", 2), "ef");
+        assert_eq!(last_columns("a\u{4e16}b", 2), "b");
+        assert_eq!(last_columns("abc", 0), "");
     }
 
     #[test]

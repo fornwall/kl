@@ -35,6 +35,21 @@ impl Rect {
         self.width == 0 || self.height == 0
     }
 
+    /// The part it has in common with another one, if any.
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let width = self.right().min(other.right()).checked_sub(x)?;
+        let height = self.bottom().min(other.bottom()).checked_sub(y)?;
+        let rect = Self {
+            x,
+            y,
+            width,
+            height,
+        };
+        (!rect.is_empty()).then_some(rect)
+    }
+
     /// Its size in the direction of a split.
     pub const fn extent(self, kind: SplitKind) -> u16 {
         match kind {

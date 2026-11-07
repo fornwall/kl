@@ -128,20 +128,19 @@ impl Images {
         !self.transfers.is_empty()
     }
 
-    /// Brings the outer terminal up to date. Pixels go in `transfers`, as far as
-    /// the client can `take_pixels` right now, and the rest in `out`. An image gets
-    /// placed once all of it is there. Images stay out of sight while `covered`,
-    /// as something is being shown on top of the panes, but the outer terminal
-    /// gets to keep them.
+    /// Brings the outer terminal up to date. Pixels go in `transfers`, a part for
+    /// each frame, and the rest in `out`. An image gets placed once all of it is
+    /// there. Images stay out of sight while `covered`, as something is being shown
+    /// on top of the panes, but the outer terminal gets to keep them.
     pub fn update(
         &mut self,
         session: &Session,
+        (view, cell_size): (Rect, (u16, u16)),
         covered: bool,
-        take_pixels: bool,
         transfers: &mut Vec<u8>,
         out: &mut Vec<u8>,
     ) {
-        let mut wanted = wanted(session);
+        let mut wanted = wanted(session, view, cell_size);
         let Self {
             sent,
             transfers: queue,
@@ -173,9 +172,7 @@ impl Images {
         for (image, _) in &wanted {
             self.queue_pixels(session, *image);
         }
-        if take_pixels {
-            self.send_pixels(transfers);
-        }
+        self.send_pixels(transfers);
         for (image, placement) in wanted {
             let known = |shown: &Shown| shown.image == image && shown.placement == placement;
             if self.shown.iter().any(known) {
@@ -229,20 +226,37 @@ impl Images {
     }
 }
 
-/// Everything in view, clipped to where it can be seen.
-fn wanted(session: &Session) -> Vec<(ImageKey, Placement)> {
+/// Everything in view of a terminal, clipped to where it can be seen there. A
+/// terminal with cells of another size than panes go by gets images scaled to the
+/// cells they should cover.
+fn wanted(session: &Session, view: Rect, outer_cell: (u16, u16)) -> Vec<(ImageKey, Placement)> {
     let (width, height) = session.cell_size();
     if width == 0 || height == 0 {
         return Vec::new();
     }
     let cell_size = (u32::from(width), u32::from(height));
+    let same_cells = outer_cell == (width, height);
     let mut wanted = Vec::new();
     for (id, rect) in session.visible_panes() {
         let Some(pane) = session.panes.get(&id) else {
             continue;
         };
+        let Some(part) = rect.intersection(view) else {
+            continue;
+        };
+        let shown = Rect {
+            x: part.x - view.x,
+            y: part.y - view.y,
+            ..part
+        };
+        let (cut_x, cut_y) = (i32::from(part.x - rect.x), i32::from(part.y - rect.y));
         for image in pane.terminal.image_placements() {
-            if let Some(placement) = clip(&image, rect, cell_size) {
+            let moved = ImagePlacement {
+                col: image.col - cut_x,
+                row: image.row - cut_y,
+                ..image
+            };
+            if let Some(placement) = clip(&moved, shown, cell_size, same_cells) {
                 wanted.push(((id, image.image, image.generation), placement));
             }
         }
@@ -306,7 +320,14 @@ impl Span {
 /// Clips an image to a pane. A pane starts and ends at the edge of a cell, so
 /// where it cuts the image, nothing else needs to change. The protocol can only
 /// scale to whole cells though, which can leave a scaled image a bit off in size.
-fn clip(image: &ImagePlacement, rect: Rect, cell_size: (u32, u32)) -> Option<Placement> {
+/// Without `same_cells`, pixels mean something else on the outer terminal, so what
+/// counts is the cells an image covers.
+fn clip(
+    image: &ImagePlacement,
+    rect: Rect,
+    cell_size: (u32, u32),
+    same_cells: bool,
+) -> Option<Placement> {
     let horizontal = Span {
         cell: image.col,
         offset: image.cell_offset.0,
@@ -327,11 +348,12 @@ fn clip(image: &ImagePlacement, rect: Rect, cell_size: (u32, u32)) -> Option<Pla
         cell_size: cell_size.1,
     }
     .clip()?;
-    let own_size = image.size == (image.source.width, image.source.height);
+    let own_size = same_cells && image.size == (image.source.width, image.source.height);
+    let offset = (horizontal.offset, vertical.offset);
     Some(Placement {
         x: horizontal.cell,
         y: vertical.cell,
-        offset: (horizontal.offset, vertical.offset),
+        offset: if same_cells { offset } else { (0, 0) },
         source: ImageRect {
             x: horizontal.source.0,
             y: vertical.source.0,
@@ -375,6 +397,11 @@ mod tests {
     use super::*;
 
     const CELL: (u32, u32) = (10, 20);
+
+    /// On a terminal with the same cells as the pane, which is most of them.
+    fn clip(image: &ImagePlacement, rect: Rect, cell_size: (u32, u32)) -> Option<Placement> {
+        super::clip(image, rect, cell_size, true)
+    }
 
     /// A pane that starts at column 5, row 2, of 20 columns by 10 rows.
     const PANE: Rect = Rect {
@@ -460,6 +487,16 @@ mod tests {
         assert_eq!(placement.source.y, 10);
         assert_eq!(placement.source.height, 50);
         assert_eq!(placement.cells, Some((8, 5)));
+    }
+
+    #[test]
+    fn other_cells_keep_an_image_on_the_cells_it_covers() {
+        let mut offset = image(1, 1);
+        offset.cell_offset = (3, 7);
+        let placement = super::clip(&offset, PANE, CELL, false).unwrap();
+        assert_eq!((placement.x, placement.y), (6, 3));
+        assert_eq!(placement.cells, Some((4, 3)));
+        assert_eq!(placement.offset, (0, 0));
     }
 
     #[test]

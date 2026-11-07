@@ -9,11 +9,11 @@ use super::copy_mode::{
 };
 use super::format::Context;
 use super::keys;
-use super::layout::{Divider, Layout, PaneId};
+use super::layout::{Divider, Layout, PaneId, Rect};
 use super::pane::Pane;
 use super::session::Monitor;
 use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
-use super::{Lifecycle, Server, color_queries};
+use super::{Lifecycle, Server};
 use crate::command::{self, BufferCommand, Command, Direction, PaneScope, PasteOptions};
 use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
@@ -181,6 +181,18 @@ fn pixels_in_pane(
     )
 }
 
+/// Whether a user did this, which makes the window follow their terminal. tmux
+/// goes by anything that comes in, but it does not usually hear of the pointer
+/// just moving, and a window should not change size over that.
+const fn is_activity(event: &Event) -> bool {
+    match event {
+        Event::Key(event) => !matches!(event.action, KeyAction::Release),
+        Event::Mouse(event) => matches!(event.action, MouseAction::Press),
+        Event::Paste(_) | Event::Focus(true) => true,
+        _ => false,
+    }
+}
+
 impl Server {
     pub fn handle_input(&mut self, bytes: &[u8]) {
         let events = self.client().parser.feed(bytes);
@@ -190,8 +202,7 @@ impl Server {
         }
         // After all of them, as a single reply can come as many events.
         if colors {
-            self.session.apply_colors();
-            self.dirty = true;
+            self.follow_latest();
         }
         let client = self.client();
         client.escape_since = client.parser.has_pending_escape().then(Instant::now);
@@ -199,23 +210,29 @@ impl Server {
 
     pub fn handle_event(&mut self, event: Event) {
         self.names_may_change();
+        if is_activity(&event) {
+            self.note_activity();
+        }
         match event {
             Event::Key(event) => self.handle_key(&event),
             Event::Mouse(event) => self.handle_mouse(self.in_cells(event)),
             Event::Paste(text) => self.handle_paste(&text),
-            Event::Focus(focused) => self.session.report_focus(focused),
-            Event::PixelMouse(pixels) => self.client().pixel_mouse = pixels,
-            Event::Foreground(rgb) => self.session.colors.foreground = Some(rgb),
-            Event::Background(rgb) => self.session.colors.background = Some(rgb),
-            Event::Palette(index, rgb) => {
-                self.session.colors.palette.insert(index, rgb);
+            Event::Focus(focused) => {
+                self.client().focused = focused;
+                self.update_focus();
             }
-            Event::CursorStyle(style) => self.session.colors.cursor_style = Some(style),
+            Event::PixelMouse(pixels) => self.client().pixel_mouse = pixels,
+            Event::Foreground(rgb) => self.client().colors.foreground = Some(rgb),
+            Event::Background(rgb) => self.client().colors.background = Some(rgb),
+            Event::Palette(index, rgb) => {
+                self.client().colors.palette.insert(index, rgb);
+            }
+            Event::CursorStyle(style) => self.client().colors.cursor_style = Some(style),
             Event::ColorScheme { dark } => {
                 // A new scheme most likely brought new colors along.
-                let old = self.session.colors.dark.replace(dark);
+                let old = self.client().colors.dark.replace(dark);
                 if old.is_some_and(|old| old != dark) {
-                    self.send_output(&color_queries());
+                    self.ask_about_colors();
                 }
             }
         }
@@ -360,7 +377,7 @@ impl Server {
     }
 
     fn list_height(&self) -> usize {
-        usize::from(self.session.area().height)
+        usize::from(self.client_ref().size.rows.saturating_sub(1))
     }
 
     fn close_list(&mut self) {
@@ -927,6 +944,7 @@ impl Server {
             && connection.client.take().is_some()
         {
             connection.finish(&ServerMessage::Exit("[detached]".to_owned()));
+            self.after_client_left();
         }
     }
 
@@ -977,12 +995,13 @@ impl Server {
     /// A report in pixels as the cell it is in, for everything but the program
     /// that asked for them. Pixels can lie in the padding beyond the last cell.
     fn in_cells(&self, event: MouseEvent) -> MouseEvent {
-        if !self.client_ref().pixel_mouse {
+        let client = self.client_ref();
+        if !client.pixel_mouse {
             return event;
         }
-        let (width, height) = self.session.cell_size();
+        let (width, height) = client.cell_size();
         let (x, y) = event.report;
-        let size = self.session.size;
+        let size = client.size;
         MouseEvent {
             x: x.checked_div(width)
                 .unwrap_or(0)
@@ -1002,22 +1021,46 @@ impl Server {
             self.list_mouse(event);
             return;
         }
-        match client.drag.clone() {
-            Drag::None => {
+        let drag = client.drag.clone();
+        let view = self.session.view(self.client_ref().size);
+        let on_status = event.y >= view.height;
+        let in_window = self.in_window(event, view);
+        match drag {
+            Drag::None if on_status => {
                 if event.action == MouseAction::Press {
-                    self.mouse_press(event);
-                } else if event.action == MouseAction::Motion {
-                    self.mouse_hover(event);
+                    self.click_status(event);
                 }
             }
-            Drag::Divider(divider) => self.drag_divider(&divider, event),
-            Drag::Selecting(selecting) => self.drag_selection(selecting, event),
+            Drag::None => {
+                if event.action == MouseAction::Press {
+                    self.mouse_press(in_window);
+                } else if event.action == MouseAction::Motion {
+                    self.mouse_hover(in_window);
+                }
+            }
+            Drag::Divider(divider) => self.drag_divider(&divider, in_window),
+            Drag::Selecting(selecting) => self.drag_selection(selecting, in_window),
             Drag::Forwarding(pane) => {
-                self.forward_mouse(pane, event);
+                self.forward_mouse(pane, in_window);
                 if event.action == MouseAction::Release {
                     self.client().drag = Drag::None;
                 }
             }
+        }
+    }
+
+    /// An event on a terminal showing this view, in terms of the window.
+    fn in_window(&self, event: MouseEvent, view: Rect) -> MouseEvent {
+        let (width, height) = self.client_ref().cell_size();
+        let (x, y) = event.report;
+        MouseEvent {
+            x: event.x.saturating_add(view.x),
+            y: event.y.saturating_add(view.y),
+            report: (
+                x.saturating_add(view.x.saturating_mul(width)),
+                y.saturating_add(view.y.saturating_mul(height)),
+            ),
+            ..event
         }
     }
 
@@ -1047,8 +1090,12 @@ impl Server {
     }
 
     fn forward_mouse(&mut self, id: PaneId, event: MouseEvent) {
+        // Pixels mean nothing to a program on a terminal with other cells than its
+        // pane goes by, which leaves the cell.
         let cell_size = self.session.cell_size();
-        let pixels = self.client().pixel_mouse.then_some(event.report);
+        let client = self.client_ref();
+        let exact = client.pixel_mouse && client.cell_size() == cell_size;
+        let pixels = exact.then_some(event.report);
         let Some(pane) = self.session.panes.get_mut(&id) else {
             return;
         };
@@ -1070,10 +1117,7 @@ impl Server {
     }
 
     fn mouse_press(&mut self, event: MouseEvent) {
-        let status_row = self.session.size.rows.saturating_sub(1);
-        if event.y == status_row {
-            self.click_status(event);
-        } else if let Some(divider) = self.divider_at(event.x, event.y) {
+        if let Some(divider) = self.divider_at(event.x, event.y) {
             if event.button == Some(MouseButton::Left) {
                 self.client().drag = Drag::Divider(divider);
             }

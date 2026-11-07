@@ -43,6 +43,25 @@ These are choices rather than gaps, and each has a reason.
   next to its socket, so it works on hosts without Ghostty. As with Ghostty
   itself, a host reached with `ssh` from a pane needs the entry too, or `TERM` set
   to something it knows.
+- **Several clients show the same window,** as there is only one session. It
+  takes the size of the client active last, as with tmux's `window-size latest`.
+  Keys, the mouse being pressed, pasting and resizing count as activity, as does
+  a terminal getting the keyboard, but the pointer just moving does not: kl hears
+  of that all the time, where tmux does not. A terminal of another size shows the
+  window as in tmux: a smaller one follows the cursor and says where it is, and a
+  larger one has dots around it.
+- **What belongs to one person stays with their client.** That is the prefix,
+  the prompt, messages, lists, mouse drags and the pointer shape, which goes by the
+  pane under that client's pointer. Copy mode stays with the pane, as in tmux.
+- **There is no telling who a program means,** so clipboard writes, bells,
+  notifications, titles and progress reach every client, and so does what gets
+  copied. tmux does the same with what it passes on, and seeing a notification
+  twice beats losing it.
+- **Programs get one answer about colors,** and about the color scheme and the
+  default cursor: that of the client active last, which is the one the window fits.
+  tmux goes by the first client that knows. When terminals disagree, programs that
+  asked to hear of changes get told as the window moves between them.
+- **A program has the keyboard while any terminal showing it does.**
 - **Upgrades keep programs running, crashes and reboots do not.** `kl
   restart-server` turns the running server into a new binary by way of `exec`.
   Nothing can keep programs alive through a crash or a reboot, so those end the
@@ -54,7 +73,8 @@ These are choices rather than gaps, and each has a reason.
 What does not work today. [PLAN.md](PLAN.md) has what is planned, and how far
 each target has been verified.
 
-- **One client at a time.** A new client takes over from the one attached.
+- **A client smaller than the window only follows the cursor.** tmux can also
+  move such a view around by hand, with `refresh-client -L` and the like.
 - **Images have some limits.** Animations stay on their current frame, images
   have to be sent inline rather than from a file, and pixels go out uncompressed,
   so they are slow over a slow link. An image scaled to a size that is not a whole
@@ -87,6 +107,8 @@ each target has been verified.
     program had not read yet.
   - Copy mode ends, and so do open prompts.
   - Images are gone until their program sends them again.
+  - With clients of different sizes, the window can come back with the size of
+    another one than it had, until someone types.
   - A pane in the middle of an escape sequence longer than 64 KiB comes back
     blank. Its program keeps running.
   - The binary has to be able to read the running server's state, and is refused

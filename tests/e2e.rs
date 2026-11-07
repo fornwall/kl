@@ -284,6 +284,22 @@ impl Screen {
         std::mem::take(&mut self.terminal.effects().clipboard)
     }
 
+    fn wait_for_bell(&mut self) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !std::mem::take(&mut self.terminal.effects().bell) {
+            self.pump();
+            assert!(Instant::now() < deadline, "no bell");
+        }
+    }
+
+    fn wait_for_title(&mut self, title: &str) {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.terminal.title() != title {
+            self.pump();
+            assert!(Instant::now() < deadline, "no title {title}");
+        }
+    }
+
     /// Waits for a desktop notification to reach the outer terminal.
     fn wait_for_notification(&mut self) -> Notification {
         let deadline = Instant::now() + TIMEOUT;
@@ -512,6 +528,11 @@ impl Screen {
         let start = self.raw.len();
         let output = self.command(&["restart-server"]);
         assert!(output.status.success(), "{output:?}");
+        self.wait_for_new_server(start);
+    }
+
+    /// Waits for what follows a restart in what kl wrote after `start`.
+    fn wait_for_new_server(&mut self, start: usize) {
         let cleared = |raw: &[u8]| raw.windows(6).any(|bytes| bytes == b"\x1b[H\x1b[J");
         let deadline = Instant::now() + TIMEOUT;
         while !cleared(&self.raw[start..]) {
@@ -1156,6 +1177,19 @@ fn output_of(screen: &Screen, args: &[&str]) -> String {
 }
 
 /// What a command complains about, for one that has to fail.
+/// Waits for a command to print this line, for what takes a moment to come about.
+fn wait_for_output(screen: &Screen, args: &[&str], wanted: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let output = output_of(screen, args);
+        if output.trim_end() == wanted {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{args:?} says {output}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn error_of(screen: &Screen, args: &[&str]) -> String {
     let output = screen.command(args);
     assert!(!output.status.success(), "{args:?}: {output:?}");
@@ -2194,18 +2228,413 @@ fn new_panes_get_the_environment_of_the_latest_client() {
     screen.wait_for_text("[/new unset]");
 }
 
+/// Two clients on one session, of the same size.
+fn two_clients() -> (Screen, Screen) {
+    let first = Screen::new(80, 24);
+    let second = Screen::attach(Rc::clone(&first.dir), 80, 24);
+    (first, second)
+}
+
+const WINDOW_SIZE: [&str; 3] = ["display-message", "-p", "#{window_width}x#{window_height}"];
+
 #[test]
-fn a_new_client_takes_over_from_the_old_one() {
-    let mut first = Screen::new(80, 24);
-    let mut second = Screen::attach(Rc::clone(&first.dir), 80, 24);
-    first.wait_for_exit();
-    assert!(
-        first
-            .raw_text()
-            .contains("[detached (from another client)]")
+fn clients_show_the_same_output_and_either_can_type() {
+    let (mut first, mut second) = two_clients();
+    first.run("echo typed-in-the-first");
+    first.wait_for_line("typed-in-the-first");
+    second.wait_for_line("typed-in-the-first");
+    second.run("echo typed-in-the-second");
+    first.wait_for_line("typed-in-the-second");
+    second.wait_for_line("typed-in-the-second");
+}
+
+#[test]
+fn clients_show_the_same_window() {
+    let (mut first, mut second) = two_clients();
+    first.prefix("c");
+    let in_the_second_window = |lines: &[String]| {
+        let status = lines.last().unwrap();
+        status.contains("0:sh- ") && status.contains("1:sh*")
+    };
+    first.wait_for("the new window", in_the_second_window);
+    second.wait_for("the new window", in_the_second_window);
+    second.prefix("p");
+    let in_the_first_window = |lines: &[String]| lines.last().unwrap().contains("0:sh* ");
+    first.wait_for("the first window", in_the_first_window);
+    second.wait_for("the first window", in_the_first_window);
+}
+
+#[test]
+fn the_prefix_belongs_to_one_client() {
+    let (mut first, mut second) = two_clients();
+    first.ctrl('b');
+    // Sent after the prefix, though this client has nothing to do with that.
+    second.type_text("echo plain-c");
+    second.wait_for_text("echo plain-c");
+    first.type_text("c");
+    first.wait_for("the new window", |lines| {
+        lines.last().unwrap().contains("1:sh*")
+    });
+}
+
+#[test]
+fn the_prompt_and_messages_belong_to_one_client() {
+    let (mut first, mut second) = two_clients();
+    first.prefix(":");
+    first.type_text("display-message hi-there");
+    first.wait_for("the prompt", |lines| {
+        lines
+            .last()
+            .unwrap()
+            .starts_with(":display-message hi-there")
+    });
+    second.run("echo still-a-shell");
+    second.wait_for_line("still-a-shell");
+    assert!(second.lines().last().unwrap().starts_with("[kl] "));
+    // Whatever went on in the shell, it was not typed at the prompt.
+    assert!(first.lines().last().unwrap().ends_with("hi-there"));
+
+    first.enter();
+    first.wait_for("the message", |lines| lines.last().unwrap() == "hi-there");
+    second.run("echo no-message-here");
+    second.wait_for_line("no-message-here");
+    assert!(second.lines().last().unwrap().starts_with("[kl] "));
+}
+
+#[test]
+fn a_list_belongs_to_one_client() {
+    let (mut first, mut second) = two_clients();
+    first.prefix("w");
+    first.wait_for("the list", |lines| lines[0].starts_with("(0) "));
+    second.run("echo not-a-list");
+    second.wait_for_line("not-a-list");
+    assert!(first.lines()[0].starts_with("(0) "));
+    // What goes on under the list is there when it is gone.
+    first.type_text("q");
+    first.wait_for_line("not-a-list");
+}
+
+#[test]
+fn the_window_takes_the_size_of_the_client_active_last() {
+    let mut big = Screen::new(100, 30);
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+    let mut small = Screen::attach(Rc::clone(&big.dir), 50, 12);
+    wait_for_output(&big, &WINDOW_SIZE, "50x11");
+    big.type_text("x");
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+    small.click(5, 5);
+    wait_for_output(&big, &WINDOW_SIZE, "50x11");
+    // A paste is something the user did, and so is resizing.
+    big.send_bytes(b"\x1b[200~y\x1b[201~");
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+    small.resize(60, 14);
+    wait_for_output(&big, &WINDOW_SIZE, "60x13");
+}
+
+#[test]
+fn the_pointer_going_by_does_not_take_the_window() {
+    let mut big = Screen::new(100, 30);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 50, 12);
+    big.run_setup_then_cat(r"printf '\033[?1004h'");
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+    big.send_bytes(b"\x1b[O");
+    small.mouse(35, 5, 5, true);
+    // Only with this one gone do programs hear of it, and it comes after the rest.
+    small.send_bytes(b"\x1b[O");
+    big.wait_for_text("^[[O");
+    assert_eq!(output_of(&big, &WINDOW_SIZE), "100x29\n");
+}
+
+#[test]
+fn programs_have_the_keyboard_while_any_terminal_does() {
+    let (mut first, mut second) = two_clients();
+    first.run_setup_then_cat(r"printf '\033[?1004h'");
+    first.send_bytes(b"\x1b[O");
+    second.send_bytes(b"\x1b[O");
+    first.wait_for_text("^[[O");
+    first.send_bytes(b"\x1b[I");
+    first.wait_for_text("^[[I");
+    second.send_bytes(b"\x1b[I");
+    // This is about what comes after: no second report of the same.
+    first.send_bytes(b"\x1b[O");
+    second.send_bytes(b"\x1b[O");
+    first.wait_for("the keyboard to go", |lines| {
+        lines.iter().any(|line| line.ends_with("^[[I^[[O"))
+    });
+    second.prefix("d");
+    second.wait_for_exit();
+    first.send_bytes(b"\x1b[I");
+    first.wait_for_text("^[[I^[[O^[[I");
+}
+
+#[test]
+fn a_client_larger_than_the_window_shows_where_it_ends() {
+    let mut big = Screen::new(40, 12);
+    let _small = Screen::attach(Rc::clone(&big.dir), 20, 6);
+    let lines = big.wait_for("dots", |lines| lines[8].starts_with('·'));
+    assert!(lines[0].starts_with("$ "));
+    assert_eq!(lines[0].chars().nth(20), Some('│'), "{lines:?}");
+    assert_eq!(lines[0].chars().nth(21), Some('·'), "{lines:?}");
+    assert_eq!(
+        lines[5],
+        format!("{}┘{}", "─".repeat(20), "·".repeat(19)),
+        "{lines:?}"
     );
-    second.run("echo still-here");
-    second.wait_for_text("still-here");
+    assert_eq!(lines[6], "·".repeat(40), "{lines:?}");
+    assert!(lines[11].starts_with("[kl] "), "{lines:?}");
+}
+
+#[test]
+fn the_edge_of_the_window_joins_the_lines_between_panes() {
+    let mut big = Screen::new(40, 12);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 21, 7);
+    small.prefix("%");
+    small.wait_for("the second pane", |lines| lines[0].contains('│'));
+    let lines = big.wait_for("the line", |lines| lines[6].contains('┴'));
+    assert_eq!(lines[6].chars().next(), Some('─'), "{lines:?}");
+    small.prefix("\"");
+    let at_the_edge = |line: &String| line.chars().nth(21) == Some('┤');
+    big.wait_for("the other line", |lines| lines.iter().any(at_the_edge));
+}
+
+#[test]
+fn a_client_smaller_than_the_window_follows_the_cursor() {
+    let mut big = Screen::new(100, 30);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 50, 12);
+    big.run("clear; seq 1 40");
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+    big.wait_for_line("40");
+    let lines = small.wait_for("the bottom of the window", |lines| {
+        lines.iter().any(|line| line == "40")
+    });
+    assert!(lines[11].contains("[0,18] "), "{lines:?}");
+
+    big.run("clear; printf '%70s' right-end; read x");
+    let lines = small.wait_for("the right of the window", |lines| {
+        lines.last().unwrap().contains("[50,0] ")
+    });
+    assert!(lines[0].ends_with("right-end"), "{lines:?}");
+}
+
+#[test]
+fn a_wide_character_cut_by_the_edge_of_the_view_is_left_out() {
+    let mut big = Screen::new(30, 10);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 20, 10);
+    // Columns 19 and 20 hold a character, of which `small` has the first.
+    big.run(r"clear; printf '%19s\344\270\226\ncut-off\n'");
+    wait_for_output(&big, &WINDOW_SIZE, "30x9");
+    let row = usize::from(small.wait_for_line("cut-off"));
+    assert_eq!(small.lines()[row - 1], "");
+    // The other way around, the second half is the first to be seen.
+    big.run(r"clear; printf '%9s\344\270\226%10sx'; read x");
+    let lines = small.wait_for("the view", |lines| lines[0].ends_with('x'));
+    assert_eq!(lines[0], format!("{}x", " ".repeat(11)));
+}
+
+#[test]
+fn a_click_goes_by_what_a_smaller_client_shows() {
+    let mut big = Screen::new(100, 30);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 50, 12);
+    big.prefix("%");
+    big.wait_for("a prompt in the new pane", |lines| lines[0].ends_with("│$"));
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+    big.run_setup_then_cat(r"printf '\033[?1003h\033[?1006h'");
+    small.wait_for("the view", |lines| lines.last().unwrap().contains("[50,0]"));
+    let left = output_of(&big, &["display-message", "-p", "#{pane_left}"]);
+    let left: u16 = left.trim().parse().unwrap();
+    // Moving does not take the window from the other client, so that this is
+    // column 20 of what starts at column 50.
+    small.mouse(35, 20, 3, true);
+    big.wait_for_text(&format!("^[[<35;{};4M", 50 + 20 - left + 1));
+}
+
+#[test]
+fn a_client_that_stops_reading_does_not_hold_up_the_other() {
+    let mut stopped = Screen::new(200, 50);
+    let mut reading = Screen::attach(Rc::clone(&stopped.dir), 200, 50);
+    stopped.pump();
+    let before = stopped.raw.len();
+    // From here on, nothing reads what kl writes to `stopped`, until `reading`
+    // got more than all the buffers on the way there could hold.
+    let start = reading.raw.len();
+    let deadline = Instant::now() + TIMEOUT;
+    let mut round = 0;
+    while reading.raw.len() - start < 2_000_000 {
+        round += 1;
+        // Every cell changes as this scrolls, which makes for the largest frames.
+        reading.run(&format!(
+            "awk 'BEGIN {{ for (i = 0; i < 30; i++) s = s \"0123456789\"; \
+             for (i = 0; i < 5000; i++) print substr(s, i % 10 + 1, 190); \
+             print \"round-\" {round} \"-done\" }}'"
+        ));
+        reading.wait_for_line(&format!("round-{round}-done"));
+        assert!(Instant::now() < deadline, "too little output");
+    }
+
+    stopped.wait_for_line(&format!("round-{round}-done"));
+    // Frames it could not take were left out, rather than kept for later.
+    let got = stopped.raw.len() - before;
+    assert!(got < 1_000_000, "got {got} bytes");
+}
+
+#[test]
+fn a_client_leaving_leaves_the_others_as_they_are() {
+    let (mut first, mut second) = two_clients();
+    first.prefix("d");
+    first.wait_for_exit();
+    assert!(first.raw_text().contains("[detached"));
+    second.run("echo still-going");
+    second.wait_for_line("still-going");
+}
+
+#[test]
+fn the_window_goes_on_with_the_client_active_before() {
+    let big = Screen::new(100, 30);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 50, 12);
+    wait_for_output(&big, &WINDOW_SIZE, "50x11");
+    small.prefix("d");
+    small.wait_for_exit();
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+}
+
+#[test]
+fn a_client_that_dies_counts_as_having_left() {
+    let big = Screen::new(100, 30);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 50, 12);
+    wait_for_output(&big, &WINDOW_SIZE, "50x11");
+    small.child.kill().unwrap();
+    small.child.wait().unwrap();
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+}
+
+#[test]
+fn every_client_comes_back_from_a_restart() {
+    let (mut first, mut second) = two_clients();
+    first.run("echo before-the-restart");
+    first.wait_for_line("before-the-restart");
+    second.pump();
+    let start = second.raw.len();
+    first.restart_server();
+    second.wait_for_new_server(start);
+    first.run("echo after-the-restart");
+    first.wait_for_line("after-the-restart");
+    second.wait_for_line("after-the-restart");
+    second.run("echo typed-in-the-other");
+    first.wait_for_line("typed-in-the-other");
+}
+
+#[test]
+fn killing_the_server_tells_every_client() {
+    let (mut first, mut second) = two_clients();
+    let output = first.command(&["kill-server"]);
+    assert!(output.status.success(), "{output:?}");
+    first.wait_for_exit();
+    second.wait_for_exit();
+    assert!(first.raw_text().contains("[server exited]"));
+    assert!(second.raw_text().contains("[server exited]"));
+}
+
+#[test]
+fn bells_clipboard_writes_and_notifications_reach_every_client() {
+    let (mut first, mut second) = two_clients();
+    first.run(r"printf '\033]52;c;aGVsbG8=\033\\'");
+    assert_eq!(first.wait_for_clipboard(), [b"hello".to_vec()]);
+    assert_eq!(second.wait_for_clipboard(), [b"hello".to_vec()]);
+    first.run(r"printf '\033]9;both of you\033\\'");
+    assert_eq!(first.wait_for_notification().body, "both of you");
+    assert_eq!(second.wait_for_notification().body, "both of you");
+    first.run(r"printf '\a'");
+    first.wait_for_bell();
+    second.wait_for_bell();
+}
+
+#[test]
+fn a_copy_reaches_every_client() {
+    let (mut first, mut second) = two_clients();
+    first.run("clear; echo some-text");
+    first.wait_for_line("some-text");
+    first.prefix("[");
+    first.type_text("kV");
+    first.enter();
+    let copied = first.wait_for_clipboard();
+    assert!(copied[0].starts_with(b"some-text"), "{copied:?}");
+    assert_eq!(second.wait_for_clipboard(), copied);
+}
+
+#[test]
+fn titles_and_progress_reach_every_client() {
+    let (mut first, mut second) = two_clients();
+    first.run(r"printf '\033]2;a-title\033\\\033]9;4;1;30\033\\'");
+    let progress = Some(Progress {
+        state: 1,
+        percent: Some(30),
+    });
+    first.wait_for_progress(progress);
+    second.wait_for_progress(progress);
+    first.wait_for_title("a-title");
+    second.wait_for_title("a-title");
+}
+
+#[test]
+fn a_client_attaching_later_catches_up_on_titles_and_progress() {
+    let mut first = Screen::new(80, 24);
+    first.run(r"printf '\033]2;a-title\033\\\033]9;4;1;30\033\\'");
+    let progress = Some(Progress {
+        state: 1,
+        percent: Some(30),
+    });
+    first.wait_for_progress(progress);
+    let mut second = Screen::attach(Rc::clone(&first.dir), 80, 24);
+    second.wait_for_progress(progress);
+    second.wait_for_title("a-title");
+}
+
+#[test]
+fn each_client_has_the_pointer_shape_of_the_pane_under_its_pointer() {
+    let mut first = two_panes();
+    let mut second = Screen::attach(Rc::clone(&first.dir), 80, 24);
+    first.run(r"printf '\033]22;pointer\033\\'");
+    first.wait_for_pointer_shape("pointer");
+    second.wait_for_pointer_shape("pointer");
+    second.mouse(35, 10, 5, true);
+    first.mouse(35, 60, 5, true);
+    first.wait_for_pointer_shape("text");
+    second.wait_for_pointer_shape("pointer");
+}
+
+#[test]
+fn images_go_to_every_client() {
+    let (mut first, mut second) = two_clients();
+    let (command, _) = first.image_command(10, 20, "");
+    first.run(&command);
+    first.wait_for_images("an image", |images| !images.is_empty());
+    second.wait_for_images("an image", |images| !images.is_empty());
+}
+
+#[test]
+fn programs_hear_the_colors_of_the_client_active_last() {
+    let light = OuterColors {
+        foreground: Some(OUTER_BACKGROUND),
+        background: Some(OUTER_FOREGROUND),
+        palette: BTreeMap::new(),
+        dark: Some(false),
+        cursor_style: None,
+    };
+    let ask = r"clear; printf '\033]11;?\033\\'";
+    let (mut first, mut second) = two_clients();
+    second.run_setup_then_cat(r"printf '\033[?2031h'");
+    second.change_outer_colors(&light);
+    second.wait_for_text("^[[?997;2n");
+
+    // The window follows the other client, and with it the program.
+    first.type_text("x");
+    first.wait_for_text("^[[?997;1n");
+    first.ctrl('c');
+    first.wait_for_line("$");
+    first.run(ask);
+    first.wait_for_text("rgb:1111/2222/3333");
+    second.run(ask);
+    second.wait_for_text("rgb:eeee/dddd/cccc");
 }
 
 #[test]

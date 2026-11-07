@@ -196,6 +196,16 @@ pub struct Cell {
     pub link: Option<Link>,
 }
 
+impl Cell {
+    /// An empty cell in this style.
+    pub fn blank(style: Style) -> Self {
+        Self {
+            style,
+            ..Self::default()
+        }
+    }
+}
+
 /// One row of text, for moving around in it rather than for drawing it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Line {
@@ -397,7 +407,7 @@ pub struct ImagePixels<'a> {
 }
 
 /// What the outer terminal said about its colors.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OuterColors {
     pub foreground: Option<Rgb>,
     pub background: Option<Rgb>,

@@ -18,6 +18,7 @@ mod target;
 mod tree;
 mod ui;
 
+use std::cmp::Reverse;
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -27,8 +28,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::base64;
-use crate::ghostty::Notification;
-use crate::proto::{self, ClientMessage, ServerMessage};
+use crate::ghostty::{Notification, OuterColors};
+use crate::proto::{self, AttachMode, ClientMessage, ServerMessage};
 use crate::sys::{self, SIGCHLD, SIGHUP, SIGINT, SIGTERM, Selector, WinSize};
 use buffers::Buffers;
 use client::Client;
@@ -43,6 +44,11 @@ const FRAME_TIME: Duration = Duration::from_millis(8);
 
 /// How long a lone escape byte may wait for the rest of a sequence.
 const ESCAPE_TIME: Duration = Duration::from_millis(25);
+
+/// How much output a client may have waiting before it misses what is not part
+/// of a frame. Frames wait until it has none, and make up for what it missed, but
+/// bells and the like would add up for a client that stopped reading.
+const MAX_PENDING: usize = 1024 * 1024;
 
 /// The most output to put in one message. Pixels of a large image would otherwise
 /// add up to more than a message can hold.
@@ -87,6 +93,19 @@ impl Connection {
     fn finish(&mut self, message: &ServerMessage) {
         self.closing = true;
         self.send(message);
+    }
+
+    /// Sends what is no frame, unless this client has fallen too far behind.
+    fn send_unless_behind(&mut self, bytes: &[u8]) {
+        if self.output.len() < MAX_PENDING {
+            self.send(&ServerMessage::Output(bytes.to_vec()));
+        }
+    }
+
+    /// Holding off while a client catches up is the flow control: what it misses
+    /// never gets sent, since each frame is a diff of the latest state.
+    const fn can_draw(&self) -> bool {
+        self.client.is_some() && self.output.is_empty()
     }
 
     fn flush(&mut self) {
@@ -141,9 +160,8 @@ pub struct Server {
     session: Session,
     canvas: Canvas,
     buffers: Buffers,
-    /// Something changed that may need a new frame.
+    /// Something changed that may need a new frame, for any client.
     dirty: bool,
-    last_frame: Instant,
     last_tick: Instant,
     started_at: Instant,
     /// When to next look at what runs in each window, ahead of the tick.
@@ -231,12 +249,11 @@ pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
         connections: Vec::new(),
         next_connection: 0,
         acting: None,
-        nobody: Client::default(),
+        nobody: Client::new(WinSize::default(), OuterColors::default(), now),
         session,
         canvas: Canvas::default(),
         buffers,
         dirty: false,
-        last_frame: now,
         last_tick: now,
         started_at: now,
         names_due: None,
@@ -290,14 +307,18 @@ impl Server {
 
     fn next_wakeup(&self) -> Instant {
         let mut next = self.last_tick + TICK_TIME;
-        if self.can_draw() {
-            if self.dirty {
-                next = next.min(self.last_frame + FRAME_TIME);
+        for connection in self.connections.iter().filter(|c| c.can_draw()) {
+            if let Some(client) = &connection.client
+                && (self.dirty || client.dirty)
+            {
+                next = next.min(client.last_frame + FRAME_TIME);
             }
-            // Drawing is what ends a hold, so without it there is nothing to do.
-            if let Some(deadline) = self.hold_deadline() {
-                next = next.min(deadline);
-            }
+        }
+        // Drawing is what ends a hold, so without it there is nothing to do.
+        if self.can_draw()
+            && let Some(deadline) = self.hold_deadline()
+        {
+            next = next.min(deadline);
         }
         for client in self.clients() {
             let escape = client.escape_since.map(|since| since + ESCAPE_TIME);
@@ -379,7 +400,66 @@ impl Server {
         for (id, message) in messages {
             self.handle_message(id, message);
         }
+        let before = self.clients().count();
         self.connections.retain(|connection| !connection.closed);
+        if self.clients().count() != before {
+            self.after_client_left();
+        }
+    }
+
+    /// The window goes on with those who are left, if any.
+    pub fn after_client_left(&mut self) {
+        self.follow_latest();
+        self.update_focus();
+    }
+
+    /// The client active last decides what the window is like, as with tmux's
+    /// `window-size latest`: its size, and the colors programs get to hear of. The
+    /// first one wins a tie, which is the first back from a restart.
+    pub fn follow_latest(&mut self) {
+        let connections = self.connections.iter().rev();
+        let clients = connections.filter_map(|connection| connection.client.as_ref());
+        let Some(latest) = clients.max_by_key(|client| client.active_at) else {
+            return;
+        };
+        let (size, colors) = (latest.size, &latest.colors);
+        if *colors != self.session.colors {
+            let colors = colors.clone();
+            self.session.set_colors(&colors);
+            self.dirty = true;
+        }
+        if size != self.session.size {
+            self.session.resize(size);
+            self.dirty = true;
+        }
+    }
+
+    /// The acting client's user did something.
+    pub fn note_activity(&mut self) {
+        self.client().active_at = Instant::now();
+        self.follow_latest();
+    }
+
+    /// Programs have the keyboard while any terminal showing them does.
+    pub fn update_focus(&mut self) {
+        let focused = self.clients().any(|client| client.focused);
+        if focused != self.session.focused {
+            self.session.focused = focused;
+            self.session.report_focus(focused);
+        }
+    }
+
+    /// The connection of the client commands from outside are for: tmux's best
+    /// client, which with a single session is the one active last.
+    fn latest_client(&self) -> Option<u64> {
+        let connections = self.connections.iter().rev();
+        let attached = connections.filter_map(|connection| {
+            let client = connection.client.as_ref()?;
+            Some((client.active_at, connection.id))
+        });
+        attached
+            .max_by_key(|(active_at, _)| *active_at)
+            .map(|(_, id)| id)
     }
 
     /// The clients attached right now.
@@ -422,16 +502,20 @@ impl Server {
 
     fn handle_message(&mut self, id: u64, message: ClientMessage) {
         self.acting = Some(id);
-        let attached = self.client_ids().contains(&id);
+        let attached = self
+            .connection_mut(id)
+            .is_some_and(|connection| connection.client.is_some());
         match message {
             ClientMessage::Attach {
                 version,
                 size,
+                mode,
                 environment,
-            } => self.attach(id, version, size, environment),
+            } => self.attach(id, version, size, mode, environment),
             ClientMessage::Input(bytes) if attached => self.handle_input(&bytes),
             ClientMessage::Resize(size) if attached => {
-                self.session.resize(size);
+                self.client().size = size;
+                self.note_activity();
                 self.dirty = true;
             }
             ClientMessage::Input(_) | ClientMessage::Resize(_) => {}
@@ -440,7 +524,7 @@ impl Server {
                 pane,
                 args,
             } => {
-                self.acting = self.client_ids().first().copied();
+                self.acting = self.latest_client();
                 self.session.origin = pane;
                 self.run_client_command(id, version, &args);
                 self.session.origin = None;
@@ -459,25 +543,34 @@ impl Server {
         })
     }
 
-    fn attach(&mut self, id: u64, version: u32, size: WinSize, environment: Vec<String>) {
+    fn attach(
+        &mut self,
+        id: u64,
+        version: u32,
+        size: WinSize,
+        mode: AttachMode,
+        environment: Vec<String>,
+    ) {
         if let Some(error) = Self::version_error(version) {
             if let Some(connection) = self.connection_mut(id) {
                 connection.finish(&ServerMessage::Exit(error));
             }
             return;
         }
-        for connection in &mut self.connections {
-            if connection.client.take().is_some() {
-                connection.finish(&ServerMessage::Exit(
-                    "[detached (from another client)]".to_owned(),
-                ));
+        let colors = self.session.colors.clone();
+        // Clients coming back behave as they did, as far as that is known.
+        let active_at = match mode {
+            AttachMode::New => {
+                self.session.environment = environment;
+                Instant::now()
             }
-        }
+            AttachMode::Reattach => self.started_at,
+        };
         if let Some(connection) = self.connection_mut(id) {
-            connection.client = Some(Client::default());
+            connection.client = Some(Client::new(size, colors, active_at));
         }
-        self.session.environment = environment;
-        self.session.resize(size);
+        self.follow_latest();
+        self.update_focus();
         if self.lifecycle == Lifecycle::Starting {
             self.lifecycle = Lifecycle::Running;
             if let Err(error) = self.session.new_window(None, &[], None, None, false) {
@@ -489,7 +582,16 @@ impl Server {
             }
         }
         self.dirty = true;
-        self.send_output(&color_queries());
+        self.ask_about_colors();
+    }
+
+    /// Asks the terminal of the acting client about its colors.
+    pub fn ask_about_colors(&mut self) {
+        if let Some(id) = self.acting
+            && let Some(connection) = self.connection_mut(id)
+        {
+            connection.send(&ServerMessage::Output(color_queries()));
+        }
     }
 
     fn run_client_command(&mut self, id: u64, version: u32, args: &[String]) {
@@ -539,7 +641,7 @@ impl Server {
             self.send_output(&notification_sequence(notification));
         }
         if activity.progress_reported {
-            self.session.progress_reported = true;
+            self.session.progress_reports += 1;
             self.dirty = true;
         }
         if activity.bell {
@@ -561,15 +663,18 @@ impl Server {
         }
     }
 
+    /// Tells every terminal, as tmux does with bells and the clipboard. There is
+    /// no telling who a program means, and leaving someone out loses more than
+    /// hearing it twice does.
     fn send_output(&mut self, bytes: &[u8]) {
         for connection in &mut self.connections {
             if connection.client.is_some() {
-                connection.send(&ServerMessage::Output(bytes.to_vec()));
+                connection.send_unless_behind(bytes);
             }
         }
     }
 
-    /// Puts text on the system clipboard, through the outer terminal.
+    /// Puts text on the system clipboard, through the outer terminals.
     fn send_clipboard(&mut self, text: &[u8]) {
         let mut osc = b"\x1b]52;c;".to_vec();
         osc.extend_from_slice(base64::encode(text).as_bytes());
@@ -656,30 +761,35 @@ impl Server {
     }
 
     fn can_draw(&self) -> bool {
-        // Holding off while the client catches up is the flow control: what it
-        // misses never gets sent, since each frame is a diff of the latest state.
-        let connections = self.connections.iter();
-        let mut attached = connections.filter(|connection| connection.client.is_some());
-        attached.any(|connection| connection.output.is_empty())
+        self.connections.iter().any(Connection::can_draw)
     }
 
+    /// Draws for the clients that have something new and can take it. Others get
+    /// their turn when they caught up, without holding up anything else.
     fn render(&mut self) {
-        if !self.dirty || !self.can_draw() || self.last_frame.elapsed() < FRAME_TIME {
+        let dirty = std::mem::take(&mut self.dirty);
+        let clients = self.connections.iter_mut();
+        for client in clients.filter_map(|connection| connection.client.as_mut()) {
+            client.dirty |= dirty;
+        }
+        let due = |connection: &Connection| {
+            let client = connection.client.as_ref();
+            connection.can_draw()
+                && client.is_some_and(|c| c.dirty && c.last_frame.elapsed() >= FRAME_TIME)
+        };
+        if !self.connections.iter().any(due) {
             return;
         }
-        self.dirty = false;
-        self.last_frame = Instant::now();
         self.canvas.update(&mut self.session);
+        let now = Instant::now();
         for connection in &mut self.connections {
+            if !due(connection) {
+                continue;
+            }
             if let Some(client) = &mut connection.client {
-                let frame = client.renderer.frame(
-                    &self.canvas,
-                    &mut self.session,
-                    &client.ui,
-                    client.pointer,
-                    connection.output.is_empty(),
-                );
-                self.dirty |= client.renderer.transferring();
+                client.last_frame = now;
+                let frame = client.frame(&self.canvas, &self.session);
+                client.dirty = client.renderer.transferring();
                 for part in frame.chunks(OUTPUT_PIECE) {
                     connection.send(&ServerMessage::Output(part.to_vec()));
                 }
@@ -701,8 +811,14 @@ impl Server {
     }
 
     /// Sends every client a last message. Blocking is fine here, since nothing
-    /// is left to serve, and it gives them the best chance to take it in.
+    /// is left to serve, and it gives them the best chance to take it in. The
+    /// client active last goes first, as that tends to be how they come back.
     fn goodbye(&mut self, goodbye: &ServerMessage) {
+        let active_at = |connection: &Connection| {
+            let client = connection.client.as_ref();
+            Reverse(client.map(|client| client.active_at))
+        };
+        self.connections.sort_by_key(active_at);
         for connection in &mut self.connections {
             let mut message = std::mem::take(&mut connection.output);
             goodbye.encode(&mut message);
@@ -736,6 +852,27 @@ mod tests {
             body: body.to_owned(),
         };
         String::from_utf8(notification_sequence(&notification)).unwrap()
+    }
+
+    #[test]
+    fn output_to_a_client_that_stopped_reading_stays_bounded() {
+        let (stream, _other_end) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut connection = Connection {
+            id: 0,
+            stream,
+            input: Vec::new(),
+            output: Vec::new(),
+            closing: false,
+            closed: false,
+            client: None,
+        };
+        let piece = vec![7; 64 * 1024];
+        for _ in 0..1024 {
+            connection.send_unless_behind(&piece);
+        }
+        assert!(connection.output.len() >= MAX_PENDING - piece.len());
+        assert!(connection.output.len() < MAX_PENDING + 2 * piece.len());
     }
 
     #[test]

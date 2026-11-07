@@ -3,7 +3,7 @@
 
 #![no_main]
 
-use kl_fuzz::proto::{ClientMessage, ServerMessage};
+use kl_fuzz::proto::{AttachMode, ClientMessage, ServerMessage};
 use kl_fuzz::sys::WinSize;
 use libfuzzer_sys::fuzz_target;
 
@@ -22,6 +22,11 @@ fuzz_target!(|input: (u8, u32, [u16; 4], Vec<String>, Vec<u8>)| {
         0 => ClientMessage::Attach {
             version,
             size,
+            mode: if choice & 0x80 != 0 {
+                AttachMode::Reattach
+            } else {
+                AttachMode::New
+            },
             environment: words,
         },
         1 => ClientMessage::Input(bytes.clone()),

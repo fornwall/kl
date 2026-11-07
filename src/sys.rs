@@ -49,6 +49,20 @@ pub struct WinSize {
 }
 
 impl WinSize {
+    /// The size of a cell in pixels, if the terminal reports that.
+    pub const fn cell_size(self) -> (u16, u16) {
+        (
+            match self.width_px.checked_div(self.cols) {
+                Some(width) => width,
+                None => 0,
+            },
+            match self.height_px.checked_div(self.rows) {
+                Some(height) => height,
+                None => 0,
+            },
+        )
+    }
+
     const fn to_libc(self) -> libc::winsize {
         libc::winsize {
             ws_row: self.rows,
