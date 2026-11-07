@@ -39,6 +39,10 @@ pub struct KeyEvent {
     character: String,
     /// Shift went into producing the character, so it is not also a modifier.
     consumed_shift: bool,
+    /// Text that came as it is rather than as a key. With every kitty flag on,
+    /// that is text from dead keys or an input method, and it stays just text
+    /// for programs too, whatever they asked for.
+    composed: bool,
 }
 
 impl KeyEvent {
@@ -52,6 +56,7 @@ impl KeyEvent {
             base: 0,
             character: String::new(),
             consumed_shift: false,
+            composed: false,
         }
     }
 
@@ -62,6 +67,7 @@ impl KeyEvent {
             unshifted,
             character: text.clone(),
             text,
+            composed: true,
             ..Self::press(key::UNIDENTIFIED, 0)
         }
     }
@@ -70,11 +76,15 @@ impl KeyEvent {
     pub fn as_input(&self) -> KeyInput<'_> {
         KeyInput {
             action: self.action,
-            key: self.key,
+            key: if self.composed {
+                key::UNIDENTIFIED
+            } else {
+                self.key
+            },
             mods: self.mods,
             consumed_mods: if self.consumed_shift { MOD_SHIFT } else { 0 },
             text: &self.character,
-            unshifted: self.unshifted,
+            unshifted: if self.composed { 0 } else { self.unshifted },
         }
     }
 
@@ -326,6 +336,7 @@ fn parse_alt(rest: &[u8]) -> Step {
         _ => match parse_text(rest) {
             Step::Consumed(used, Some(Event::Key(mut event))) => {
                 event.mods |= MOD_ALT;
+                event.composed = false;
                 Step::Consumed(used + 1, Some(Event::Key(event)))
             }
             other => other,
@@ -558,6 +569,7 @@ fn parse_kitty_key(params: &str) -> Option<KeyEvent> {
         consumed_shift: mods & MOD_SHIFT != 0
             && single_char(&character).map(u32::from) != Some(code),
         character,
+        composed: false,
     })
 }
 
@@ -1217,6 +1229,10 @@ mod tests {
             (b"\x1b[97:65;2:3u", b"\x1b[=31;1u", b"\x1b[97:65;2:3u"),
             (b"\x1b[53:37;2:3u", b"\x1b[=31;1u", b"\x1b[53:37;2:3u"),
             (b"\x1b[120:88;6u", b"\x1b[=31;1u", b"\x1b[120:88;6u"),
+            // Text from dead keys, which is text whatever the flags are.
+            ("\u{e9}".as_bytes(), LEGACY, "\u{e9}".as_bytes()),
+            ("\u{e9}".as_bytes(), b"\x1b[=31;1u", "\u{e9}".as_bytes()),
+            (b"'", b"\x1b[=31;1u", b"'"),
         ] {
             let mut terminal = Terminal::new(80, 24).unwrap();
             terminal.write(flags);
