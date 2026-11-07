@@ -33,6 +33,12 @@ pub struct KeyEvent {
     pub unshifted: u32,
     /// What the key would produce on a US layout, or 0 if that is not known.
     base: u32,
+    /// The character the key stands for with these modifiers. The kitty
+    /// protocol leaves the text out of releases and when control or alt is
+    /// held, but it decides how the key is encoded for a program all the same.
+    character: String,
+    /// Shift went into producing the character, so it is not also a modifier.
+    consumed_shift: bool,
 }
 
 impl KeyEvent {
@@ -44,34 +50,30 @@ impl KeyEvent {
             text: String::new(),
             unshifted: 0,
             base: 0,
+            character: String::new(),
+            consumed_shift: false,
         }
     }
 
     fn text(text: String) -> Self {
         let unshifted = single_char(&text).map_or(0, u32::from);
         Self {
-            action: KeyAction::Press,
             key: key::from_codepoint(unshifted),
-            mods: 0,
-            text,
             unshifted,
-            base: 0,
+            character: text.clone(),
+            text,
+            ..Self::press(key::UNIDENTIFIED, 0)
         }
     }
 
-    /// The form the libghostty-vt encoder takes. Shift that went into producing
-    /// the text must not also be reported as a modifier of it.
+    /// The form the libghostty-vt encoder takes.
     pub fn as_input(&self) -> KeyInput<'_> {
         KeyInput {
             action: self.action,
             key: self.key,
             mods: self.mods,
-            consumed_mods: if self.text.is_empty() {
-                0
-            } else {
-                self.mods & MOD_SHIFT
-            },
-            text: &self.text,
+            consumed_mods: if self.consumed_shift { MOD_SHIFT } else { 0 },
+            text: &self.character,
             unshifted: self.unshifted,
         }
     }
@@ -512,13 +514,17 @@ fn parse_kitty_key(params: &str) -> Option<KeyEvent> {
     if let Some(key) = key::from_kitty_code(code) {
         return Some(KeyEvent {
             action,
-            key,
-            mods,
+            character: text.clone(),
             text,
-            unshifted: 0,
-            base: 0,
+            ..KeyEvent::press(key, mods)
         });
     }
+    let shifted = codes.get(1).copied().flatten();
+    let character = if text.is_empty() {
+        key_character(shifted.unwrap_or(code))
+    } else {
+        text.clone()
+    };
     // The physical key, from the base layout code when the terminal knows it.
     let base = codes.get(2).copied().flatten().unwrap_or(0);
     Some(KeyEvent {
@@ -528,7 +534,19 @@ fn parse_kitty_key(params: &str) -> Option<KeyEvent> {
         text,
         unshifted: code,
         base,
+        consumed_shift: mods & MOD_SHIFT != 0
+            && single_char(&character).map(u32::from) != Some(code),
+        character,
     })
+}
+
+/// The text of a key's code, which functional keys without a [`key`] of their
+/// own do not have: they are in the private use area, and stand for no text.
+fn key_character(code: u32) -> String {
+    char::from_u32(code)
+        .filter(|c| !c.is_control() && !(0xe000..=0xf8ff).contains(&code))
+        .map(String::from)
+        .unwrap_or_default()
 }
 
 /// `CSI number ; modifiers:event ~` or `CSI 1 ; modifiers:event letter`.
@@ -1081,6 +1099,50 @@ mod tests {
                 assert_eq!(event.is_ctrl(unshifted), mods == MOD_CTRL, "{context}");
             }
         }
+    }
+
+    /// What programs got from the Ghostty app when running directly in it, for
+    /// the same keys that reach kl as `outer` with every flag on.
+    #[test]
+    fn encodes_keys_for_programs_as_ghostty_would() {
+        const LEGACY: &[u8] = b"";
+        for (outer, flags, expected) in [
+            // Ctrl, alt and super keep a shifted character out of the sequence.
+            (&b"\x1b[120:88;6u"[..], LEGACY, &b"\x1b[120;6u"[..]),
+            (b"\x1b[120:88;4u", LEGACY, b"\x1bX"),
+            (b"\x1b[120;9u", LEGACY, b"x"),
+            // The same for a character that has no control code.
+            (b"\x1b[91;5u", LEGACY, b"\x1b[91;5u"),
+            (b"\x1b[99;5u", LEGACY, b"\x03"),
+            (b"\x1b[120;3u", LEGACY, b"\x1bx"),
+            // Shift is a modifier unless it made a difference to the character.
+            (b"\x1b[32;2;32u", b"\x1b[=1;1u", b"\x1b[32;2u"),
+            (b"\x1b[97:65;2;65u", b"\x1b[=1;1u", b"A"),
+            // Shifted characters are part of releases too, without their text.
+            (b"\x1b[97:65;2:3u", b"\x1b[=31;1u", b"\x1b[97:65;2:3u"),
+            (b"\x1b[53:37;2:3u", b"\x1b[=31;1u", b"\x1b[53:37;2:3u"),
+            (b"\x1b[120:88;6u", b"\x1b[=31;1u", b"\x1b[120:88;6u"),
+        ] {
+            let mut terminal = Terminal::new(80, 24).unwrap();
+            terminal.write(flags);
+            let event = only_key(outer);
+            assert_eq!(
+                terminal
+                    .encode_key(&event.as_input())
+                    .escape_ascii()
+                    .to_string(),
+                expected.escape_ascii().to_string(),
+                "{} with {}",
+                outer.escape_ascii(),
+                flags.escape_ascii()
+            );
+        }
+    }
+
+    #[test]
+    fn functional_keys_without_a_name_are_not_text() {
+        // Media play in the kitty protocol.
+        assert_eq!(only_key(b"\x1b[57428u").as_input().text, "");
     }
 
     #[test]

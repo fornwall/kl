@@ -287,7 +287,9 @@ impl Screen {
         self.pty.write_all(bytes).unwrap();
     }
 
-    /// Presses and releases a key, as the outer terminal would report it.
+    /// Presses and releases a key, as the outer terminal would report it. Like
+    /// the Ghostty app, this has the key's text whatever the modifiers and
+    /// the action, and leaves it to the encoder what to do with it.
     fn key(&mut self, key: i32, mods: u16, text: &str, unshifted: u32) {
         let bytes = self.key_bytes(key, mods, text, unshifted);
         self.send_bytes(&bytes);
@@ -295,17 +297,17 @@ impl Screen {
 
     fn key_bytes(&mut self, key: i32, mods: u16, text: &str, unshifted: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
+        let shifted = text
+            .chars()
+            .next()
+            .is_some_and(|c| u32::from(c) != unshifted);
         for action in [KeyAction::Press, KeyAction::Release] {
             let input = KeyInput {
                 action,
                 key,
                 mods,
-                consumed_mods: if text.is_empty() { 0 } else { mods & MOD_SHIFT },
-                text: if action == KeyAction::Release {
-                    ""
-                } else {
-                    text
-                },
+                consumed_mods: if shifted { mods & MOD_SHIFT } else { 0 },
+                text,
                 unshifted,
             };
             bytes.extend(self.terminal.encode_key(&input));
@@ -346,7 +348,7 @@ impl Screen {
     }
 
     fn ctrl(&mut self, c: char) {
-        self.key(ghostty_key(c), MOD_CTRL, "", u32::from(c));
+        self.key(ghostty_key(c), MOD_CTRL, &c.to_string(), u32::from(c));
     }
 
     /// What the prefix key sends.
@@ -1245,6 +1247,17 @@ fn shifted_keys_reach_programs() {
     let mut screen = Screen::new(80, 24);
     screen.run("echo 'Hello, World! 100%'");
     screen.wait_for_text("Hello, World! 100%");
+}
+
+#[test]
+fn shift_with_another_modifier_reaches_programs() {
+    let mut screen = Screen::new(80, 24);
+    screen.run_setup_then_cat("true");
+    let x = u32::from('x');
+    screen.key(ghostty_key('x'), MOD_ALT | MOD_SHIFT, "X", x);
+    screen.key(ghostty_key('x'), MOD_CTRL | MOD_SHIFT, "X", x);
+    screen.enter();
+    screen.wait_for_text("^[X^[[120;6u");
 }
 
 #[test]
