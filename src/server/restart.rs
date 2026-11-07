@@ -28,7 +28,7 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 8;
+pub const STATE_VERSION: u32 = 9;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
@@ -267,6 +267,7 @@ fn put_buffers(out: &mut Vec<u8>, buffers: &Buffers) {
         proto::put_bytes(out, buffer.name.as_bytes());
         proto::put_bytes(out, buffer.text.as_bytes());
         put_bool(out, buffer.automatic);
+        out.extend_from_slice(&buffer.created.to_le_bytes());
     }
 }
 
@@ -278,6 +279,7 @@ fn take_buffers(reader: &mut Reader<'_>) -> Result<Buffers, Malformed> {
                 name: reader.take_text()?,
                 text: reader.take_text()?,
                 automatic: reader.take_bool()?,
+                created: u64::from_le_bytes(reader.take_array()?),
             })
         })
         .collect::<Result<_, Malformed>>()?;
@@ -432,6 +434,22 @@ mod tests {
         put_node(&mut bytes, &node);
         bytes.pop();
         assert_eq!(take_node(&mut Reader::new(&bytes)), Err(Malformed));
+    }
+
+    #[test]
+    fn buffers_survive_a_round_trip() {
+        let buffers = Buffers {
+            list: vec![Buffer {
+                name: "name".to_owned(),
+                text: "text".to_owned(),
+                automatic: true,
+                created: 1_800_000_000,
+            }],
+            next_index: 3,
+        };
+        let mut bytes = Vec::new();
+        put_buffers(&mut bytes, &buffers);
+        assert_eq!(take_buffers(&mut Reader::new(&bytes)), Ok(buffers));
     }
 
     #[test]

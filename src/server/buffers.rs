@@ -5,17 +5,22 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::Server;
+use super::format;
 use super::ui::{List, ListRow};
-use crate::command::{BufferCommand, Command, PasteOptions, SetBuffer};
+use crate::command::{BufferCommand, BufferOrder, Command, ListBuffers, PasteOptions, SetBuffer};
 use crate::ghostty::{MODE_BRACKETED_PASTE, Terminal};
 
 /// tmux's `buffer-limit`.
 const BUFFER_LIMIT: usize = 50;
 
-/// How much of a buffer `list-buffers` shows.
+/// How much of a buffer `#{buffer_sample}` shows.
 const SAMPLE_BYTES: usize = 200;
+
+/// What `list-buffers` shows by default.
+const LIST_BUFFERS: &str = "#{buffer_name}: #{buffer_size} bytes: \"#{buffer_sample}\"";
 
 /// A control character in the way of C.
 fn octal(c: char) -> [char; 4] {
@@ -29,9 +34,21 @@ pub struct Buffer {
     pub text: String,
     /// It got its name here, rather than from the user.
     pub automatic: bool,
+    /// In seconds since the epoch.
+    pub created: u64,
 }
 
 impl Buffer {
+    fn new(name: String, text: String, automatic: bool) -> Self {
+        let age = SystemTime::now().duration_since(UNIX_EPOCH);
+        Self {
+            name,
+            text,
+            automatic,
+            created: age.map_or(0, |age| age.as_secs()),
+        }
+    }
+
     /// The text in a line of its own, with what is special made visible.
     fn sample(&self) -> String {
         let mut sample = String::new();
@@ -52,10 +69,26 @@ impl Buffer {
         sample
     }
 
-    /// As `list-buffers` shows it.
+    /// The variables a format can use. As in tmux, a buffer is not about any
+    /// window, so the others are empty.
+    fn value(&self, name: &str) -> Option<String> {
+        Some(match name {
+            "buffer_created" => self.created.to_string(),
+            "buffer_full" => self.text.clone(),
+            "buffer_name" => self.name.clone(),
+            "buffer_sample" => self.sample(),
+            "buffer_size" => self.text.len().to_string(),
+            _ => return None,
+        })
+    }
+
+    fn expand(&self, template: &str) -> String {
+        format::expand(template, &|name| self.value(name))
+    }
+
+    /// As `list-buffers` shows it by default.
     fn describe(&self) -> String {
-        let (name, size, sample) = (&self.name, self.text.len(), self.sample());
-        format!("{name}: {size} bytes: \"{sample}\"")
+        self.expand(LIST_BUFFERS)
     }
 }
 
@@ -87,14 +120,7 @@ impl Buffers {
                 break name;
             }
         };
-        self.list.insert(
-            0,
-            Buffer {
-                name,
-                text,
-                automatic: true,
-            },
-        );
+        self.list.insert(0, Buffer::new(name, text, true));
     }
 
     /// Makes a buffer with a name, in place of any other of that name.
@@ -104,14 +130,8 @@ impl Buffers {
         }
         self.delete(name);
         if !text.is_empty() {
-            self.list.insert(
-                0,
-                Buffer {
-                    name: name.to_owned(),
-                    text,
-                    automatic: false,
-                },
-            );
+            self.list
+                .insert(0, Buffer::new(name.to_owned(), text, false));
         }
         Ok(())
     }
@@ -258,7 +278,7 @@ impl Server {
                 let name = self.buffers.existing_name(name.as_deref())?;
                 self.buffers.delete(&name);
             }
-            BufferCommand::List => return Ok(self.list_buffers()),
+            BufferCommand::List(listing) => return Ok(self.list_buffers(&listing)),
             BufferCommand::Load {
                 name,
                 path,
@@ -274,9 +294,29 @@ impl Server {
         Ok(String::new())
     }
 
-    fn list_buffers(&self) -> String {
-        let lines: Vec<String> = self.buffers.list.iter().map(Buffer::describe).collect();
-        lines.iter().flat_map(|line| [line, "\n"]).collect()
+    fn list_buffers(&self, listing: &ListBuffers) -> String {
+        let mut list: Vec<&Buffer> = self.buffers.list.iter().collect();
+        if let Some(order) = listing.order {
+            match order {
+                // That is the order they are in.
+                BufferOrder::Creation => {}
+                BufferOrder::Name => list.sort_by(|a, b| a.name.cmp(&b.name)),
+                BufferOrder::Size => list.sort_by_key(|buffer| buffer.text.len()),
+            }
+            if listing.reverse {
+                list.reverse();
+            }
+        }
+        let filter = listing.filter.as_deref();
+        let format = listing.format.as_deref().unwrap_or(LIST_BUFFERS);
+        let mut text = String::new();
+        for buffer in list {
+            if filter.is_none_or(|filter| format::is_true(&buffer.expand(filter))) {
+                text.push_str(&buffer.expand(format));
+                text.push('\n');
+            }
+        }
+        text
     }
 
     /// Lets the user pick a buffer to paste from a list, on the row given.
@@ -395,11 +435,7 @@ mod tests {
     }
 
     fn with_text(text: &str) -> Buffer {
-        Buffer {
-            name: "x".to_owned(),
-            text: text.to_owned(),
-            automatic: true,
-        }
+        Buffer::new("x".to_owned(), text.to_owned(), true)
     }
 
     #[test]
@@ -504,11 +540,7 @@ mod tests {
 
     #[test]
     fn describes_a_buffer() {
-        let buffer = Buffer {
-            name: "buffer3".to_owned(),
-            text: "hi\n".to_owned(),
-            automatic: true,
-        };
+        let buffer = Buffer::new("buffer3".to_owned(), "hi\n".to_owned(), true);
         assert_eq!(buffer.describe(), "buffer3: 3 bytes: \"hi\\n\"");
     }
 

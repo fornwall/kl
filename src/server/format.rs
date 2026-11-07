@@ -59,7 +59,7 @@ fn split_args(mut text: &str) -> Vec<&str> {
     args
 }
 
-fn is_true(value: &str) -> bool {
+pub fn is_true(value: &str) -> bool {
     !value.is_empty() && value != "0"
 }
 

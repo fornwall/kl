@@ -77,7 +77,8 @@ Paste buffers, the top one unless -b names another:
   set-buffer (setb) [-aw] [-b name] [-n new-name] [data]  set or rename
   show-buffer (showb) [-b name], delete-buffer (deleteb) [-b name]
   save-buffer (saveb) [-a] [-b name] path, load-buffer (loadb) [-w] [-b name] path
-  list-buffers (lsb), choose-buffer           list them, or pick one to paste
+  list-buffers (lsb) [-r] [-F format] [-f filter] [-O name|size|creation]
+  choose-buffer                               pick a buffer to paste
 
 Targets follow tmux: a window goes by its index, name or @id, a pane by its
 number, %id or window.pane, and {last}, {next}, {top} and the like work too.

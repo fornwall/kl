@@ -1793,6 +1793,50 @@ fn select_layout_goes_by_the_start_of_a_name_and_applies_again() {
 }
 
 #[test]
+fn lists_buffers_by_a_format() {
+    let screen = Screen::new(80, 24);
+    for args in [
+        &["set-buffer", "-b", "zed", "first text"][..],
+        &["set-buffer", "auto one, a longer text"],
+        &["set-buffer", "-b", "alpha", "x"],
+    ] {
+        assert_eq!(output_of(&screen, args), "");
+    }
+    let names = |flags: &[&str]| {
+        let args = [&["list-buffers", "-F", "#{buffer_name}"], flags].concat();
+        output_of(&screen, &args)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert_eq!(names(&[]), "alpha buffer0 zed");
+    assert_eq!(names(&["-r"]), "alpha buffer0 zed");
+    assert_eq!(names(&["-O", "creation", "-r"]), "zed buffer0 alpha");
+    assert_eq!(names(&["-O", "name", "-r"]), "zed buffer0 alpha");
+    assert_eq!(names(&["-O", "size"]), "alpha zed buffer0");
+    assert_eq!(names(&["-f", "#{==:#{buffer_size},1}"]), "alpha");
+
+    let format = "#{buffer_size}|#{buffer_sample}|#{buffer_full}|#{window_index}";
+    let args = ["lsb", "-F", format, "-f", "#{==:#{buffer_name},zed}"];
+    assert_eq!(output_of(&screen, &args), "10|first text|first text|\n");
+
+    let args = [
+        "lsb",
+        "-F",
+        "#{buffer_created}",
+        "-f",
+        "#{==:#{buffer_name},alpha}",
+    ];
+    let created: u64 = output_of(&screen, &args).trim().parse().unwrap();
+    assert!(created > 1_700_000_000, "{created}");
+
+    assert_eq!(
+        error_of(&screen, &["lsb", "-O", "time"]),
+        "kl: invalid sort order\n"
+    );
+}
+
+#[test]
 fn resizes_a_pane_to_a_size() {
     let screen = three_panes();
     let width = "#{pane_width}";

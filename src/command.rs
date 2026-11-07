@@ -50,12 +50,30 @@ pub struct SetBuffer {
     pub data: Option<String>,
 }
 
+/// What `-O` sorts buffers by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferOrder {
+    Creation,
+    Name,
+    Size,
+}
+
+/// What `list-buffers` was asked to do.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ListBuffers {
+    pub format: Option<String>,
+    pub filter: Option<String>,
+    pub order: Option<BufferOrder>,
+    /// Turn the order around, which only goes for one that was asked for.
+    pub reverse: bool,
+}
+
 /// The commands that work on paste buffers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BufferCommand {
     Choose,
     Delete(Option<String>),
-    List,
+    List(ListBuffers),
     Load {
         name: Option<String>,
         path: PathBuf,
@@ -399,9 +417,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "kill-window" | "killw" => parse_kill_window(args),
         "last-pane" | "lastp" => parse_last_pane(args),
         "last-window" | "last" => no_args("last-window", args, Command::LastWindow),
-        "list-buffers" | "lsb" => {
-            no_args("list-buffers", args, Command::Buffer(BufferCommand::List))
-        }
+        "list-buffers" | "lsb" => parse_list_buffers(args),
         "list-keys" | "lsk" => parse_list_keys(args),
         "list-panes" | "lsp" => parse_list_panes(args),
         "list-windows" | "lsw" => parse_list_windows(args),
@@ -602,6 +618,23 @@ fn parse_buffer_name(
     let flags = Flags::parse(name, args, "b:")?;
     flags.at_most(0)?;
     Ok(Command::Buffer(command(flags.value('b'))))
+}
+
+fn parse_list_buffers(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("list-buffers", args, "F:f:O:r")?;
+    flags.at_most(0)?;
+    let order = flags.value('O').map(|order| match order.as_str() {
+        "creation" => Ok(BufferOrder::Creation),
+        "name" => Ok(BufferOrder::Name),
+        "size" => Ok(BufferOrder::Size),
+        _ => Err("invalid sort order".to_owned()),
+    });
+    Ok(Command::Buffer(BufferCommand::List(ListBuffers {
+        format: flags.value('F'),
+        filter: flags.value('f'),
+        order: order.transpose()?,
+        reverse: flags.has('r'),
+    })))
 }
 
 fn parse_load_buffer(args: &[String]) -> Result<Command, String> {
@@ -1482,6 +1515,27 @@ mod tests {
         );
         assert!(parse(&words("setw monitor-activity maybe")).is_err());
         assert!(parse(&words("setw monitor-activity on now")).is_err());
+    }
+
+    #[test]
+    fn parses_listing_buffers() {
+        assert_eq!(
+            command("lsb"),
+            Command::Buffer(BufferCommand::List(ListBuffers::default()))
+        );
+        assert_eq!(
+            command("list-buffers -r -O size -F #{buffer_name} -f 1"),
+            Command::Buffer(BufferCommand::List(ListBuffers {
+                format: Some("#{buffer_name}".to_owned()),
+                filter: Some("1".to_owned()),
+                order: Some(BufferOrder::Size),
+                reverse: true,
+            }))
+        );
+        assert_eq!(
+            parse(&words("list-buffers -O time")).unwrap_err(),
+            "invalid sort order"
+        );
     }
 
     #[test]
