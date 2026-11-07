@@ -28,6 +28,8 @@ pub struct Window {
     pub monitor: Monitor,
     /// The preset layout applied last.
     pub layout: Option<Layout>,
+    /// What looks like it is taking over the foreground, for [`Window::follow`].
+    pub next_name: Option<String>,
 }
 
 /// Whether output in a window is flagged, as tmux's `monitor-activity`.
@@ -39,7 +41,32 @@ pub enum Monitor {
     Flagged,
 }
 
+/// What came of a look at what runs in a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameCheck {
+    Unchanged,
+    Changed,
+    /// Something else is running, which it takes another look to believe.
+    LookAgain,
+}
+
 impl Window {
+    /// Follows what runs in the foreground. A name has to be seen twice in a
+    /// row, or what a shell runs on its way to a prompt would make it flicker.
+    pub fn follow(&mut self, name: String) -> NameCheck {
+        if name == self.name {
+            self.next_name = None;
+            NameCheck::Unchanged
+        } else if self.next_name.as_ref() == Some(&name) {
+            self.next_name = None;
+            self.name = name;
+            NameCheck::Changed
+        } else {
+            self.next_name = Some(name);
+            NameCheck::LookAgain
+        }
+    }
+
     pub fn has_activity(&self) -> bool {
         self.monitor == Monitor::Flagged
     }
@@ -379,6 +406,7 @@ impl Session {
             bell: false,
             monitor: Monitor::Off,
             layout: None,
+            next_name: None,
         };
         self.next_window += 1;
         let position = self.windows.partition_point(|w| w.index < index);
@@ -645,6 +673,7 @@ impl Session {
                 bell: false,
                 monitor: Monitor::Off,
                 layout: None,
+                next_name: None,
             };
             self.next_window += 1;
             window
@@ -792,5 +821,55 @@ impl Session {
             window.root.resize(id, area, direction, cells);
             self.relayout();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window() -> Window {
+        Window {
+            id: 0,
+            index: 0,
+            name: "sh".to_owned(),
+            automatic_name: true,
+            root: Node::Leaf(0),
+            active: 0,
+            last_active: None,
+            zoomed: false,
+            bell: false,
+            monitor: Monitor::Off,
+            layout: None,
+            next_name: None,
+        }
+    }
+
+    #[test]
+    fn a_name_takes_two_looks_to_change() {
+        let mut window = window();
+        assert_eq!(window.follow("sh".to_owned()), NameCheck::Unchanged);
+        assert_eq!(window.follow("vim".to_owned()), NameCheck::LookAgain);
+        assert_eq!(window.name, "sh");
+        assert_eq!(window.follow("vim".to_owned()), NameCheck::Changed);
+        assert_eq!(window.name, "vim");
+        assert_eq!(window.follow("vim".to_owned()), NameCheck::Unchanged);
+    }
+
+    #[test]
+    fn what_comes_and_goes_leaves_the_name_alone() {
+        let mut window = window();
+        assert_eq!(window.follow("git".to_owned()), NameCheck::LookAgain);
+        assert_eq!(window.follow("sh".to_owned()), NameCheck::Unchanged);
+        assert_eq!(window.follow("git".to_owned()), NameCheck::LookAgain);
+        assert_eq!(window.name, "sh");
+    }
+
+    #[test]
+    fn programs_in_a_row_do_not_add_up() {
+        let mut window = window();
+        assert_eq!(window.follow("git".to_owned()), NameCheck::LookAgain);
+        assert_eq!(window.follow("sed".to_owned()), NameCheck::LookAgain);
+        assert_eq!(window.name, "sh");
     }
 }

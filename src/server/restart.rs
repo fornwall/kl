@@ -229,6 +229,7 @@ fn take_window(reader: &mut Reader<'_>) -> Result<Window, Malformed> {
         layout: take_optional_u32(reader)?
             .and_then(|index| usize::try_from(index).ok())
             .and_then(|index| Layout::ALL.get(index).copied()),
+        next_name: None,
     })
 }
 

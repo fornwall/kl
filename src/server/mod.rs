@@ -36,7 +36,7 @@ use layout::PaneId;
 use pane::Activity;
 use render::{Renderer, osc_text};
 pub use restart::STATE_VERSION;
-use session::{Monitor, Session};
+use session::{Monitor, NameCheck, Session};
 use ui::Ui;
 
 /// The shortest time between frames, to coalesce heavy output.
@@ -52,9 +52,10 @@ const OUTPUT_PIECE: usize = 1024 * 1024;
 /// How often to refresh window names and the clock.
 const TICK_TIME: Duration = Duration::from_secs(1);
 
-/// How long after something happened to look at what runs in each window. A
-/// shell takes a moment to start what was typed, and may print nothing when it
-/// does, so looking right away would see the shell itself.
+/// How long after something happened to look at what runs in each window, and
+/// to look again for [`session::Window::follow`]. A shell takes a moment to start what was
+/// typed, and may print nothing when it does, so looking right away would see the
+/// shell itself.
 const NAME_DELAY: Duration = Duration::from_millis(50);
 
 /// How long a server waits for its first client before giving up.
@@ -608,17 +609,22 @@ impl Server {
 
     fn refresh_window_names(&mut self) {
         self.names_due = None;
+        let mut look_again = false;
         for window in &mut self.session.windows {
             if !window.automatic_name {
                 continue;
             }
             let pane = self.session.panes.get(&window.active);
-            if let Some(name) = pane.and_then(pane::Pane::foreground_name)
-                && name != window.name
-            {
-                window.name = name;
-                self.dirty = true;
+            if let Some(name) = pane.and_then(pane::Pane::foreground_name) {
+                match window.follow(name) {
+                    NameCheck::Unchanged => {}
+                    NameCheck::Changed => self.dirty = true,
+                    NameCheck::LookAgain => look_again = true,
+                }
             }
+        }
+        if look_again {
+            self.names_may_change();
         }
     }
 
