@@ -141,7 +141,6 @@ What is left of tmux's `copy-mode-vi` table, and the differences that remain:
 
 Things panes can ask for that stop at kl today.
 
-- Reading the clipboard (OSC 52 `?`), which needs a decision on who may do that.
 - Trying images in the Ghostty app. Everything so far ran against libghostty-vt
   as the outer terminal, and palette queries have shown that the two can differ.
 - Playing animations, which stay on their current frame. It takes calling

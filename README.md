@@ -62,6 +62,17 @@ These are choices rather than gaps, and each has a reason.
   tmux goes by the first client that knows. When terminals disagree, programs that
   asked to hear of changes get told as the window moves between them.
 - **A program has the keyboard while any terminal showing it does.**
+- **Programs read kl's paste buffers, never the system clipboard.** An OSC 52 read
+  gets the newest automatic buffer, as with tmux's default, and only from the
+  active pane. Any other pane gets nothing. The answer goes to a program's pty,
+  which can lead to another host, so text copied outside kl stays out of reach.
+- **Notifications get through from every pane,** seen or not, since telling you
+  about something out of sight is what they are for.
+- **Images are worth their size.** Kitty graphics and PNG decoding add about
+  390 KB to the binary. PNG comes from a one line patch that turns on Ghostty's
+  own decoder, rather than a second decoder of untrusted input in the server.
+- **Copy mode adds to tmux's keys.** `y` copies, and `[` and `]` jump between
+  prompts. tmux leaves `y` unbound, and has that jump on other keys only.
 - **Upgrades keep programs running, crashes and reboots do not.** `kl
   restart-server` turns the running server into a new binary by way of `exec`.
   Nothing can keep programs alive through a crash or a reboot, so those end the
@@ -100,8 +111,6 @@ each target has been verified.
   a regular expression, and there is no `#()`, `#[]` or looping over windows.
 - **`find-window` has no regular expressions.** There is no `-r`, and its
   patterns know `*` and `?`, but not the `[...]` of `glob(7)`.
-- **Programs cannot read the clipboard.** They can write to it, but who should be
-  allowed to read it is undecided, so OSC 52 queries get no answer.
 - **`restart-server` has some rough edges:**
   - A key typed at the moment of the restart can be lost, along with input a
     program had not read yet.

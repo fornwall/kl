@@ -233,23 +233,25 @@ impl Pane {
         }
     }
 
-    /// Feeds the program's output into the terminal.
-    pub fn read(&mut self) -> Activity {
+    /// Feeds the program's output into the terminal. `clipboard` is what the
+    /// program gets if it reads the clipboard.
+    pub fn read(&mut self, clipboard: Option<&[u8]>) -> Activity {
         let mut buf = vec![0; READ_SIZE];
-        let mut output = 0;
+        let mut read = 0;
         match (&self.pty).read(&mut buf) {
             // On Linux, the master reports EIO once the slave side is closed.
             Ok(0) => self.exited = true,
             Ok(len) => {
-                output = len;
-                self.terminal.write(buf.get(..len).unwrap_or(&[]));
+                read = len;
+                let output = buf.get(..len).unwrap_or(&[]);
+                self.terminal.write_with_clipboard(output, clipboard);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => self.exited = true,
         }
         Activity {
-            output,
+            output: read,
             ..self.take_activity()
         }
     }

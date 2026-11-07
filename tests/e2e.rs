@@ -3176,6 +3176,38 @@ fn forwards_clipboard_writes_to_the_outer_terminal() {
 }
 
 #[test]
+fn the_active_pane_reads_the_newest_paste_buffer() {
+    let mut screen = Screen::new(80, 24);
+    assert!(screen.command(&["set-buffer", "hello"]).status.success());
+    screen.run_setup_then_cat(r"printf '\033]52;c;?\033\\'");
+    screen.wait_for_text("52;c;aGVsbG8=");
+}
+
+#[test]
+fn reading_the_clipboard_gets_nothing_without_a_paste_buffer() {
+    let mut screen = Screen::new(80, 24);
+    screen.run_setup_then_cat(r"printf '\033]52;c;?\033\\'");
+    screen.wait_for_text("52;c;^[");
+}
+
+#[test]
+fn a_pane_not_in_use_cannot_read_the_clipboard() {
+    let mut screen = Screen::new(80, 24);
+    assert!(screen.command(&["set-buffer", "hello"]).status.success());
+    // It asks once told to, when the other pane has taken over.
+    let go = screen.dir.0.join("go");
+    let go = go.display();
+    screen.run(&format!(
+        r"while [ ! -e {go} ]; do sleep 0.01; done; printf '\033]52;c;?\033\\'; cat -v"
+    ));
+    screen.prefix("%");
+    screen.wait_for_text("│");
+    fs::write(go.to_string(), "").unwrap();
+    let lines = screen.wait_for_text("52;c;^[");
+    assert!(!lines.iter().any(|line| line.contains("aGVsbG8=")));
+}
+
+#[test]
 fn programs_can_query_the_outer_colors() {
     let mut screen = Screen::new(80, 24);
     // The tty echoes the reply, which is all this needs to see.

@@ -35,6 +35,8 @@ const CONTINUATION_BYTES: usize = 64 * 1024;
 
 const VERSION_REPLY: &str = concat!("kl ", env!("CARGO_PKG_VERSION"));
 
+const TEXT_PLAIN: &str = "text/plain";
+
 /// What programs in these terminals see as `TERM`.
 pub const TERM: &str = "xterm-ghostty";
 
@@ -482,6 +484,9 @@ pub struct Effects {
     pub title_changed: bool,
     /// Text a program wants on the clipboard, oldest first.
     pub clipboard: Vec<Vec<u8>>,
+    /// What a program gets if it reads the clipboard. Only set during a write,
+    /// since it borrows from the caller of [`Terminal::write_with_clipboard`].
+    readable_clipboard: Option<ffi::Bytes>,
     /// Oldest first.
     pub notifications: Vec<Notification>,
     /// The program said something about its progress, even if nothing changed.
@@ -665,6 +670,43 @@ unsafe extern "C" fn on_color_scheme(
     // SAFETY: libghostty-vt passes a valid pointer to write the answer to.
     unsafe { out.write(effects.color_scheme) };
     true
+}
+
+/// Answers with what the caller of the write allowed, and refuses without it.
+/// Pastes go through `ghostty_paste_encode`, so a read never follows a paste
+/// event of mode 5522, which would have to get the pasted text instead.
+unsafe extern "C" fn on_clipboard_read(
+    _terminal: ffi::Handle,
+    userdata: *mut c_void,
+    read: *const ffi::ClipboardRead,
+) {
+    // SAFETY: Called by libghostty-vt with the registered userdata.
+    let effects = unsafe { effects_of(userdata) };
+    let mime = ffi::Bytes {
+        ptr: TEXT_PLAIN.as_ptr(),
+        len: TEXT_PLAIN.len(),
+    };
+    let content = effects
+        .readable_clipboard
+        .map(|data| ffi::ClipboardContent { mime, data });
+    let reply = ffi::ClipboardReadReply {
+        size: size_of::<ffi::ClipboardReadReply>(),
+        result: if content.is_some() {
+            ffi::CLIPBOARD_READ_SUCCESS
+        } else {
+            ffi::CLIPBOARD_READ_DENIED
+        },
+        contents: content.as_ref().map_or(ptr::null(), ptr::from_ref),
+        contents_len: usize::from(content.is_some()),
+        available: &raw const mime,
+        available_len: 1,
+        remember: false,
+    };
+    // SAFETY: libghostty-vt passes a request valid for the duration of the call.
+    let answer = unsafe { (*read).reply };
+    // SAFETY: `answer` is the callback the request says to answer with, and the
+    // reply and what it points to outlive the call.
+    unsafe { answer(read, &raw const reply) };
 }
 
 unsafe extern "C" fn on_clipboard_write(
@@ -918,6 +960,7 @@ impl Terminal {
             bell: false,
             title_changed: false,
             clipboard: Vec::new(),
+            readable_clipboard: None,
             notifications: Vec::new(),
             progress_reported: false,
             progress: None,
@@ -995,6 +1038,7 @@ impl Terminal {
             ffi::OPT_CLIPBOARD_WRITE,
             on_clipboard_write as *const c_void,
         )?;
+        self.set(ffi::OPT_CLIPBOARD_READ, on_clipboard_read as *const c_void)?;
         self.set(
             ffi::OPT_DESKTOP_NOTIFICATION,
             on_notification as *const c_void,
@@ -1034,6 +1078,18 @@ impl Terminal {
     pub fn write(&mut self, data: &[u8]) {
         // SAFETY: `data` is valid for reads of its length during the call.
         unsafe { ffi::ghostty_terminal_vt_write(self.handles.terminal, data.as_ptr(), data.len()) };
+    }
+
+    /// Like [`Self::write`], with what the program gets if this output reads the
+    /// clipboard. Without it, the read gets nothing. The library wants an answer
+    /// on the spot, so this has to be known before seeing what the program says.
+    pub fn write_with_clipboard(&mut self, data: &[u8], clipboard: Option<&[u8]>) {
+        self.effects().readable_clipboard = clipboard.map(|text| ffi::Bytes {
+            ptr: text.as_ptr(),
+            len: text.len(),
+        });
+        self.write(data);
+        self.effects().readable_clipboard = None;
     }
 
     /// Compresses a little of the scrollback, if it did not change since the
@@ -2614,6 +2670,14 @@ mod tests {
             "ctx" => ctx, "reply" => reply);
         assert_layout!(m, "GhosttyClipboardWriteReply", ffi::ClipboardWriteReply,
             "size" => size, "result" => result, "remember" => remember);
+        assert_layout!(m, "GhosttyClipboardRead", ffi::ClipboardRead,
+            "location" => location, "mimes" => mimes, "mimes_len" => mimes_len, "list" => list,
+            "name" => name, "granted" => granted, "can_remember" => can_remember,
+            "ctx" => ctx, "reply" => reply);
+        assert_layout!(m, "GhosttyClipboardReadReply", ffi::ClipboardReadReply,
+            "size" => size, "result" => result, "contents" => contents,
+            "contents_len" => contents_len, "available" => available,
+            "available_len" => available_len, "remember" => remember);
         assert_layout!(m, "GhosttyRenderStateColors", ffi::RenderColors,
             "size" => size, "background" => background, "foreground" => foreground,
             "cursor" => cursor, "cursor_has_value" => cursor_has_value, "palette" => palette);
@@ -2954,6 +3018,23 @@ mod tests {
         assert!(terminal.effects().title_changed);
         assert!(terminal.effects().bell);
         assert_eq!(terminal.title(), "hello");
+    }
+
+    #[test]
+    fn answers_clipboard_reads_only_with_what_it_was_given() {
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        let query = b"\x1b]52;c;?\x1b\\";
+        terminal.write_with_clipboard(query, Some(b"hello"));
+        let reply = std::mem::take(&mut terminal.effects().replies);
+        assert_eq!(reply, b"\x1b]52;c;aGVsbG8=\x1b\\");
+
+        terminal.write_with_clipboard(query, None);
+        let reply = std::mem::take(&mut terminal.effects().replies);
+        assert_eq!(reply, b"\x1b]52;c;\x1b\\");
+
+        // What was allowed for one write is gone by the next.
+        terminal.write(query);
+        assert_eq!(terminal.effects().replies, b"\x1b]52;c;\x1b\\");
     }
 
     #[test]

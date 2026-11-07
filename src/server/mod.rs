@@ -616,6 +616,7 @@ impl Server {
 
     fn service_panes(&mut self, selector: &Selector) {
         let ids: Vec<PaneId> = self.session.panes.keys().copied().collect();
+        let active = self.session.active_id();
         for id in ids {
             let Some(pane) = self.session.panes.get_mut(&id) else {
                 continue;
@@ -624,7 +625,12 @@ impl Server {
                 pane.flush();
             }
             if selector.readable(pane.fd()) {
-                let activity = pane.read();
+                // A reply goes to the program's pty, which can lead to another
+                // host, so this is for the pane in use, and never gets further
+                // than what was copied in kl.
+                let readable = (active == Some(id)).then(|| self.buffers.top());
+                let clipboard = readable.flatten().map(|buffer| buffer.text.as_bytes());
+                let activity = pane.read(clipboard);
                 self.after_read(id, &activity);
             }
         }
