@@ -1,17 +1,18 @@
 //! What happens with input: key bindings, the mouse, and running commands.
 
-use std::ffi::c_int;
+use std::ffi::{CString, c_int};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::copy_mode::{self, Action, Binding as CopyBinding, CopyMode, CopyPrompt, Outcome};
 use super::format::Context;
 use super::keys;
-use super::layout::{Divider, PaneId, Rect};
+use super::layout::{Divider, PaneId};
 use super::pane::Pane;
 use super::session::{Monitor, Window};
 use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
 use super::{Lifecycle, Server, color_queries};
-use crate::command::{self, BufferCommand, Command, PasteOptions};
+use crate::command::{self, BufferCommand, Command, PaneScope, PasteOptions};
 use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
     Autoscroll, KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MULTI_CLICK_TIME, MouseAction,
@@ -19,6 +20,7 @@ use crate::ghostty::{
 };
 use crate::input::{Event, KeyEvent, MouseEvent};
 use crate::proto::ServerMessage;
+use crate::sys;
 
 /// How long dragging at the edge of a pane takes to scroll a row, as in tmux.
 const AUTOSCROLL_TIME: Duration = Duration::from_millis(50);
@@ -26,6 +28,19 @@ const AUTOSCROLL_TIME: Duration = Duration::from_millis(50);
 /// How long a repeatable binding keeps working without the prefix, which is
 /// tmux's `repeat-time`.
 const REPEAT_TIME: Duration = Duration::from_millis(500);
+
+/// What `display-message` shows by default.
+const DISPLAY_MESSAGE: &str = "[#{session_name}] #{window_index}:#{window_name}, \
+     current pane #{pane_index} - (%H:%M %d-%b-%y)";
+
+/// What `list-windows` shows by default, except for tmux's window layout.
+const LIST_WINDOWS: &str = "#{window_index}: #{window_name}#{window_flags} \
+     (#{window_panes} panes) [#{window_width}x#{window_height}] \
+     #{window_id}#{?window_active, (active),}";
+
+/// What `list-panes` shows by default, except for tmux's history figures.
+const LIST_PANES: &str = "#{pane_index}: [#{pane_width}x#{pane_height}] \
+     #{pane_id}#{?pane_active, (active),}";
 
 /// Rows moved for each step of the wheel.
 const WHEEL_ROWS: i32 = 3;
@@ -74,6 +89,31 @@ pub struct Selecting {
     y: u16,
     /// Which way the view follows the pointer, and when it does so next.
     scroll: Option<(Autoscroll, Instant)>,
+}
+
+/// A line of a format for each of what `-f` lets through.
+fn listing<'a>(
+    contexts: impl Iterator<Item = Context<'a>>,
+    format: &str,
+    filter: Option<&str>,
+) -> String {
+    let mut text = String::new();
+    for context in contexts.filter(|context| filter.is_none_or(|filter| context.holds(filter))) {
+        text.push_str(&context.expand(format));
+        text.push('\n');
+    }
+    text
+}
+
+/// Fills in the time as `strftime` would, which `display-message` does.
+fn with_local_time(format: &str) -> String {
+    if !format.contains('%') {
+        return format.to_owned();
+    }
+    let time = CString::new(format).map(|format| sys::local_time(&format));
+    time.ok()
+        .filter(|time| !time.is_empty())
+        .unwrap_or_else(|| format.to_owned())
 }
 
 const fn is_wheel(button: Option<MouseButton>) -> bool {
@@ -396,7 +436,8 @@ impl Server {
                 pane: session.panes.get(&window.active),
             };
             let text = context.expand("#I: #W#F#{?pane_title, \"#T\",}");
-            ListRow::new(text, Command::SelectWindow(window.index))
+            let target = Some(format!("@{}", window.id));
+            ListRow::new(text, Command::SelectWindow { target })
         };
         let rows = session.windows.iter().map(row).collect();
         let current = session
@@ -502,7 +543,7 @@ impl Server {
         self.ui.prompt = Some(Prompt::new(&label, "", action));
     }
 
-    fn send_prefix(&mut self) {
+    fn send_prefix(&mut self, id: PaneId) {
         let input = KeyInput {
             action: KeyAction::Press,
             key: key::from_codepoint(u32::from('b')),
@@ -511,7 +552,7 @@ impl Server {
             text: "",
             unshifted: u32::from('b'),
         };
-        if let Some(pane) = self.session.active_pane_mut() {
+        if let Some(pane) = self.session.panes.get_mut(&id) {
             let bytes = pane.terminal.encode_key(&input);
             pane.send(&bytes);
         }
@@ -552,6 +593,7 @@ impl Server {
     }
 
     /// Runs a command, returning any output for the user.
+    #[expect(clippy::too_many_lines, reason = "it takes an arm for each command")]
     pub fn execute(&mut self, command: Command) -> Result<String, String> {
         self.dirty = true;
         self.names_may_change();
@@ -566,21 +608,35 @@ impl Server {
             Command::ConfirmBefore { prompt, command } => {
                 self.confirm_before(prompt.as_deref(), command);
             }
-            Command::CopyMode { page_up } => self.start_copy_mode(page_up),
+            Command::CopyMode { page_up, target } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.start_copy_mode(id, page_up);
+            }
             Command::DetachClient => self.detach(),
-            Command::DisplayMessage(text) => self.ui.show_message(text),
+            Command::DisplayMessage {
+                target,
+                print,
+                format,
+            } => return self.display_message(target.as_deref(), print, format.as_deref()),
             Command::DisplayPanes(time) => self.ui.show_pane_numbers(time),
-            Command::KillPane => {
-                if let Some(id) = self.session.active_id() {
-                    self.session.remove_pane(id);
-                }
+            Command::KillPane { target, others } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.kill_pane(id, others);
             }
             Command::KillServer => {
                 self.exit_message = "[server exited]";
                 self.lifecycle = Lifecycle::Quitting;
             }
-            Command::KillWindow => self.session.kill_current_window(),
-            Command::LastPane => self.session.select_last_pane(),
+            Command::KillWindow { target, others } => {
+                let index = self.session.find_window(target.as_deref())?;
+                self.kill_window(index, others);
+            }
+            Command::LastPane { target } => {
+                let index = self.session.find_window(target.as_deref())?;
+                let window = self.session.window_at(index);
+                let last = window.and_then(|window| window.last_active);
+                self.session.show_pane(last.ok_or("no last pane")?);
+            }
             Command::LastWindow => {
                 let last = self.session.last.ok_or("no last window")?;
                 self.session.select_window(last);
@@ -588,47 +644,188 @@ impl Server {
             Command::ListKeys { notes } => {
                 return Ok(format!("{}\n", keys::list(notes).join("\n")));
             }
-            Command::ListPanes => return Ok(self.list_panes()),
-            Command::ListWindows => return Ok(self.list_windows()),
-            Command::NewWindow { name, program } => self.session.new_window(name, &program)?,
-            Command::NextPane => self.session.select_next_pane(),
-            Command::NextWindow => self.session.next_window(),
-            Command::PreviousWindow => self.session.previous_window(),
-            Command::RenameWindow(name) => {
-                if let Some(window) = self.session.window_mut() {
+            Command::ListPanes {
+                scope,
+                target,
+                format,
+                filter,
+            } => {
+                let format = format.as_deref();
+                return self.list_panes(scope, target.as_deref(), format, filter.as_deref());
+            }
+            Command::ListWindows {
+                all,
+                format,
+                filter,
+            } => return Ok(self.list_windows(all, format.as_deref(), filter.as_deref())),
+            Command::NewWindow {
+                target,
+                name,
+                directory,
+                detached,
+                print,
+                program,
+            } => {
+                let index = target.map(|target| self.session.find_free_index(&target));
+                let index = index
+                    .transpose()
+                    .map_err(|error| format!("create window failed: {error}"))?
+                    .flatten();
+                let directory = self.expand_directory(directory);
+                let id = self.session.new_window(
+                    name,
+                    &program,
+                    directory.as_deref(),
+                    index,
+                    detached,
+                )?;
+                return Ok(self.tell_about(id, print.as_deref()));
+            }
+            Command::NextWindow { alert } => {
+                if !self.session.next_window(alert) {
+                    return Err("no next window".to_owned());
+                }
+            }
+            Command::PreviousWindow { alert } => {
+                if !self.session.previous_window(alert) {
+                    return Err("no previous window".to_owned());
+                }
+            }
+            Command::RenameWindow { target, name } => {
+                let index = self.session.find_window(target.as_deref())?;
+                if let Some(window) = self.session.window_at_mut(index) {
                     window.name = name;
                     window.automatic_name = false;
                 }
             }
-            Command::ResizePane { direction, cells } => {
-                self.session.resize_pane(direction, cells);
+            Command::ResizePane {
+                target,
+                direction,
+                cells,
+            } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.session.resize_pane(id, direction, cells);
             }
             Command::RestartServer(binary) => self.restart(binary)?,
-            Command::SelectPane(direction) => self.session.select_direction(direction),
-            Command::SelectWindow(index) => {
-                if !self.session.select_window(index) {
-                    return Err(format!("no window {index}"));
+            Command::SelectPane { target, direction } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                match direction {
+                    Some(direction) => self.session.select_direction(id, direction),
+                    None => self.session.show_pane(id),
                 }
             }
-            Command::SendKeys(keys) => {
+            Command::SelectWindow { target } => {
+                let index = self.session.find_window(target.as_deref())?;
+                self.session.select_window(index);
+            }
+            Command::SendKeys {
+                target,
+                literal,
+                keys,
+            } => {
+                let id = self.session.find_pane(target.as_deref())?;
                 let bytes: Vec<u8> = keys
                     .iter()
-                    .flat_map(|key| command::key_bytes(key))
+                    .flat_map(|key| {
+                        if literal {
+                            key.as_bytes().to_vec()
+                        } else {
+                            command::key_bytes(key)
+                        }
+                    })
                     .collect();
-                if let Some(pane) = self.session.active_pane_mut() {
+                if let Some(pane) = self.session.panes.get_mut(&id) {
                     pane.send(&bytes);
                 }
             }
-            Command::SendPrefix => self.send_prefix(),
-            Command::SetMonitorActivity(value) => {
-                if let Some(window) = self.session.window_mut() {
+            Command::SendPrefix { target } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.send_prefix(id);
+            }
+            Command::SetMonitorActivity { target, value } => {
+                let index = self.session.find_window(target.as_deref())?;
+                if let Some(window) = self.session.window_at_mut(index) {
                     let on = value.unwrap_or(window.monitor == Monitor::Off);
                     window.monitor = if on { Monitor::Watching } else { Monitor::Off };
                 }
             }
-            Command::SplitWindow { kind, program } => self.session.split(kind, &program)?,
-            Command::ToggleZoom => self.session.toggle_zoom(),
+            Command::SplitWindow {
+                target,
+                place,
+                directory,
+                detached,
+                print,
+                program,
+            } => {
+                let target = self.session.find_pane(target.as_deref())?;
+                let directory = self.expand_directory(directory);
+                let id =
+                    self.session
+                        .split(target, place, &program, directory.as_deref(), detached)?;
+                return Ok(self.tell_about(id, print.as_deref()));
+            }
+            Command::ToggleZoom { target } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.session.toggle_zoom(id);
+            }
         }
+        Ok(String::new())
+    }
+
+    /// What `-c` says, which is a format.
+    fn expand_directory(&self, directory: Option<String>) -> Option<PathBuf> {
+        let context = Context::current(&self.session);
+        directory.map(|directory| PathBuf::from(context.expand(&directory)))
+    }
+
+    /// What `-P` prints about a new pane.
+    fn tell_about(&self, id: PaneId, format: Option<&str>) -> String {
+        format.map_or_else(String::new, |format| {
+            let text = Context::of_pane(&self.session, id).expand(format);
+            format!("{text}\n")
+        })
+    }
+
+    fn kill_pane(&mut self, id: PaneId, others: bool) {
+        if !others {
+            self.session.remove_pane(id);
+            return;
+        }
+        let area = self.session.area();
+        let panes = self.session.window_of(id).map(|w| w.root.panes(area));
+        for (other, _) in panes.unwrap_or_default() {
+            if other != id {
+                self.session.remove_pane(other);
+            }
+        }
+    }
+
+    fn kill_window(&mut self, index: u32, others: bool) {
+        if !others {
+            self.session.kill_window(index);
+            return;
+        }
+        let windows = self.session.windows.iter().map(|window| window.index);
+        let others: Vec<u32> = windows.filter(|other| *other != index).collect();
+        for other in others {
+            self.session.kill_window(other);
+        }
+    }
+
+    fn display_message(
+        &mut self,
+        target: Option<&str>,
+        print: bool,
+        format: Option<&str>,
+    ) -> Result<String, String> {
+        let id = self.session.find_pane(target)?;
+        let format = format.unwrap_or(DISPLAY_MESSAGE);
+        let format = with_local_time(format);
+        let text = Context::of_pane(&self.session, id).expand(&format);
+        if print {
+            return Ok(format!("{text}\n"));
+        }
+        self.ui.show_message(text);
         Ok(String::new())
     }
 
@@ -640,8 +837,8 @@ impl Server {
         }
     }
 
-    fn start_copy_mode(&mut self, page_up: bool) {
-        if let Some(pane) = self.session.active_pane_mut() {
+    fn start_copy_mode(&mut self, id: PaneId, page_up: bool) {
+        if let Some(pane) = self.session.panes.get_mut(&id) {
             CopyMode::enter(pane, false);
             if page_up {
                 copy_mode::page_up(pane, false);
@@ -649,31 +846,39 @@ impl Server {
         }
     }
 
-    fn list_windows(&self) -> String {
-        let area = self.session.area();
-        let (width, height) = (area.width, area.height);
-        let line = |window: &Window| {
-            let panes = window.root.panes(area).len();
-            let current = window.index == self.session.current;
-            let marker = if current { " (active)" } else { "" };
-            let (index, name) = (window.index, &window.name);
-            format!("{index}: {name} ({panes} panes) [{width}x{height}]{marker}\n")
+    fn list_windows(&self, all: bool, format: Option<&str>, filter: Option<&str>) -> String {
+        let session = &self.session;
+        let default = if all {
+            format!("#{{session_name}}:{LIST_WINDOWS}")
+        } else {
+            LIST_WINDOWS.to_owned()
         };
-        self.session.windows.iter().map(line).collect()
+        let format = format.unwrap_or(&default);
+        let windows = session.windows.iter();
+        let contexts = windows.map(|window| Context::of_window(session, window));
+        listing(contexts, format, filter)
     }
 
-    fn list_panes(&self) -> String {
-        let Some(window) = self.session.window() else {
-            return String::new();
+    fn list_panes(
+        &self,
+        scope: PaneScope,
+        target: Option<&str>,
+        format: Option<&str>,
+        filter: Option<&str>,
+    ) -> Result<String, String> {
+        let session = &self.session;
+        let default = match scope {
+            PaneScope::Window => LIST_PANES.to_owned(),
+            PaneScope::Session => format!("#{{window_index}}.{LIST_PANES}"),
+            PaneScope::All => format!("#{{session_name}}:#{{window_index}}.{LIST_PANES}"),
         };
-        let panes = window.root.panes(self.session.area());
-        let line = |(index, (id, rect)): (usize, &(PaneId, Rect))| {
-            let active = *id == window.active;
-            let marker = if active { " (active)" } else { "" };
-            let (width, height) = (rect.width, rect.height);
-            format!("{index}: [{width}x{height}] %{id}{marker}\n")
-        };
-        panes.iter().enumerate().map(line).collect()
+        let index = session.find_window(target)?;
+        let windows = session.windows.iter();
+        let windows = windows.filter(|window| scope != PaneScope::Window || window.index == index);
+        let area = session.area();
+        let panes = windows.flat_map(|window| window.root.panes(area));
+        let contexts = panes.map(|(id, _)| Context::of_pane(session, id));
+        Ok(listing(contexts, format.unwrap_or(&default), filter))
     }
 
     /// A report in pixels as the cell it is in, for everything but the program
@@ -794,8 +999,12 @@ impl Server {
                     self.session.select_window(index);
                 }
             }
-            Some(MouseButton::WheelUp) => self.session.previous_window(),
-            Some(MouseButton::WheelDown) => self.session.next_window(),
+            Some(MouseButton::WheelUp) => {
+                self.session.previous_window(false);
+            }
+            Some(MouseButton::WheelDown) => {
+                self.session.next_window(false);
+            }
             _ => {}
         }
     }

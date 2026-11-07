@@ -305,7 +305,8 @@ impl Server {
             return Ok(());
         };
         let name = buffer.name.clone();
-        if let Some(pane) = self.session.active_pane_mut() {
+        let id = self.session.find_pane(options.target.as_deref())?;
+        if let Some(pane) = self.session.panes.get_mut(&id) {
             let bytes = paste_bytes(&pane.terminal, &buffer.text, options);
             pane.send(&bytes);
         }

@@ -68,8 +68,6 @@ What is missing for daily use compared with tmux.
 - A preview in the list of `C-b w`, and going down to panes there, as in tmux.
 - `C-b {` and `}` to swap panes, `C-b !` to break a pane out, `join-pane`.
 - `C-b Space` and layouts such as even-horizontal, tiled and main-vertical.
-- `-t` targets for commands, and format strings for `list-*` and
-  `display-message`.
 
 ### 4. Copy mode
 

@@ -5,7 +5,7 @@
 //! it was last set. That makes what a layout or a drag sets exact, and has the
 //! proportions survive the window changing size.
 
-use crate::command::{Direction, SplitKind};
+use crate::command::{Direction, Place, SplitKind};
 
 /// Identifies a pane for the life of the server.
 pub type PaneId = u32;
@@ -36,7 +36,7 @@ impl Rect {
     }
 
     /// Its size in the direction of a split.
-    const fn extent(self, kind: SplitKind) -> u16 {
+    pub const fn extent(self, kind: SplitKind) -> u16 {
         match kind {
             SplitKind::Horizontal => self.width,
             SplitKind::Vertical => self.height,
@@ -151,13 +151,22 @@ const fn divider_line(first: Rect, area: Rect, kind: SplitKind) -> Rect {
     }
 }
 
-/// How a pane of `length` cells divides into itself and a new one, as sizes of
-/// what comes first and what comes after, with the line between them.
-fn halves(length: u16) -> (u32, u32) {
-    let second = (length.saturating_add(1) / 2).saturating_sub(1);
-    let second = second.clamp(1, length.saturating_sub(2).max(1));
-    let first = length.saturating_sub(1).saturating_sub(second);
-    (u32::from(first), u32::from(second))
+/// How `length` cells divide between what was there and a new pane. Returns
+/// their sizes in that order, with a cell left for the line between them.
+fn sizes_with_new(length: u16, place: Place) -> (u32, u32) {
+    let last = match place.size.map(|size| size.cells(length)) {
+        None => (length.saturating_add(1) / 2).saturating_sub(1),
+        Some(size) if place.before => length.saturating_sub(size).saturating_sub(1),
+        Some(size) => size,
+    };
+    let last = last.clamp(1, length.saturating_sub(2).max(1));
+    let first = length.saturating_sub(1).saturating_sub(last);
+    let (first, last) = (u32::from(first), u32::from(last));
+    if place.before {
+        (last, first)
+    } else {
+        (first, last)
+    }
 }
 
 /// Moves up to `cells` to the child `receiver`, from each of the `donors` in
@@ -257,45 +266,85 @@ impl Node {
         }
     }
 
-    /// Puts `new` after `target`, in the split it is in if that runs the right
+    /// Puts `new` where `place` says relative to `target`.
+    pub fn place(&mut self, target: PaneId, new: PaneId, place: Place, area: Rect) -> bool {
+        if place.full {
+            self.add_next_to_everything(new, place, area);
+            true
+        } else {
+            self.split(target, new, place, area)
+        }
+    }
+
+    /// Puts `new` at an end of this node, making the rest of it smaller.
+    fn add_next_to_everything(&mut self, new: PaneId, place: Place, area: Rect) {
+        let (own, added) = sizes_with_new(area.extent(place.kind), place);
+        match self {
+            Self::Split {
+                kind,
+                shares,
+                children,
+            } if *kind == place.kind => {
+                let own = u16::try_from(own).unwrap_or(u16::MAX);
+                *shares = divide(own, shares).into_iter().map(u32::from).collect();
+                let index = if place.before { 0 } else { children.len() };
+                shares.insert(index, added);
+                children.insert(index, Self::Leaf(new));
+            }
+            _ => {
+                let own_node = std::mem::replace(self, Self::Leaf(new));
+                *self = if place.before {
+                    Self::Split {
+                        kind: place.kind,
+                        shares: vec![added, own],
+                        children: vec![Self::Leaf(new), own_node],
+                    }
+                } else {
+                    Self::Split {
+                        kind: place.kind,
+                        shares: vec![own, added],
+                        children: vec![own_node, Self::Leaf(new)],
+                    }
+                };
+            }
+        }
+    }
+
+    /// Puts `new` next to `target`, in the split it is in if that runs the right
     /// way, and in one of its own otherwise. Returns whether it was found.
-    pub fn split(&mut self, target: PaneId, new: PaneId, kind: SplitKind, area: Rect) -> bool {
+    fn split(&mut self, target: PaneId, new: PaneId, place: Place, area: Rect) -> bool {
         match self {
             Self::Leaf(id) if *id == target => {
-                let (first, second) = halves(area.extent(kind));
-                *self = Self::Split {
-                    kind,
-                    shares: vec![first, second],
-                    children: vec![Self::Leaf(target), Self::Leaf(new)],
-                };
+                self.add_next_to_everything(new, place, area);
                 true
             }
             Self::Leaf(_) => false,
             Self::Split {
-                kind: own_kind,
+                kind,
                 shares,
                 children,
             } => {
                 let position = children
                     .iter()
                     .position(|child| *child == Self::Leaf(target));
-                if let Some(index) = position.filter(|_| *own_kind == kind) {
-                    let sizes = divide(area.extent(kind), shares);
+                if let Some(index) = position.filter(|_| *kind == place.kind) {
+                    let sizes = divide(area.extent(*kind), shares);
                     *shares = sizes.iter().copied().map(u32::from).collect();
                     let size = sizes.get(index).copied().unwrap_or(0);
-                    let (first, second) = halves(size);
+                    let (own, added) = sizes_with_new(size, place);
                     if let Some(share) = shares.get_mut(index) {
-                        *share = first;
+                        *share = own;
                     }
-                    shares.insert(index + 1, second);
-                    children.insert(index + 1, Self::Leaf(new));
+                    let index = index + usize::from(!place.before);
+                    shares.insert(index, added);
+                    children.insert(index, Self::Leaf(new));
                     return true;
                 }
-                let areas = child_areas(area, *own_kind, shares);
+                let areas = child_areas(area, *kind, shares);
                 children
                     .iter_mut()
                     .zip(areas)
-                    .any(|(child, area)| child.split(target, new, kind, area))
+                    .any(|(child, area)| child.split(target, new, place, area))
             }
         }
     }
@@ -503,6 +552,23 @@ pub fn neighbor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Size;
+
+    const fn beside() -> Place {
+        Place {
+            kind: SplitKind::Horizontal,
+            before: false,
+            full: false,
+            size: None,
+        }
+    }
+
+    const fn below() -> Place {
+        Place {
+            kind: SplitKind::Vertical,
+            ..beside()
+        }
+    }
 
     const AREA: Rect = Rect {
         x: 0,
@@ -523,8 +589,8 @@ mod tests {
     /// Two panes side by side, with the right one split in two.
     fn three_panes() -> Node {
         let mut node = Node::Leaf(1);
-        assert!(node.split(1, 2, SplitKind::Horizontal, AREA));
-        assert!(node.split(2, 3, SplitKind::Vertical, AREA));
+        assert!(node.split(1, 2, beside(), AREA));
+        assert!(node.split(2, 3, below(), AREA));
         node
     }
 
@@ -551,7 +617,7 @@ mod tests {
     #[test]
     fn splits_in_half_leaving_room_for_the_line() {
         let mut node = Node::Leaf(1);
-        node.split(1, 2, SplitKind::Horizontal, AREA);
+        node.split(1, 2, beside(), AREA);
         assert_eq!(
             node.panes(AREA),
             [(1, rect(0, 0, 40, 25)), (2, rect(41, 0, 40, 25))]
@@ -564,12 +630,12 @@ mod tests {
     fn splits_with_the_rounding_of_tmux() {
         let area = rect(0, 0, 80, 24);
         let mut node = Node::Leaf(1);
-        node.split(1, 2, SplitKind::Horizontal, area);
+        node.split(1, 2, beside(), area);
         assert_eq!(node.panes(area)[0].1.width, 40);
         assert_eq!(node.panes(area)[1].1.width, 39);
-        node.split(2, 3, SplitKind::Horizontal, area);
-        node.split(3, 4, SplitKind::Vertical, area);
-        node.split(1, 5, SplitKind::Horizontal, area);
+        node.split(2, 3, beside(), area);
+        node.split(3, 4, below(), area);
+        node.split(1, 5, beside(), area);
         // What tmux does with the same splits in the same order.
         assert_eq!(
             node.panes(area),
@@ -583,10 +649,75 @@ mod tests {
         );
     }
 
+    /// What tmux makes of panes joined with these flags.
+    #[test]
+    fn places_panes_by_flags() {
+        let area = rect(0, 0, 80, 24);
+        let mut node = Node::Leaf(1);
+        let place = Place {
+            before: true,
+            size: Some(Size::Cells(10)),
+            ..below()
+        };
+        node.place(1, 2, place, area);
+        assert_eq!(
+            node.panes(area),
+            [(2, rect(0, 0, 80, 10)), (1, rect(0, 11, 80, 13))]
+        );
+        let place = Place {
+            size: Some(Size::Percent(30)),
+            ..below()
+        };
+        node.place(2, 3, place, area);
+        assert_eq!(
+            node.panes(area),
+            [
+                (2, rect(0, 0, 80, 6)),
+                (3, rect(0, 7, 80, 3)),
+                (1, rect(0, 11, 80, 13)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_pane_goes_next_to_everything() {
+        let area = rect(0, 0, 80, 24);
+        let mut node = Node::Leaf(1);
+        node.place(1, 2, below(), area);
+        let place = Place {
+            full: true,
+            ..beside()
+        };
+        node.place(2, 3, place, area);
+        assert_eq!(
+            node.panes(area),
+            [
+                (1, rect(0, 0, 40, 12)),
+                (2, rect(0, 13, 40, 11)),
+                (3, rect(41, 0, 39, 24)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_pane_joins_a_split_in_the_same_direction() {
+        let area = rect(0, 0, 80, 24);
+        let mut node = Node::Leaf(1);
+        node.place(1, 2, beside(), area);
+        let place = Place {
+            full: true,
+            before: true,
+            ..beside()
+        };
+        node.place(2, 3, place, area);
+        assert_eq!(node.dividers(area).len(), 2);
+        assert_eq!(node.panes(area)[0], (3, rect(0, 0, 40, 24)));
+    }
+
     #[test]
     fn splitting_along_a_split_adds_to_it() {
         let mut node = row();
-        node.split(2, 4, SplitKind::Horizontal, AREA);
+        node.split(2, 4, beside(), AREA);
         assert_eq!(widths(&node), [20, 15, 14, 29]);
         assert_eq!(node.dividers(AREA).len(), 3);
     }
@@ -613,7 +744,7 @@ mod tests {
     #[test]
     fn keeps_proportions_across_a_resize() {
         let mut node = Node::Leaf(1);
-        node.split(1, 2, SplitKind::Horizontal, AREA);
+        node.split(1, 2, beside(), AREA);
         let divider = node.dividers(AREA).remove(0);
         node.move_divider(&divider, 20, 0);
         assert_eq!(node.panes(AREA)[0].1.width, 20);
@@ -749,7 +880,7 @@ mod tests {
     #[test]
     fn resize_without_a_matching_split_does_nothing() {
         let mut node = Node::Leaf(1);
-        node.split(1, 2, SplitKind::Horizontal, AREA);
+        node.split(1, 2, beside(), AREA);
         let before = node.clone();
         node.resize(1, AREA, Direction::Up, 3);
         assert_eq!(node, before);

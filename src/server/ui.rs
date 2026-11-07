@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn confirmation_takes_only_y() {
-        let action = PromptAction::Confirm(Box::new(Command::KillPane));
+        let action = PromptAction::Confirm(Box::new(Command::LastWindow));
         let mut prompt = Prompt::new("kill? ", "", action);
         assert_eq!(prompt.handle_key(&key(b"n")), PromptOutcome::Cancelled);
         assert_eq!(
@@ -402,7 +402,7 @@ mod tests {
     }
 
     fn list(rows: usize) -> List {
-        let row = |index: usize| ListRow::new(index.to_string(), Command::SelectWindow(1));
+        let row = |index: usize| ListRow::new(index.to_string(), Command::LastWindow);
         List::new((0..rows).map(row).collect(), 0)
     }
 
@@ -457,11 +457,11 @@ mod tests {
         rows.handle_key(&key(b"j"), 5);
         assert_eq!(
             rows.handle_key(&key(b"\r"), 5),
-            ListOutcome::Run(Command::SelectWindow(1))
+            ListOutcome::Run(Command::LastWindow)
         );
         assert_eq!(
             rows.handle_key(&key(b"2"), 5),
-            ListOutcome::Run(Command::SelectWindow(1))
+            ListOutcome::Run(Command::LastWindow)
         );
         assert_eq!(rows.handle_key(&key(b"7"), 5), ListOutcome::Stay);
         assert_eq!(rows.handle_key(&key(b"q"), 5), ListOutcome::Close);

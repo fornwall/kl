@@ -1,14 +1,20 @@
 //! The single session: its windows and panes.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use super::layout::{self, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
-use crate::command::{Direction, SplitKind};
+use crate::command::{Direction, Place};
 use crate::ghostty::{DEFAULT_POINTER_SHAPE, Link, MODE_SGR_PIXELS, OuterColors, Progress};
 use crate::sys::WinSize;
 
+/// What `#S` says, and the name a target can use for the session.
+pub const SESSION_NAME: &str = "kl";
+
 pub struct Window {
+    /// Identifies a window for the life of the server, unlike its index.
+    pub id: u32,
     pub index: u32,
     pub name: String,
     /// Whether the name follows what is running, until set by hand.
@@ -70,6 +76,9 @@ pub struct Session {
     pub progress_reported: bool,
     pub socket: String,
     pub next_pane: PaneId,
+    pub next_window: u32,
+    /// The pane the command being run came from, if it was run from a pane.
+    pub origin: Option<PaneId>,
 }
 
 impl Session {
@@ -93,6 +102,8 @@ impl Session {
             progress_reported: false,
             socket,
             next_pane: 0,
+            next_window: 0,
+            origin: None,
         }
     }
 
@@ -114,12 +125,24 @@ impl Session {
     }
 
     pub fn window(&self) -> Option<&Window> {
-        self.windows.iter().find(|w| w.index == self.current)
+        self.window_at(self.current)
     }
 
     pub fn window_mut(&mut self) -> Option<&mut Window> {
-        let current = self.current;
-        self.windows.iter_mut().find(|w| w.index == current)
+        self.window_at_mut(self.current)
+    }
+
+    pub fn window_at(&self, index: u32) -> Option<&Window> {
+        self.windows.iter().find(|w| w.index == index)
+    }
+
+    pub fn window_at_mut(&mut self, index: u32) -> Option<&mut Window> {
+        self.windows.iter_mut().find(|w| w.index == index)
+    }
+
+    /// The window a pane is in.
+    pub fn window_of(&self, pane: PaneId) -> Option<&Window> {
+        self.windows.iter().find(|w| w.root.contains(pane))
     }
 
     /// The window a pane is in.
@@ -243,12 +266,21 @@ impl Session {
         }
     }
 
-    fn spawn_pane(&mut self, program: &[String], size: Rect) -> Result<PaneId, String> {
+    /// Starts a program in `directory`, or else where the pane `from` is at.
+    fn spawn_pane(
+        &mut self,
+        program: &[String],
+        size: Rect,
+        directory: Option<&Path>,
+        from: Option<PaneId>,
+    ) -> Result<PaneId, String> {
         let id = self.next_pane;
-        let cwd = self.active_pane().and_then(Pane::working_directory);
+        let from = from.and_then(|from| self.panes.get(&from));
+        let cwd = from.and_then(Pane::working_directory);
+        let cwd = directory.or(cwd.as_deref());
         let spawn = Spawn {
             program,
-            cwd: cwd.as_deref(),
+            cwd,
             socket: &self.socket,
             environment: &self.environment,
         };
@@ -271,10 +303,20 @@ impl Session {
             .unwrap_or(0)
     }
 
-    pub fn new_window(&mut self, name: Option<String>, program: &[String]) -> Result<(), String> {
-        let id = self.spawn_pane(program, self.area())?;
-        let index = self.free_index();
+    /// Opens a window at `index`, or else at the first one free, and returns
+    /// its pane.
+    pub fn new_window(
+        &mut self,
+        name: Option<String>,
+        program: &[String],
+        directory: Option<&Path>,
+        index: Option<u32>,
+        detached: bool,
+    ) -> Result<PaneId, String> {
+        let id = self.spawn_pane(program, self.area(), directory, self.current_pane())?;
+        let index = index.unwrap_or_else(|| self.free_index());
         let window = Window {
+            id: self.next_window,
             index,
             automatic_name: name.is_none(),
             name: name.unwrap_or_else(|| pane::default_name(program)),
@@ -285,40 +327,49 @@ impl Session {
             bell: false,
             monitor: Monitor::Off,
         };
+        self.next_window += 1;
         let position = self.windows.partition_point(|w| w.index < index);
         self.windows.insert(position, window);
-        self.select_window(index);
+        if !detached || self.windows.len() == 1 {
+            self.select_window(index);
+        }
         self.relayout();
-        Ok(())
+        Ok(id)
     }
 
-    pub fn split(&mut self, kind: SplitKind, program: &[String]) -> Result<(), String> {
+    /// Opens a pane next to `target`, and returns it.
+    pub fn split(
+        &mut self,
+        target: PaneId,
+        place: Place,
+        program: &[String],
+        directory: Option<&Path>,
+        detached: bool,
+    ) -> Result<PaneId, String> {
         let area = self.area();
-        let Some(window) = self.window() else {
-            return Err("no current window".to_owned());
+        let Some(window) = self.window_of(target) else {
+            return Err("no such pane".to_owned());
         };
-        let target = window.active;
+        let index = window.index;
         let panes = window.root.panes(area);
         let rect = panes
             .iter()
-            .find(|(id, _)| *id == target)
+            .find(|(id, _)| *id == target && !place.full)
             .map_or(area, |(_, rect)| *rect);
-        let room = match kind {
-            SplitKind::Horizontal => rect.width,
-            SplitKind::Vertical => rect.height,
-        };
         // Two panes of a cell each, and the line between them.
-        if room < 3 {
+        if rect.extent(place.kind) < 3 {
             return Err("no space for a new pane".to_owned());
         }
-        let id = self.spawn_pane(program, rect)?;
-        if let Some(window) = self.window_mut() {
+        let id = self.spawn_pane(program, rect, directory, Some(target))?;
+        if let Some(window) = self.window_at_mut(index) {
             window.zoomed = false;
-            window.root.split(target, id, kind, area);
+            window.root.place(target, id, place, area);
         }
-        self.select_pane(id);
+        if !detached {
+            self.select_pane(id);
+        }
         self.relayout();
-        Ok(())
+        Ok(id)
     }
 
     /// Takes a pane out of its window, and closes the window if that was the
@@ -366,8 +417,8 @@ impl Session {
         self.relayout();
     }
 
-    pub fn kill_current_window(&mut self) {
-        let position = self.windows.iter().position(|w| w.index == self.current);
+    pub fn kill_window(&mut self, index: u32) {
+        let position = self.windows.iter().position(|w| w.index == index);
         let Some(position) = position else {
             return;
         };
@@ -406,110 +457,107 @@ impl Session {
         true
     }
 
-    fn step_window(&mut self, forward: bool) {
-        let position = self.windows.iter().position(|w| w.index == self.current);
-        let (Some(position), count) = (position, self.windows.len()) else {
-            return;
+    /// Goes to the next or previous window, or the nearest one with an alert.
+    /// Returns whether there was another window to go to.
+    fn step_window(&mut self, forward: bool, alert: bool) -> bool {
+        let count = self.windows.len();
+        let Some(position) = self.windows.iter().position(|w| w.index == self.current) else {
+            return false;
         };
-        let target = if forward {
-            (position + 1) % count
-        } else {
-            (position + count - 1) % count
-        };
-        if let Some(window) = self.windows.get(target) {
-            self.select_window(window.index);
-        }
+        let target = (1..count)
+            .map(|step| {
+                let step = if forward { step } else { count - step };
+                (position + step) % count
+            })
+            .filter_map(|position| self.windows.get(position))
+            .find(|window| !alert || window.bell || window.has_activity())
+            .map(|window| window.index);
+        target.is_some_and(|index| self.select_window(index))
     }
 
-    pub fn next_window(&mut self) {
-        self.step_window(true);
+    pub fn next_window(&mut self, alert: bool) -> bool {
+        self.step_window(true, alert)
     }
 
-    pub fn previous_window(&mut self) {
-        self.step_window(false);
+    pub fn previous_window(&mut self, alert: bool) -> bool {
+        self.step_window(false, alert)
     }
 
+    /// Makes a pane the active one of its window.
     pub fn select_pane(&mut self, id: PaneId) {
-        let selectable = |window: &Window| window.active != id && window.root.contains(id);
-        if !self.window().is_some_and(selectable) {
+        let Some(window) = self.window_of(id).filter(|window| window.active != id) else {
             return;
+        };
+        let index = window.index;
+        let current = index == self.current;
+        if current {
+            self.report_focus(false);
         }
-        self.report_focus(false);
-        if let Some(window) = self.window_mut() {
+        if let Some(window) = self.window_at_mut(index) {
             window.last_active = Some(window.active);
             window.active = id;
         }
-        self.report_focus(true);
+        if current {
+            self.report_focus(true);
+        }
         self.repaint = true;
     }
 
-    /// Selects a pane of the current window by its number, showing it if the
-    /// window is zoomed in on another one.
+    /// Makes a pane active, showing it if its window is zoomed in on another.
+    pub fn show_pane(&mut self, id: PaneId) {
+        if let Some(index) = self.window_of(id).map(|window| window.index) {
+            self.unzoom(index);
+            self.select_pane(id);
+        }
+    }
+
+    /// Selects a pane of the current window by its number.
     pub fn select_pane_at(&mut self, index: usize) {
         let panes = self.window().map(|w| w.root.panes(self.area()));
         if let Some((id, _)) = panes.and_then(|panes| panes.get(index).copied()) {
-            self.unzoom();
-            self.select_pane(id);
+            self.show_pane(id);
         }
     }
 
-    pub fn select_direction(&mut self, direction: Direction) {
+    pub fn select_direction(&mut self, from: PaneId, direction: Direction) {
         let area = self.area();
-        let Some(window) = self.window() else {
+        let Some(window) = self.window_of(from) else {
             return;
         };
-        let target = layout::neighbor(&window.root.panes(area), window.active, direction, area);
+        let target = layout::neighbor(&window.root.panes(area), from, direction, area);
         if let Some(target) = target {
-            self.unzoom();
-            self.select_pane(target);
+            self.show_pane(target);
         }
     }
 
-    pub fn select_next_pane(&mut self) {
-        let Some(window) = self.window() else {
-            return;
-        };
-        let panes = window.root.panes(self.area());
-        let position = panes.iter().position(|(id, _)| *id == window.active);
-        let next = position.map_or(0, |position| (position + 1) % panes.len());
-        if let Some((id, _)) = panes.get(next).copied() {
-            self.unzoom();
-            self.select_pane(id);
-        }
-    }
-
-    pub fn select_last_pane(&mut self) {
-        if let Some(last) = self.window().and_then(|window| window.last_active) {
-            self.unzoom();
-            self.select_pane(last);
-        }
-    }
-
-    fn unzoom(&mut self) {
-        if let Some(window) = self.window_mut()
+    fn unzoom(&mut self, index: u32) {
+        if let Some(window) = self.window_at_mut(index)
             && std::mem::take(&mut window.zoomed)
         {
             self.relayout();
         }
     }
 
-    pub fn toggle_zoom(&mut self) {
-        let Some(window) = self.window_mut() else {
+    pub fn toggle_zoom(&mut self, id: PaneId) {
+        let Some(window) = self.window_of(id) else {
             return;
         };
         if matches!(window.root, Node::Leaf(_)) {
             return;
         }
-        window.zoomed = !window.zoomed;
+        let index = window.index;
+        self.select_pane(id);
+        if let Some(window) = self.window_at_mut(index) {
+            window.zoomed = !window.zoomed;
+        }
         self.relayout();
     }
 
-    pub fn resize_pane(&mut self, direction: Direction, cells: u16) {
+    pub fn resize_pane(&mut self, id: PaneId, direction: Direction, cells: u16) {
         let area = self.area();
-        if let Some(window) = self.window_mut() {
+        if let Some(window) = self.window_of_mut(id) {
             window.zoomed = false;
-            let active = window.active;
-            window.root.resize(active, area, direction, cells);
+            window.root.resize(id, area, direction, cells);
             self.relayout();
         }
     }

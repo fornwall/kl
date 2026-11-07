@@ -934,6 +934,342 @@ fn picking_a_hidden_pane_by_number_ends_the_zoom() {
     });
 }
 
+/// What a command prints, for one that has to work.
+fn output_of(screen: &Screen, args: &[&str]) -> String {
+    let output = screen.command(args);
+    assert!(output.status.success(), "{args:?}: {output:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// What a command complains about, for one that has to fail.
+fn error_of(screen: &Screen, args: &[&str]) -> String {
+    let output = screen.command(args);
+    assert!(!output.status.success(), "{args:?}: {output:?}");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn commands_find_windows_by_index_name_and_id() {
+    let screen = three_windows();
+    let name = |target: &str| {
+        let args = ["display-message", "-t", target, "-p", "#W"];
+        output_of(&screen, &args).trim().to_owned()
+    };
+    assert_eq!(name("1."), "b");
+    assert_eq!(name(":0"), "a");
+    assert_eq!(name("kl:1"), "b");
+    assert_eq!(name("@2"), "c");
+    assert_eq!(name(":=b"), "b");
+    assert_eq!(name(":b*"), "b");
+    assert_eq!(name(":^"), "a");
+    assert_eq!(name(":$"), "c");
+    assert_eq!(name(":-"), "b");
+    assert_eq!(name(":+"), "a");
+    assert_eq!(name(":{last}"), "b");
+}
+
+#[test]
+fn commands_find_panes() {
+    let mut screen = two_panes();
+    screen.prefix("c");
+    screen.wait_for_text("1:");
+    let pane = |target: &str| {
+        let args = ["display-message", "-t", target, "-p", "#I.#P #D"];
+        output_of(&screen, &args).trim().to_owned()
+    };
+    assert_eq!(pane("0.1"), "0.1 %1");
+    assert_eq!(pane("%0"), "0.0 %0");
+    assert_eq!(pane("0.{top-right}"), "0.1 %1");
+    assert_eq!(pane("0.!"), "0.1 %1");
+    // Without a period, a number is a pane in the window at hand if there is
+    // one, and otherwise a window.
+    assert_eq!(pane("0"), "1.0 %2");
+    assert_eq!(pane("1"), "1.0 %2");
+    assert_eq!(pane(":0.+"), "0.1 %1");
+}
+
+#[test]
+fn explains_targets_it_cannot_find() {
+    let screen = three_windows();
+    let select = |target: &str| error_of(&screen, &["select-window", "-t", target]);
+    assert_eq!(select("nope"), "kl: can't find window: nope\n");
+    assert_eq!(select("9"), "kl: can't find window: 9\n");
+    assert_eq!(select("other:1"), "kl: can't find session: other\n");
+    assert_eq!(
+        error_of(&screen, &["kill-pane", "-t", "%99"]),
+        "kl: can't find pane: %99\n"
+    );
+    assert_eq!(
+        error_of(&screen, &["kill-pane", "-t", "1.5"]),
+        "kl: can't find pane: 5\n"
+    );
+}
+
+#[test]
+fn two_windows_of_the_same_name_are_no_target() {
+    let screen = three_windows();
+    assert!(screen.command(&["rename-window", "c"]).status.success());
+    screen.command(&["rename-window", "-t", "1", "c"]);
+    assert_eq!(
+        error_of(&screen, &["select-window", "-t", "c"]),
+        "kl: can't find window: c\n"
+    );
+}
+
+#[test]
+fn commands_reach_windows_and_panes_out_of_sight() {
+    let mut screen = three_windows();
+    assert!(
+        screen
+            .command(&["send-keys", "-t", ":0", "echo hi-there-in-0", "Enter"])
+            .status
+            .success()
+    );
+    assert!(
+        screen
+            .command(&["rename-window", "-t", "0", "renamed"])
+            .status
+            .success()
+    );
+    screen.wait_for_text("0:renamed");
+    assert!(
+        screen
+            .command(&["split-window", "-d", "-t", ":0"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        output_of(
+            &screen,
+            &["list-panes", "-t", "0", "-F", "#P#{?pane_active,*,}"]
+        ),
+        "0*\n1\n"
+    );
+    // None of that went to the window on display.
+    assert!(screen.lines().last().unwrap().contains("2:c*"));
+    assert_eq!(output_of(&screen, &["list-panes", "-F", "#P"]), "0\n");
+
+    screen.command(&["select-window", "-t", "0"]);
+    screen.wait_for_line("hi-there-in-0");
+    assert!(screen.command(&["kill-window", "-t", "2"]).status.success());
+    assert!(screen.command(&["kill-pane", "-t", "0.1"]).status.success());
+    assert_eq!(output_of(&screen, &["list-windows", "-F", "#I"]), "0\n1\n");
+    assert_eq!(output_of(&screen, &["list-panes", "-F", "#P"]), "0\n");
+}
+
+#[test]
+fn pastes_into_a_pane_out_of_sight() {
+    let mut screen = three_windows();
+    assert!(
+        screen
+            .command(&["set-buffer", "pasted-text"])
+            .status
+            .success()
+    );
+    assert!(
+        screen
+            .command(&["paste-buffer", "-t", ":0"])
+            .status
+            .success()
+    );
+    assert!(
+        screen
+            .command(&["select-window", "-t", "0"])
+            .status
+            .success()
+    );
+    screen.wait_for_text("pasted-text");
+}
+
+#[test]
+fn selecting_a_pane_elsewhere_stays_in_the_window_at_hand() {
+    let mut screen = two_panes();
+    screen.prefix("c");
+    screen.wait_for_text("1:");
+    assert!(
+        screen
+            .command(&["select-pane", "-t", "0.1"])
+            .status
+            .success()
+    );
+    assert_eq!(output_of(&screen, &["display-message", "-p", "#I"]), "1\n");
+    assert_eq!(
+        output_of(
+            &screen,
+            &["list-panes", "-t", "0", "-f", "#{pane_active}", "-F", "#P"]
+        ),
+        "1\n"
+    );
+}
+
+#[test]
+fn kills_everything_but_the_target() {
+    let mut screen = three_windows();
+    assert!(
+        screen
+            .command(&["kill-window", "-a", "-t", "1"])
+            .status
+            .success()
+    );
+    screen.wait_for_text("1:b*");
+    assert_eq!(output_of(&screen, &["list-windows", "-F", "#W"]), "b\n");
+
+    assert!(screen.command(&["split-window"]).status.success());
+    assert!(screen.command(&["split-window"]).status.success());
+    assert!(
+        screen
+            .command(&["kill-pane", "-a", "-t", "1.0"])
+            .status
+            .success()
+    );
+    assert_eq!(output_of(&screen, &["list-panes", "-F", "#P"]), "0\n");
+}
+
+#[test]
+fn opens_windows_where_it_is_told() {
+    let mut screen = Screen::new(80, 24);
+    assert_eq!(
+        output_of(
+            &screen,
+            &["new-window", "-d", "-t", "5", "-P", "-F", "#I #{pane_id}"]
+        ),
+        "5 %1\n"
+    );
+    assert!(screen.lines().last().unwrap().contains("0:sh*"));
+    assert_eq!(
+        error_of(&screen, &["new-window", "-t", "5"]),
+        "kl: create window failed: index 5 in use\n"
+    );
+    assert_eq!(output_of(&screen, &["new-window", "-P"]), "kl:1.0\n");
+}
+
+#[test]
+fn new_panes_start_where_they_are_told() {
+    let mut screen = Screen::new(80, 24);
+    let dir = screen.dir.0.display().to_string();
+    assert!(
+        screen
+            .command(&["split-window", "-c", &dir, "-l", "5", "-b"])
+            .status
+            .success()
+    );
+    screen.run("pwd");
+    screen.wait_for_text(&dir);
+    assert_eq!(
+        output_of(&screen, &["list-panes", "-F", "#{pane_height}"]),
+        "5\n17\n"
+    );
+}
+
+#[test]
+fn formats_what_commands_list() {
+    let screen = three_windows();
+    assert_eq!(
+        output_of(
+            &screen,
+            &["list-windows", "-F", "#I:#W#{?window_active,*,}"]
+        ),
+        "0:a\n1:b\n2:c*\n"
+    );
+    assert_eq!(
+        output_of(&screen, &["list-windows", "-f", "#{==:#W,b}", "-F", "#I"]),
+        "1\n"
+    );
+    assert_eq!(
+        output_of(
+            &screen,
+            &["list-panes", "-s", "-F", "#{window_index} #{pane_id}"]
+        ),
+        "0 %0\n1 %1\n2 %2\n"
+    );
+    let all = output_of(&screen, &["list-panes", "-a"]);
+    assert!(all.starts_with("kl:0.0: [80x23] %0"), "{all}");
+    assert!(all.ends_with("kl:2.0: [80x23] %2 (active)\n"), "{all}");
+    let windows = output_of(&screen, &["list-windows", "-a"]);
+    assert!(windows.starts_with("kl:0: a (1 panes)"), "{windows}");
+}
+
+#[test]
+fn displays_messages_with_formats() {
+    let mut screen = three_windows();
+    assert_eq!(
+        output_of(
+            &screen,
+            &["display-message", "-p", "#S #I #W #{window_panes}"]
+        ),
+        "kl 2 c 1\n"
+    );
+    let time = output_of(&screen, &["display-message", "-p", "%Y"]);
+    assert_eq!(time.trim().len(), 4, "{time}");
+
+    assert!(
+        screen
+            .command(&["display-message", "said #W"])
+            .status
+            .success()
+    );
+    screen.wait_for_text("said c");
+
+    screen.prefix("i");
+    screen.wait_for_text("[kl] 2:c, current pane 0 - (");
+}
+
+#[test]
+fn commands_run_in_a_pane_are_about_that_pane() {
+    let screen = two_panes();
+    assert!(screen.command(&["select-pane", "-t", "0"]).status.success());
+    // Run from the right pane while the left one is active.
+    let path = screen.dir.0.join("out");
+    let path_text = path.display();
+    let line = format!("{KL} display-message -p 'in=#D' > {path_text}; {KL} split-window -d");
+    assert!(
+        screen
+            .command(&["send-keys", "-t", "0.1", &line, "Enter"])
+            .status
+            .success()
+    );
+    let deadline = Instant::now() + TIMEOUT;
+    while output_of(&screen, &["list-panes", "-F", "#D"])
+        .lines()
+        .count()
+        < 3
+    {
+        assert!(Instant::now() < deadline, "no new pane");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), "in=%1\n");
+    assert_eq!(
+        output_of(&screen, &["list-panes", "-F", "#D"]),
+        "%0\n%1\n%2\n"
+    );
+}
+
+#[test]
+fn window_numbers_that_do_not_exist_are_explained() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("7");
+    screen.wait_for_text("can't find window: 7");
+    screen.prefix("n");
+    screen.wait_for_text("no next window");
+}
+
+#[test]
+fn goes_to_the_next_window_with_an_alert() {
+    let mut screen = three_windows();
+    assert!(
+        screen
+            .command(&["send-keys", "-t", ":0", r"printf '\007'", "Enter"])
+            .status
+            .success()
+    );
+    screen.wait_for_text("0:a!");
+    let alt_n = screen.key_bytes(ghostty_key('n'), MOD_ALT, "", u32::from('n'));
+    let mut keys = screen.ctrl_b_bytes();
+    keys.extend_from_slice(&alt_n);
+    screen.send_bytes(&keys);
+    screen.wait_for_text("0:a*");
+}
+
 #[test]
 fn renames_a_window() {
     let mut screen = Screen::new(80, 24);
@@ -957,7 +1293,7 @@ fn a_new_window_has_a_name_from_the_start() {
     );
     let output = screen.command(&["list-windows"]);
     let windows = String::from_utf8_lossy(&output.stdout);
-    assert!(windows.contains("1: sleep "), "{windows}");
+    assert!(windows.contains("1: sleep*"), "{windows}");
 }
 
 #[test]
@@ -973,13 +1309,13 @@ fn a_window_started_from_a_line_is_not_named_after_the_shell_running_it() {
     std::thread::sleep(Duration::from_millis(1100));
     let windows = screen.command(&["list-windows"]);
     let windows = String::from_utf8_lossy(&windows.stdout);
-    assert!(windows.contains("1: sleep "), "{windows}");
+    assert!(windows.contains("1: sleep*"), "{windows}");
 
     assert!(screen.command(&["restart-server"]).status.success());
     std::thread::sleep(Duration::from_millis(1100));
     let windows = screen.command(&["list-windows"]);
     let windows = String::from_utf8_lossy(&windows.stdout);
-    assert!(windows.contains("1: sleep "), "{windows}");
+    assert!(windows.contains("1: sleep*"), "{windows}");
 }
 
 #[test]
@@ -1049,7 +1385,7 @@ fn runs_commands_from_the_command_line() {
     let output = screen.command(&["list-windows"]);
     let windows = String::from_utf8_lossy(&output.stdout);
     assert!(
-        windows.contains("1: cli (1 panes) [80x23] (active)"),
+        windows.contains("1: cli* (1 panes) [80x23] @1 (active)"),
         "{windows}"
     );
 
@@ -2350,12 +2686,6 @@ fn copy_line_above_the_prompt(screen: &mut Screen) {
     screen.type_text("$");
     screen.enter();
     screen.wait_for_clipboard();
-}
-
-fn output_of(screen: &Screen, args: &[&str]) -> String {
-    let output = screen.command(args);
-    assert!(output.status.success(), "{output:?}");
-    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 #[test]

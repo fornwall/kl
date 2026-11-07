@@ -414,6 +414,15 @@ pub fn foreground_cwd(master: BorrowedFd<'_>) -> Option<PathBuf> {
     (!path.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(&path)))
 }
 
+/// The name of this machine.
+pub fn host_name() -> Option<String> {
+    let mut name = [0_u8; 256];
+    // SAFETY: Writes at most `len` bytes to the valid buffer it gets.
+    let result = unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) };
+    let text = CStr::from_bytes_until_nul(&name).ok()?;
+    (result == 0).then(|| text.to_string_lossy().into_owned())
+}
+
 /// The current local time, as `strftime` formats it.
 pub fn local_time(format: &CStr) -> String {
     // SAFETY: A null argument asks only for the return value.
@@ -425,7 +434,7 @@ pub fn local_time(format: &CStr) -> String {
     }
     // SAFETY: Filled in by the successful call above.
     let parts = unsafe { parts.assume_init() };
-    let mut text = [0_u8; 64];
+    let mut text = [0_u8; 4096];
     // SAFETY: Writes at most `len` bytes, and all pointers are valid.
     let len = unsafe {
         libc::strftime(

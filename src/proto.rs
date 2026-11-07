@@ -7,7 +7,7 @@
 use crate::sys::WinSize;
 
 /// Bumped on any change to the messages below.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// Larger than anything sent in practice, to catch a corrupt stream.
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
@@ -39,6 +39,8 @@ pub enum ClientMessage {
     /// Runs one command and asks for its [`ServerMessage::Result`].
     Command {
         version: u32,
+        /// The pane this was run from, which is what it is about by default.
+        pane: Option<u32>,
         args: Vec<String>,
     },
 }
@@ -206,8 +208,17 @@ impl ClientMessage {
             }
             Self::Input(bytes) => put_frame(out, TAG_INPUT, bytes),
             Self::Resize(size) => put_frame(out, TAG_RESIZE, &size_bytes(*size)),
-            Self::Command { version, args } => {
+            Self::Command {
+                version,
+                pane,
+                args,
+            } => {
                 let mut payload = version.to_le_bytes().to_vec();
+                // As one of the words, since this message has to stay readable
+                // to servers of other versions.
+                if let Some(pane) = pane {
+                    put_bytes(&mut payload, format!("%{pane}").as_bytes());
+                }
                 put_texts(&mut payload, args);
                 put_frame(out, TAG_COMMAND, &payload);
             }
@@ -229,10 +240,20 @@ impl ClientMessage {
             },
             TAG_INPUT => Self::Input(reader.take_rest().to_vec()),
             TAG_RESIZE => Self::Resize(reader.take_size()?),
-            TAG_COMMAND => Self::Command {
-                version: reader.take_u32()?,
-                args: reader.take_texts()?,
-            },
+            TAG_COMMAND => {
+                let version = reader.take_u32()?;
+                let mut args = reader.take_texts()?;
+                let first = args.first().and_then(|word| word.strip_prefix('%'));
+                let pane = first.and_then(|pane| pane.parse().ok());
+                if pane.is_some() {
+                    args.remove(0);
+                }
+                Self::Command {
+                    version,
+                    pane,
+                    args,
+                }
+            }
             _ => return Err(Malformed),
         };
         Ok(Some((message, used)))
@@ -314,7 +335,13 @@ mod tests {
         round_trip_client(&ClientMessage::Resize(size));
         round_trip_client(&ClientMessage::Command {
             version: 7,
+            pane: None,
             args: vec!["split-window".to_owned(), "-h".to_owned(), String::new()],
+        });
+        round_trip_client(&ClientMessage::Command {
+            version: 7,
+            pane: Some(12),
+            args: vec!["list-panes".to_owned()],
         });
         round_trip_server(&ServerMessage::Output(vec![27, 91]));
         round_trip_server(&ServerMessage::Exit("[detached]".to_owned()));
@@ -323,6 +350,19 @@ mod tests {
             text: "unknown command".to_owned(),
         });
         round_trip_server(&ServerMessage::Reattach);
+    }
+
+    /// What a client needs from a server of any version.
+    #[test]
+    fn a_command_without_a_pane_is_a_version_and_words() {
+        let mut bytes = Vec::new();
+        ClientMessage::Command {
+            version: 7,
+            pane: None,
+            args: vec!["restart-server".to_owned()],
+        }
+        .encode(&mut bytes);
+        assert_eq!(bytes, b"\x04\x16\0\0\0\x07\0\0\0\x0e\0\0\0restart-server");
     }
 
     #[test]

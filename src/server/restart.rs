@@ -28,7 +28,7 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 5;
+pub const STATE_VERSION: u32 = 6;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
@@ -198,6 +198,7 @@ fn take_monitor(reader: &mut Reader<'_>) -> Result<Monitor, Malformed> {
 }
 
 fn put_window(out: &mut Vec<u8>, window: &Window) {
+    put_u32(out, window.id);
     put_u32(out, window.index);
     proto::put_bytes(out, window.name.as_bytes());
     put_bool(out, window.automatic_name);
@@ -211,6 +212,7 @@ fn put_window(out: &mut Vec<u8>, window: &Window) {
 
 fn take_window(reader: &mut Reader<'_>) -> Result<Window, Malformed> {
     Ok(Window {
+        id: reader.take_u32()?,
         index: reader.take_u32()?,
         name: reader.take_text()?,
         automatic_name: reader.take_bool()?,
@@ -289,6 +291,7 @@ pub fn read_state(state: &Path, socket: &Path) -> Result<Restored, Box<dyn Error
     session.size = reader.take_size()?;
     session.colors = take_colors(reader)?;
     session.next_pane = reader.take_u32()?;
+    session.next_window = reader.take_u32()?;
     session.environment = reader.take_texts_counted()?;
     for _ in 0..reader.take_u32()? {
         session.windows.push(take_window(reader)?);
@@ -316,6 +319,7 @@ impl Server {
         out.extend(proto::size_bytes(session.size));
         put_colors(&mut out, &session.colors);
         put_u32(&mut out, session.next_pane);
+        put_u32(&mut out, session.next_window);
         proto::put_texts_counted(&mut out, &session.environment);
         let count = |len| u32::try_from(len).unwrap_or(u32::MAX);
         put_u32(&mut out, count(session.windows.len()));
@@ -382,6 +386,7 @@ impl Server {
 mod tests {
     use super::super::layout::Rect;
     use super::*;
+    use crate::command::Place;
 
     const AREA: Rect = Rect {
         x: 0,
@@ -390,11 +395,20 @@ mod tests {
         height: 24,
     };
 
+    const fn place(kind: SplitKind) -> Place {
+        Place {
+            kind,
+            before: false,
+            full: false,
+            size: None,
+        }
+    }
+
     #[test]
     fn layouts_survive_a_round_trip() {
         let mut node = Node::Leaf(1);
-        node.split(1, 2, SplitKind::Horizontal, AREA);
-        node.split(2, 3, SplitKind::Vertical, AREA);
+        node.place(1, 2, place(SplitKind::Horizontal), AREA);
+        node.place(2, 3, place(SplitKind::Vertical), AREA);
         let mut bytes = Vec::new();
         put_node(&mut bytes, &node);
         assert_eq!(take_node(&mut Reader::new(&bytes)), Ok(node));
@@ -403,7 +417,7 @@ mod tests {
     #[test]
     fn a_truncated_layout_is_an_error() {
         let mut node = Node::Leaf(1);
-        node.split(1, 2, SplitKind::Horizontal, AREA);
+        node.place(1, 2, place(SplitKind::Horizontal), AREA);
         let mut bytes = Vec::new();
         put_node(&mut bytes, &node);
         bytes.pop();

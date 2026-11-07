@@ -12,6 +12,7 @@ mod pane;
 mod render;
 mod restart;
 mod session;
+mod target;
 mod ui;
 
 use std::error::Error;
@@ -417,7 +418,15 @@ impl Server {
                 self.dirty = true;
             }
             ClientMessage::Input(_) | ClientMessage::Resize(_) => {}
-            ClientMessage::Command { version, args } => self.run_client_command(id, version, &args),
+            ClientMessage::Command {
+                version,
+                pane,
+                args,
+            } => {
+                self.session.origin = pane;
+                self.run_client_command(id, version, &args);
+                self.session.origin = None;
+            }
         }
     }
 
@@ -454,7 +463,7 @@ impl Server {
         self.session.resize(size);
         if self.lifecycle == Lifecycle::Starting {
             self.lifecycle = Lifecycle::Running;
-            if let Err(error) = self.session.new_window(None, &[]) {
+            if let Err(error) = self.session.new_window(None, &[], None, None, false) {
                 if let Some(connection) = self.connection_mut(id) {
                     connection.finish(&ServerMessage::Exit(error));
                 }

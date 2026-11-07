@@ -994,7 +994,7 @@ mod tests {
             .next
             .put_str(0, 1, "underneath", Style::default(), 12);
         let rows = vec![
-            ListRow::new("one".to_owned(), Command::NextWindow),
+            ListRow::new("one".to_owned(), Command::LastWindow),
             ListRow::text("two".to_owned()),
         ];
         let area = Rect {

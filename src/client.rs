@@ -284,6 +284,15 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<Option<String>, 
     }
 }
 
+/// The pane this is running in, if that pane belongs to the server at `socket`.
+fn calling_pane(socket: &Path) -> Option<u32> {
+    let server = env::var("KL").ok()?;
+    let (server_socket, _) = server.rsplit_once(',')?;
+    let pane = env::var("KL_PANE").ok()?;
+    let pane = pane.strip_prefix('%')?.parse().ok()?;
+    (Path::new(server_socket) == socket).then_some(pane)
+}
+
 /// Runs one command on the running server, returning whether it succeeded and
 /// what it printed.
 pub fn run_command(socket: &Path, args: &[String]) -> Result<(bool, String), Box<dyn Error>> {
@@ -297,6 +306,10 @@ pub fn run_command(socket: &Path, args: &[String]) -> Result<(bool, String), Box
         &stream,
         &ClientMessage::Command {
             version: proto::VERSION,
+            // A server of another version only gets this far with this command,
+            // and would not know what to make of a pane in front of it.
+            pane: calling_pane(socket)
+                .filter(|_| args.first().is_none_or(|name| name != "restart-server")),
             args: args.to_vec(),
         },
     )?;

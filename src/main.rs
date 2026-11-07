@@ -30,39 +30,46 @@ Session:
                                               still running
 
 Windows:
-  new-window (neww) [-n name] [command]       open a window
-  select-window (selectw) -t index | -l|-n|-p  switch windows
-  next-window (next), previous-window (prev), last-window (last)
-  rename-window (renamew) name                name the window
-  kill-window (killw)                         close the window
-  list-windows (lsw)                          list windows
+  new-window (neww) [-d] [-c dir] [-n name] [-P [-F format]] [-t index] [command]
+  select-window (selectw) [-l|-n|-p] [-t window]
+  next-window (next) [-a], previous-window (prev) [-a], last-window (last)
+  rename-window (renamew) [-t window] name
+  kill-window (killw) [-a] [-t window]
+  list-windows (lsw) [-a] [-F format] [-f filter]
   choose-tree                                 pick a window from a list
-  set-window-option (setw) monitor-activity [on|off]  flag output in the window
+  set-window-option (setw) [-t window] monitor-activity [on|off]
 
 Panes:
-  split-window (splitw) [-h|-v] [command]     split the active pane
-  select-pane (selectp) -L|-R|-U|-D|-l        move to another pane
-  last-pane (lastp)                           go back to the previous pane
-  resize-pane (resizep) -L|-R|-U|-D [cells]   move a border
-  resize-pane (resizep) -Z                    toggle zoom
-  kill-pane (killp)                           close the active pane
-  list-panes (lsp)                            list panes in the window
+  split-window (splitw) [-bdfhv] [-c dir] [-l size] [-P [-F format]] [-t pane]
+                        [command]
+  select-pane (selectp) [-L|-R|-U|-D|-l] [-t pane]
+  last-pane (lastp) [-t window]
+  resize-pane (resizep) -L|-R|-U|-D [-t pane] [cells]
+  resize-pane (resizep) -Z [-t pane]          toggle zoom
+  kill-pane (killp) [-a] [-t pane]
+  list-panes (lsp) [-as] [-F format] [-f filter] [-t window]
   display-panes (displayp) [-d ms]            show the number of each pane
 
 Other:
   list-keys (lsk) [-N]                        list the keys after the prefix
-  send-keys (send) key...                     type into the active pane
-  send-prefix                                 type the prefix key into the pane
+  send-keys (send) [-l] [-t pane] key...      type into a pane
+  send-prefix [-t pane]                       type the prefix key into a pane
   command-prompt [-I text] [-p prompt] [template]  ask for a command to run
   confirm-before [-p prompt] command          run a command after asking
-  copy-mode [-u], display-message (display) text
+  copy-mode [-u] [-t pane]
+  display-message (display) [-p] [-F format] [-t pane] [message]
 
 Paste buffers, the top one unless -b names another:
-  paste-buffer (pasteb) [-dpr] [-s sep] [-b name]  paste into the active pane
+  paste-buffer (pasteb) [-dpr] [-s sep] [-b name] [-t pane]  paste into a pane
   set-buffer (setb) [-aw] [-b name] [-n new-name] [data]  set or rename
   show-buffer (showb) [-b name], delete-buffer (deleteb) [-b name]
   save-buffer (saveb) [-a] [-b name] path, load-buffer (loadb) [-w] [-b name] path
   list-buffers (lsb), choose-buffer           list them, or pick one to paste
+
+Targets follow tmux: a window goes by its index, name or @id, a pane by its
+number, %id or window.pane, and {last}, {next}, {top} and the like work too.
+Commands run in a pane are about that pane by default. Formats are tmux's, such
+as #{window_name} or #W, with conditions, comparisons and the usual modifiers.
 
 Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , & for windows,
 % \" o ; q z x arrows for panes, [ ] # = - for copying and paste buffers, : for

@@ -4,9 +4,10 @@
 
 use std::path::Path;
 
+use super::layout::PaneId;
 use super::pane::Pane;
-use super::session::{Session, Window};
-use crate::ghostty;
+use super::session::{SESSION_NAME, Session, Window};
+use crate::{ghostty, sys};
 
 /// Finds the value of a variable.
 pub type Lookup<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -336,8 +337,30 @@ impl<'a> Context<'a> {
         }
     }
 
+    pub fn of_pane(session: &'a Session, id: PaneId) -> Self {
+        Self {
+            session,
+            window: session.window_of(id),
+            pane: session.panes.get(&id),
+        }
+    }
+
+    /// A window and its active pane.
+    pub fn of_window(session: &'a Session, window: &'a Window) -> Self {
+        Self {
+            session,
+            window: Some(window),
+            pane: session.panes.get(&window.active),
+        }
+    }
+
     pub fn expand(&self, template: &str) -> String {
         expand(template, &|name| self.value(name))
+    }
+
+    /// Whether a format comes out as true, as in `-f`.
+    pub fn holds(&self, format: &str) -> bool {
+        is_true(&self.expand(format))
     }
 
     fn value(&self, name: &str) -> Option<String> {
@@ -345,8 +368,14 @@ impl<'a> Context<'a> {
         Some(match name {
             "client_height" => session.size.rows.to_string(),
             "client_width" => session.size.cols.to_string(),
+            "host" => sys::host_name()?,
+            "host_short" => {
+                let host = sys::host_name()?;
+                host.split('.').next().unwrap_or(&host).to_owned()
+            }
             "pid" => std::process::id().to_string(),
-            "session_name" => "kl".to_owned(),
+            "session_id" => "$0".to_owned(),
+            "session_name" => SESSION_NAME.to_owned(),
             "session_windows" => session.windows.len().to_string(),
             "version" => env!("CARGO_PKG_VERSION").to_owned(),
             _ => {
@@ -365,8 +394,9 @@ impl<'a> Context<'a> {
             "window_active" => flag(window.index == session.current),
             "window_activity_flag" => flag(window.has_activity()),
             "window_bell_flag" => flag(window.bell),
-            "window_flags" => session.window_flags(window),
+            "window_flags" | "window_raw_flags" => session.window_flags(window),
             "window_height" => area.height.to_string(),
+            "window_id" => format!("@{}", window.id),
             "window_index" => window.index.to_string(),
             "window_last_flag" => flag(session.last == Some(window.index)),
             "window_name" => window.name.clone(),
@@ -390,12 +420,20 @@ impl<'a> Context<'a> {
             "pane_current_path" => pane.working_directory()?.display().to_string(),
             "pane_height" => rect.height.to_string(),
             "pane_id" => format!("%{}", pane.id),
+            "pane_dead" => "0".to_owned(),
             "pane_in_mode" => flag(pane.copy_mode.is_some()),
             "pane_index" => {
                 let panes = window.root.panes(self.session.area());
                 panes.iter().position(|(id, _)| *id == pane.id)?.to_string()
             }
             "pane_left" => rect.x.to_string(),
+            "pane_mode" => {
+                if pane.copy_mode.is_some() {
+                    "copy-mode".to_owned()
+                } else {
+                    String::new()
+                }
+            }
             "pane_pid" => pane.pid.to_string(),
             "pane_right" => (rect.x + rect.width.saturating_sub(1)).to_string(),
             "pane_start_command" => pane.start_command.clone()?,

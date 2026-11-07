@@ -26,6 +26,7 @@ pub enum SplitKind {
 /// How `paste-buffer` goes about it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PasteOptions {
+    pub target: Target,
     /// The buffer to paste, if not the top one.
     pub name: Option<String>,
     /// Delete the buffer afterwards.
@@ -70,6 +71,65 @@ pub enum BufferCommand {
     Show(Option<String>),
 }
 
+/// A size as given on the command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Size {
+    Cells(u16),
+    /// A part of what there is to divide, out of a hundred.
+    Percent(u16),
+}
+
+impl Size {
+    fn parse(text: &str) -> Result<Self, String> {
+        let number = |digits: &str| {
+            digits
+                .parse()
+                .map_err(|error| format!("size {text}: {error}"))
+        };
+        text.strip_suffix('%').map_or_else(
+            || number(text).map(Self::Cells),
+            |percent| number(percent).map(Self::Percent),
+        )
+    }
+
+    /// How many cells this comes to out of `whole` of them.
+    pub fn cells(self, whole: u16) -> u16 {
+        match self {
+            Self::Cells(cells) => cells,
+            Self::Percent(percent) => {
+                let cells = u32::from(whole) * u32::from(percent) / 100;
+                u16::try_from(cells).unwrap_or(whole)
+            }
+        }
+    }
+}
+
+/// Where a new pane goes, as the flags of `split-window` say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub kind: SplitKind,
+    /// To the left or above rather than to the right or below.
+    pub before: bool,
+    /// Next to the whole window rather than next to a pane.
+    pub full: bool,
+    /// The size of the new pane, otherwise half of what it splits.
+    pub size: Option<Size>,
+}
+
+/// A window or pane as `-t` and `-s` name it, for the server to find. Without
+/// one, a command is about the current one.
+pub type Target = Option<String>;
+
+/// Which panes `list-panes` shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneScope {
+    Window,
+    /// `-s`, all panes in the session.
+    Session,
+    /// `-a`, the same here, but marked with the session as in tmux.
+    All,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Buffer(BufferCommand),
@@ -87,47 +147,110 @@ pub enum Command {
     },
     CopyMode {
         page_up: bool,
+        target: Target,
     },
     DetachClient,
-    DisplayMessage(String),
+    DisplayMessage {
+        target: Target,
+        /// To the output rather than the status line.
+        print: bool,
+        format: Option<String>,
+    },
     /// Shows the number of each pane for a while, or until a key if zero.
     DisplayPanes(Option<Duration>),
-    KillPane,
+    KillPane {
+        target: Target,
+        /// Everything in its window but this pane.
+        others: bool,
+    },
     KillServer,
-    KillWindow,
-    LastPane,
+    KillWindow {
+        target: Target,
+        /// Every window but this one.
+        others: bool,
+    },
+    LastPane {
+        target: Target,
+    },
     LastWindow,
     /// `list-keys`, with what each key does in words for `-N`.
     ListKeys {
         notes: bool,
     },
-    ListPanes,
-    ListWindows,
+    ListPanes {
+        scope: PaneScope,
+        target: Target,
+        format: Option<String>,
+        filter: Option<String>,
+    },
+    ListWindows {
+        all: bool,
+        format: Option<String>,
+        filter: Option<String>,
+    },
     NewWindow {
+        target: Target,
         name: Option<String>,
+        directory: Option<String>,
+        /// Stay in the window at hand.
+        detached: bool,
+        /// A format for telling about the new pane.
+        print: Option<String>,
         program: Vec<String>,
     },
-    NextPane,
-    NextWindow,
-    PreviousWindow,
-    RenameWindow(String),
+    NextWindow {
+        /// The next one with a bell or activity.
+        alert: bool,
+    },
+    PreviousWindow {
+        alert: bool,
+    },
+    RenameWindow {
+        target: Target,
+        name: String,
+    },
     ResizePane {
+        target: Target,
         direction: Direction,
         cells: u16,
     },
     /// Replaces the server with this binary, or the one it is running from.
     RestartServer(Option<PathBuf>),
-    SelectPane(Direction),
-    SelectWindow(u32),
-    SendKeys(Vec<String>),
-    SendPrefix,
+    SelectPane {
+        target: Target,
+        /// Go from the target this way, rather than to the target itself.
+        direction: Option<Direction>,
+    },
+    SelectWindow {
+        target: Target,
+    },
+    SendKeys {
+        target: Target,
+        /// As they are, rather than looking for names of keys in them.
+        literal: bool,
+        keys: Vec<String>,
+    },
+    SendPrefix {
+        target: Target,
+    },
     /// Turns a window's `monitor-activity` option on or off, or toggles it.
-    SetMonitorActivity(Option<bool>),
+    SetMonitorActivity {
+        target: Target,
+        value: Option<bool>,
+    },
     SplitWindow {
-        kind: SplitKind,
+        target: Target,
+        place: Place,
+        directory: Option<String>,
+        /// Stay in the pane at hand.
+        detached: bool,
+        /// A format for telling about the new pane.
+        print: Option<String>,
         program: Vec<String>,
     },
-    ToggleZoom,
+    ToggleZoom {
+        target: Target,
+    },
 }
 
 /// Parses the words of a command, with tmux's names and aliases.
@@ -141,36 +264,40 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "command-prompt" => parse_command_prompt(args),
         "confirm-before" | "confirm" => parse_confirm_before(args),
         "copy-mode" => parse_copy_mode(args),
-        "detach-client" | "detach" => no_args(name, args, Command::DetachClient),
-        "display-message" | "display" => Ok(Command::DisplayMessage(args.join(" "))),
-        "delete-buffer" | "deleteb" => parse_buffer_name(args, BufferCommand::Delete),
+        "detach-client" | "detach" => no_args("detach-client", args, Command::DetachClient),
+        "display-message" | "display" => parse_display_message(args),
+        "delete-buffer" | "deleteb" => {
+            parse_buffer_name("delete-buffer", args, BufferCommand::Delete)
+        }
         "display-panes" | "displayp" => parse_display_panes(args),
-        "kill-pane" | "killp" => no_args(name, args, Command::KillPane),
-        "kill-server" => no_args(name, args, Command::KillServer),
-        "kill-window" | "killw" => no_args(name, args, Command::KillWindow),
-        "last-pane" | "lastp" => no_args(name, args, Command::LastPane),
-        "last-window" | "last" => no_args(name, args, Command::LastWindow),
-        "list-buffers" | "lsb" => no_args(name, args, Command::Buffer(BufferCommand::List)),
+        "kill-pane" | "killp" => parse_kill_pane(args),
+        "kill-server" => no_args("kill-server", args, Command::KillServer),
+        "kill-window" | "killw" => parse_kill_window(args),
+        "last-pane" | "lastp" => parse_last_pane(args),
+        "last-window" | "last" => no_args("last-window", args, Command::LastWindow),
+        "list-buffers" | "lsb" => {
+            no_args("list-buffers", args, Command::Buffer(BufferCommand::List))
+        }
         "list-keys" | "lsk" => parse_list_keys(args),
-        "list-panes" | "lsp" => no_args(name, args, Command::ListPanes),
-        "list-windows" | "lsw" => no_args(name, args, Command::ListWindows),
+        "list-panes" | "lsp" => parse_list_panes(args),
+        "list-windows" | "lsw" => parse_list_windows(args),
         "load-buffer" | "loadb" => parse_load_buffer(args),
         "new-window" | "neww" => parse_new_window(args),
-        "next-window" | "next" => no_args(name, args, Command::NextWindow),
+        "next-window" | "next" => parse_next_window(args),
         "paste-buffer" | "pasteb" => parse_paste_buffer(args),
-        "previous-window" | "prev" => no_args(name, args, Command::PreviousWindow),
+        "previous-window" | "prev" => parse_previous_window(args),
         "rename-window" | "renamew" => parse_rename_window(args),
         "resize-pane" | "resizep" => parse_resize_pane(args),
         "restart-server" => parse_restart_server(args),
         "save-buffer" | "saveb" => parse_save_buffer(args),
         "select-pane" | "selectp" => parse_select_pane(args),
         "select-window" | "selectw" => parse_select_window(args),
-        "send-keys" | "send" => Ok(Command::SendKeys(args.to_vec())),
-        "send-prefix" => no_args(name, args, Command::SendPrefix),
+        "send-keys" | "send" => parse_send_keys(args),
+        "send-prefix" => parse_send_prefix(args),
         "set-buffer" | "setb" => parse_set_buffer(args),
         "set-option" | "set" | "set-window-option" | "setw" => parse_set_option(args),
-        "show-buffer" | "showb" => parse_buffer_name(args, BufferCommand::Show),
-        "split-window" | "splitw" => Ok(parse_split_window(args)),
+        "show-buffer" | "showb" => parse_buffer_name("show-buffer", args, BufferCommand::Show),
+        "split-window" | "splitw" => parse_split_window(args),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -182,13 +309,14 @@ pub fn parse_line(line: &str) -> Result<Command, String> {
 
 /// The flags of a command, as getopt finds them in front of its other arguments.
 struct Flags<'a> {
+    command: &'static str,
     found: Vec<(char, Option<&'a str>)>,
     rest: &'a [String],
 }
 
 impl<'a> Flags<'a> {
     /// Takes the flags in `spec`, in which a colon follows those with a value.
-    fn parse(args: &'a [String], spec: &str) -> Result<Self, String> {
+    fn parse(command: &'static str, args: &'a [String], spec: &str) -> Result<Self, String> {
         let mut found = Vec::new();
         let mut rest = args;
         while let Some((word, tail)) = rest.split_first() {
@@ -203,7 +331,7 @@ impl<'a> Flags<'a> {
             while let Some(flag) = chars.next() {
                 let mut spec = spec.chars().skip_while(|c| *c != flag || flag == ':');
                 if spec.next().is_none() {
-                    return Err(format!("unknown flag -{flag}"));
+                    return Err(format!("command {command}: unknown flag -{flag}"));
                 }
                 if spec.next() != Some(':') {
                     found.push((flag, None));
@@ -213,7 +341,7 @@ impl<'a> Flags<'a> {
                 let value = if attached.is_empty() {
                     let (value, tail) = rest
                         .split_first()
-                        .ok_or_else(|| format!("-{flag} expects an argument"))?;
+                        .ok_or_else(|| format!("command {command}: -{flag} expects an argument"))?;
                     rest = tail;
                     value.as_str()
                 } else {
@@ -223,7 +351,11 @@ impl<'a> Flags<'a> {
                 break;
             }
         }
-        Ok(Self { found, rest })
+        Ok(Self {
+            command,
+            found,
+            rest,
+        })
     }
 
     fn has(&self, flag: char) -> bool {
@@ -237,32 +369,56 @@ impl<'a> Flags<'a> {
             .filter(|(found, _)| *found == flag)
             .find_map(|(_, value)| value.map(str::to_owned))
     }
-}
 
-fn no_args(name: &str, args: &[String], command: Command) -> Result<Command, String> {
-    if args.is_empty() {
-        Ok(command)
-    } else {
-        Err(format!("{name}: too many arguments"))
+    /// Fails if there are more than this many arguments after the flags.
+    fn at_most(&self, count: usize) -> Result<(), String> {
+        if self.rest.len() > count {
+            let command = self.command;
+            return Err(format!(
+                "command {command}: too many arguments (need at most {count})"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The format for telling about something new: `-P`, with `-F` to replace
+    /// the default.
+    fn print_format(&self) -> Option<String> {
+        self.has('P').then(|| {
+            self.value('F')
+                .unwrap_or_else(|| "#{session_name}:#{window_index}.#{pane_index}".to_owned())
+        })
+    }
+
+    /// The direction of `-L`, `-R`, `-U` or `-D`.
+    fn direction(&self) -> Option<Direction> {
+        [
+            ('L', Direction::Left),
+            ('R', Direction::Right),
+            ('U', Direction::Up),
+            ('D', Direction::Down),
+        ]
+        .into_iter()
+        .find_map(|(flag, direction)| self.has(flag).then_some(direction))
     }
 }
 
+fn no_args(name: &'static str, args: &[String], command: Command) -> Result<Command, String> {
+    Flags::parse(name, args, "")?.at_most(0).map(|()| command)
+}
+
 fn parse_command_prompt(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "I:p:")?;
-    let template = match flags.rest {
-        [] => None,
-        [template] => Some(template.clone()),
-        _ => return Err("usage: command-prompt [-I initial] [-p prompt] [template]".to_owned()),
-    };
+    let flags = Flags::parse("command-prompt", args, "I:p:")?;
+    flags.at_most(1)?;
     Ok(Command::Prompt {
         prompt: flags.value('p'),
         initial: flags.value('I'),
-        template,
+        template: flags.rest.first().cloned(),
     })
 }
 
 fn parse_confirm_before(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "p:")?;
+    let flags = Flags::parse("confirm-before", args, "p:")?;
     let command = match flags.rest {
         [] => return Err("usage: confirm-before [-p prompt] command".to_owned()),
         [line] => parse_line(line)?,
@@ -274,30 +430,25 @@ fn parse_confirm_before(args: &[String]) -> Result<Command, String> {
     })
 }
 
-/// With a single session, `-s` and `-w` end up with the same list, and it
-/// always covers the window as with `-Z`.
 fn parse_choose_buffer(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "NrZ")?;
-    if !flags.rest.is_empty() {
-        return Err("usage: choose-buffer [-NrZ]".to_owned());
-    }
+    let flags = Flags::parse("choose-buffer", args, "NrZ")?;
+    flags.at_most(0)?;
     Ok(Command::Buffer(BufferCommand::Choose))
 }
 
 /// Commands that take the name of a buffer, and nothing else.
 fn parse_buffer_name(
+    name: &'static str,
     args: &[String],
     command: fn(Option<String>) -> BufferCommand,
 ) -> Result<Command, String> {
-    let flags = Flags::parse(args, "b:")?;
-    if !flags.rest.is_empty() {
-        return Err("usage: [-b buffer-name]".to_owned());
-    }
+    let flags = Flags::parse(name, args, "b:")?;
+    flags.at_most(0)?;
     Ok(Command::Buffer(command(flags.value('b'))))
 }
 
 fn parse_load_buffer(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "b:w")?;
+    let flags = Flags::parse("load-buffer", args, "b:w")?;
     let [path] = flags.rest else {
         return Err("usage: load-buffer [-w] [-b buffer-name] path".to_owned());
     };
@@ -309,11 +460,10 @@ fn parse_load_buffer(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_paste_buffer(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "b:dprs:")?;
-    if !flags.rest.is_empty() {
-        return Err("usage: paste-buffer [-dpr] [-s separator] [-b buffer-name]".to_owned());
-    }
+    let flags = Flags::parse("paste-buffer", args, "b:dprs:t:")?;
+    flags.at_most(0)?;
     Ok(Command::Buffer(BufferCommand::Paste(PasteOptions {
+        target: flags.value('t'),
         name: flags.value('b'),
         delete: flags.has('d'),
         bracket: flags.has('p'),
@@ -323,7 +473,7 @@ fn parse_paste_buffer(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_save_buffer(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "ab:")?;
+    let flags = Flags::parse("save-buffer", args, "ab:")?;
     let [path] = flags.rest else {
         return Err("usage: save-buffer [-a] [-b buffer-name] path".to_owned());
     };
@@ -335,7 +485,7 @@ fn parse_save_buffer(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_set_buffer(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "ab:n:w")?;
+    let flags = Flags::parse("set-buffer", args, "ab:n:w")?;
     if flags.rest.len() > 1 {
         return Err("usage: set-buffer [-aw] [-b buffer-name] [-n new-name] [data]".to_owned());
     }
@@ -348,19 +498,26 @@ fn parse_set_buffer(args: &[String]) -> Result<Command, String> {
     })))
 }
 
+/// With a single session, `-s` and `-w` end up with the same list, and it
+/// always covers the window as with `-Z`.
 fn parse_choose_tree(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "swZ")?;
-    if !flags.rest.is_empty() {
-        return Err("usage: choose-tree [-swZ]".to_owned());
-    }
-    Ok(Command::ChooseTree)
+    let flags = Flags::parse("choose-tree", args, "swZ")?;
+    flags.at_most(0).map(|()| Command::ChooseTree)
+}
+
+fn parse_display_message(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("display-message", args, "F:pt:")?;
+    flags.at_most(1)?;
+    Ok(Command::DisplayMessage {
+        target: flags.value('t'),
+        print: flags.has('p'),
+        format: flags.value('F').or_else(|| flags.rest.first().cloned()),
+    })
 }
 
 fn parse_display_panes(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "d:")?;
-    if !flags.rest.is_empty() {
-        return Err("usage: display-panes [-d milliseconds]".to_owned());
-    }
+    let flags = Flags::parse("display-panes", args, "d:")?;
+    flags.at_most(0)?;
     let millis = flags.value('d').map(|text| {
         text.parse()
             .map(Duration::from_millis)
@@ -369,72 +526,134 @@ fn parse_display_panes(args: &[String]) -> Result<Command, String> {
     millis.transpose().map(Command::DisplayPanes)
 }
 
+fn parse_kill_pane(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("kill-pane", args, "at:")?;
+    flags.at_most(0)?;
+    Ok(Command::KillPane {
+        target: flags.value('t'),
+        others: flags.has('a'),
+    })
+}
+
+fn parse_kill_window(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("kill-window", args, "at:")?;
+    flags.at_most(0)?;
+    Ok(Command::KillWindow {
+        target: flags.value('t'),
+        others: flags.has('a'),
+    })
+}
+
+fn parse_last_pane(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("last-pane", args, "t:")?;
+    flags.at_most(0)?;
+    Ok(Command::LastPane {
+        target: flags.value('t'),
+    })
+}
+
 fn parse_list_keys(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse(args, "N")?;
-    if !flags.rest.is_empty() {
-        return Err("usage: list-keys [-N]".to_owned());
-    }
+    let flags = Flags::parse("list-keys", args, "N")?;
+    flags.at_most(0)?;
     Ok(Command::ListKeys {
         notes: flags.has('N'),
     })
 }
 
+fn parse_list_panes(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("list-panes", args, "asF:f:t:")?;
+    flags.at_most(0)?;
+    let scope = if flags.has('a') {
+        PaneScope::All
+    } else if flags.has('s') {
+        PaneScope::Session
+    } else {
+        PaneScope::Window
+    };
+    Ok(Command::ListPanes {
+        scope,
+        target: flags.value('t'),
+        format: flags.value('F'),
+        filter: flags.value('f'),
+    })
+}
+
+fn parse_list_windows(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("list-windows", args, "aF:f:")?;
+    flags.at_most(0)?;
+    Ok(Command::ListWindows {
+        all: flags.has('a'),
+        format: flags.value('F'),
+        filter: flags.value('f'),
+    })
+}
+
 fn parse_copy_mode(args: &[String]) -> Result<Command, String> {
-    match args {
-        [] => Ok(Command::CopyMode { page_up: false }),
-        [flag] if flag == "-u" => Ok(Command::CopyMode { page_up: true }),
-        _ => Err("usage: copy-mode [-u]".to_owned()),
-    }
+    let flags = Flags::parse("copy-mode", args, "t:u")?;
+    flags.at_most(0)?;
+    Ok(Command::CopyMode {
+        page_up: flags.has('u'),
+        target: flags.value('t'),
+    })
 }
 
 fn parse_new_window(args: &[String]) -> Result<Command, String> {
-    match args {
-        [flag, name, program @ ..] if flag == "-n" => Ok(Command::NewWindow {
-            name: Some(name.clone()),
-            program: program.to_vec(),
-        }),
-        [flag] if flag == "-n" => Err("usage: new-window [-n name] [command]".to_owned()),
-        program => Ok(Command::NewWindow {
-            name: None,
-            program: program.to_vec(),
-        }),
-    }
+    let flags = Flags::parse("new-window", args, "c:dF:n:Pt:")?;
+    Ok(Command::NewWindow {
+        target: flags.value('t'),
+        name: flags.value('n'),
+        directory: flags.value('c'),
+        detached: flags.has('d'),
+        print: flags.print_format(),
+        program: flags.rest.to_vec(),
+    })
+}
+
+fn parse_next_window(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("next-window", args, "a")?;
+    flags.at_most(0)?;
+    Ok(Command::NextWindow {
+        alert: flags.has('a'),
+    })
+}
+
+fn parse_previous_window(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("previous-window", args, "a")?;
+    flags.at_most(0)?;
+    Ok(Command::PreviousWindow {
+        alert: flags.has('a'),
+    })
 }
 
 fn parse_rename_window(args: &[String]) -> Result<Command, String> {
-    if args.is_empty() {
-        return Err("usage: rename-window name".to_owned());
+    let flags = Flags::parse("rename-window", args, "t:")?;
+    if flags.rest.is_empty() {
+        return Err("usage: rename-window [-t target] name".to_owned());
     }
-    Ok(Command::RenameWindow(args.join(" ")))
-}
-
-fn parse_direction(flag: &str) -> Option<Direction> {
-    match flag {
-        "-L" => Some(Direction::Left),
-        "-R" => Some(Direction::Right),
-        "-U" => Some(Direction::Up),
-        "-D" => Some(Direction::Down),
-        _ => None,
-    }
+    Ok(Command::RenameWindow {
+        target: flags.value('t'),
+        name: flags.rest.join(" "),
+    })
 }
 
 fn parse_resize_pane(args: &[String]) -> Result<Command, String> {
-    let usage = "usage: resize-pane -Z | -L|-R|-U|-D [cells]";
-    match args {
-        [flag] if flag == "-Z" => Ok(Command::ToggleZoom),
-        [flag] => parse_direction(flag)
-            .map(|direction| Command::ResizePane {
-                direction,
-                cells: 1,
-            })
-            .ok_or_else(|| usage.to_owned()),
-        [flag, cells] => {
-            let direction = parse_direction(flag).ok_or_else(|| usage.to_owned())?;
-            let cells = cells.parse().map_err(|error| format!("{cells}: {error}"))?;
-            Ok(Command::ResizePane { direction, cells })
-        }
-        _ => Err(usage.to_owned()),
+    let flags = Flags::parse("resize-pane", args, "DLRUt:Z")?;
+    flags.at_most(1)?;
+    let target = flags.value('t');
+    if flags.has('Z') {
+        return Ok(Command::ToggleZoom { target });
     }
+    let direction = flags
+        .direction()
+        .ok_or("usage: resize-pane -Z | -L|-R|-U|-D [-t target] [cells]")?;
+    let cells = flags.rest.first().map_or(Ok(1), |cells| {
+        cells.parse().map_err(|error| format!("{cells}: {error}"))
+    })?;
+    Ok(Command::ResizePane {
+        target,
+        direction,
+        cells,
+    })
 }
 
 fn parse_restart_server(args: &[String]) -> Result<Command, String> {
@@ -446,57 +665,91 @@ fn parse_restart_server(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_select_pane(args: &[String]) -> Result<Command, String> {
-    match args {
-        [flag] if flag == "-l" => Ok(Command::LastPane),
-        [flag] => parse_direction(flag)
-            .map(Command::SelectPane)
-            .ok_or_else(|| "usage: select-pane -L|-R|-U|-D|-l".to_owned()),
-        [] => Ok(Command::NextPane),
-        _ => Err("usage: select-pane -L|-R|-U|-D|-l".to_owned()),
+    let flags = Flags::parse("select-pane", args, "DLlRt:UZ")?;
+    flags.at_most(0)?;
+    let target = flags.value('t');
+    if flags.has('l') {
+        return Ok(Command::LastPane { target });
     }
+    Ok(Command::SelectPane {
+        target,
+        direction: flags.direction(),
+    })
 }
 
 fn parse_select_window(args: &[String]) -> Result<Command, String> {
-    match args {
-        [flag, index] if flag == "-t" => index
-            .parse()
-            .map(Command::SelectWindow)
-            .map_err(|error| format!("{index}: {error}")),
-        [flag] if flag == "-l" => Ok(Command::LastWindow),
-        [flag] if flag == "-n" => Ok(Command::NextWindow),
-        [flag] if flag == "-p" => Ok(Command::PreviousWindow),
-        _ => Err("usage: select-window -t index | -l | -n | -p".to_owned()),
-    }
+    let flags = Flags::parse("select-window", args, "lnpt:")?;
+    flags.at_most(0)?;
+    Ok(if flags.has('l') {
+        Command::LastWindow
+    } else if flags.has('n') {
+        Command::NextWindow { alert: false }
+    } else if flags.has('p') {
+        Command::PreviousWindow { alert: false }
+    } else {
+        Command::SelectWindow {
+            target: flags.value('t'),
+        }
+    })
+}
+
+fn parse_send_keys(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("send-keys", args, "lt:")?;
+    Ok(Command::SendKeys {
+        target: flags.value('t'),
+        literal: flags.has('l'),
+        keys: flags.rest.to_vec(),
+    })
+}
+
+fn parse_send_prefix(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("send-prefix", args, "t:")?;
+    flags.at_most(0)?;
+    Ok(Command::SendPrefix {
+        target: flags.value('t'),
+    })
 }
 
 /// The only option so far is the one tmux makes it impossible to do without.
 fn parse_set_option(args: &[String]) -> Result<Command, String> {
-    let args = match args {
-        [flag, rest @ ..] if flag == "-w" => rest,
-        args => args,
-    };
-    match args {
-        [name] if name == "monitor-activity" => Ok(Command::SetMonitorActivity(None)),
-        [name, value] if name == "monitor-activity" => match value.as_str() {
-            "on" | "yes" | "1" => Ok(Command::SetMonitorActivity(Some(true))),
-            "off" | "no" | "0" => Ok(Command::SetMonitorActivity(Some(false))),
-            _ => Err(format!("bad value: {value}")),
+    let flags = Flags::parse("set-option", args, "t:w")?;
+    let target = flags.value('t');
+    let value = match flags.rest {
+        [name, ..] if name != "monitor-activity" => return Err(format!("invalid option: {name}")),
+        [] => return Err("usage: set-option [-w] [-t target] option [value]".to_owned()),
+        [_] => None,
+        [_, value] => match value.as_str() {
+            "on" | "yes" | "1" => Some(true),
+            "off" | "no" | "0" => Some(false),
+            _ => return Err(format!("bad value: {value}")),
         },
-        [name, ..] => Err(format!("invalid option: {name}")),
-        [] => Err("usage: set-option [-w] option [value]".to_owned()),
-    }
+        _ => return flags.at_most(2).map(|()| Command::DetachClient),
+    };
+    Ok(Command::SetMonitorActivity { target, value })
 }
 
-fn parse_split_window(args: &[String]) -> Command {
-    let (kind, program) = match args {
-        [flag, program @ ..] if flag == "-h" => (SplitKind::Horizontal, program),
-        [flag, program @ ..] if flag == "-v" => (SplitKind::Vertical, program),
-        program => (SplitKind::Vertical, program),
+fn parse_split_window(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("split-window", args, "bc:dF:fhl:p:Pt:vZ")?;
+    let percent = flags.value('p').map(|percent| format!("{percent}%"));
+    let size = flags.value('l').or(percent);
+    let kind = if flags.has('h') {
+        SplitKind::Horizontal
+    } else {
+        SplitKind::Vertical
     };
-    Command::SplitWindow {
-        kind,
-        program: program.to_vec(),
-    }
+    Ok(Command::SplitWindow {
+        target: flags.value('t'),
+        place: Place {
+            kind,
+            before: flags.has('b'),
+            full: flags.has('f'),
+            size: size.as_deref().map(Size::parse).transpose()?,
+        },
+        directory: flags.value('c'),
+        detached: flags.has('d'),
+        print: flags.print_format(),
+        program: flags.rest.to_vec(),
+    })
 }
 
 /// Splits a line typed at the prompt into words, with shell-like quoting.
@@ -565,30 +818,73 @@ mod tests {
         parse(&words(line)).unwrap()
     }
 
+    /// Where a `split-window` line puts a pane, and what it runs there.
+    fn split_of(line: &str) -> (Place, Vec<String>) {
+        match command(line) {
+            Command::SplitWindow { place, program, .. } => (place, program),
+            other => {
+                assert_eq!(format!("{other:?}"), "a split-window");
+                (
+                    Place {
+                        kind: SplitKind::Vertical,
+                        before: false,
+                        full: false,
+                        size: None,
+                    },
+                    vec![],
+                )
+            }
+        }
+    }
+
     #[test]
     fn parses_names_and_aliases_alike() {
-        assert_eq!(command("next-window"), Command::NextWindow);
-        assert_eq!(command("next"), Command::NextWindow);
+        assert_eq!(command("next-window"), command("next"));
         assert_eq!(command("detach"), Command::DetachClient);
-        assert_eq!(command("resizep -Z"), Command::ToggleZoom);
+        assert_eq!(command("resizep -Z"), Command::ToggleZoom { target: None });
     }
 
     #[test]
     fn parses_split_window() {
+        let (place, program) = split_of("split-window -h");
+        assert_eq!(place.kind, SplitKind::Horizontal);
+        assert_eq!(program, Vec::<String>::new());
+
+        let (place, program) = split_of("splitw top -d 1");
+        assert_eq!(place.kind, SplitKind::Vertical);
+        assert_eq!(program, words("top -d 1"));
+    }
+
+    #[test]
+    fn parses_where_a_pane_goes() {
+        let line = "split-window -bfv -l 30% -t 1.2 -c /tmp -d -PF #D";
         assert_eq!(
-            command("split-window -h"),
+            command(line),
             Command::SplitWindow {
-                kind: SplitKind::Horizontal,
+                target: Some("1.2".to_owned()),
+                place: Place {
+                    kind: SplitKind::Vertical,
+                    before: true,
+                    full: true,
+                    size: Some(Size::Percent(30)),
+                },
+                directory: Some("/tmp".to_owned()),
+                detached: true,
+                print: Some("#D".to_owned()),
                 program: vec![],
             }
         );
-        assert_eq!(
-            command("splitw top -d 1"),
-            Command::SplitWindow {
-                kind: SplitKind::Vertical,
-                program: words("top -d 1"),
-            }
-        );
+        assert_eq!(split_of("splitw -l 10").0.size, Some(Size::Cells(10)));
+        assert_eq!(split_of("splitw -p 25").0.size, Some(Size::Percent(25)));
+        assert!(parse(&words("splitw -l big")).is_err());
+    }
+
+    #[test]
+    fn works_out_sizes() {
+        assert_eq!(Size::Cells(7).cells(100), 7);
+        assert_eq!(Size::Percent(30).cells(10), 3);
+        assert_eq!(Size::Percent(100).cells(80), 80);
+        assert_eq!(Size::Percent(u16::MAX).cells(u16::MAX), u16::MAX);
     }
 
     #[test]
@@ -596,11 +892,19 @@ mod tests {
         assert_eq!(
             command("new-window -n logs tail -f x"),
             Command::NewWindow {
+                target: None,
                 name: Some("logs".to_owned()),
+                directory: None,
+                detached: false,
+                print: None,
                 program: words("tail -f x"),
             }
         );
         assert!(parse(&words("new-window -n")).is_err());
+        assert!(matches!(
+            command("neww -P"),
+            Command::NewWindow { print: Some(format), .. } if format.starts_with("#{session_name}")
+        ));
     }
 
     #[test]
@@ -608,18 +912,66 @@ mod tests {
         assert_eq!(
             command("resize-pane -L 5"),
             Command::ResizePane {
+                target: None,
                 direction: Direction::Left,
                 cells: 5,
             }
         );
         assert_eq!(
             command("select-pane -U"),
-            Command::SelectPane(Direction::Up)
+            Command::SelectPane {
+                target: None,
+                direction: Some(Direction::Up),
+            }
         );
-        assert_eq!(command("select-window -t 3"), Command::SelectWindow(3));
+        assert_eq!(
+            command("select-pane -t :.+"),
+            Command::SelectPane {
+                target: Some(":.+".to_owned()),
+                direction: None,
+            }
+        );
+        assert_eq!(
+            command("select-window -t 3"),
+            Command::SelectWindow {
+                target: Some("3".to_owned()),
+            }
+        );
         assert_eq!(
             command("rename-window my logs"),
-            Command::RenameWindow("my logs".to_owned())
+            Command::RenameWindow {
+                target: None,
+                name: "my logs".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_what_commands_print() {
+        assert_eq!(
+            command("display -p -t 1.2 #W"),
+            Command::DisplayMessage {
+                target: Some("1.2".to_owned()),
+                print: true,
+                format: Some("#W".to_owned()),
+            }
+        );
+        assert_eq!(
+            command("lsw -F #W"),
+            Command::ListWindows {
+                all: false,
+                format: Some("#W".to_owned()),
+                filter: None,
+            }
+        );
+        assert_eq!(
+            command("list-panes -s -f #{pane_active}"),
+            Command::ListPanes {
+                scope: PaneScope::Session,
+                target: None,
+                format: None,
+                filter: Some("#{pane_active}".to_owned()),
+            }
         );
     }
 
@@ -627,21 +979,31 @@ mod tests {
     fn parses_options() {
         assert_eq!(
             command("setw monitor-activity on"),
-            Command::SetMonitorActivity(Some(true))
+            Command::SetMonitorActivity {
+                target: None,
+                value: Some(true),
+            }
         );
         assert_eq!(
-            command("set -w monitor-activity off"),
-            Command::SetMonitorActivity(Some(false))
+            command("set -w -t 2 monitor-activity off"),
+            Command::SetMonitorActivity {
+                target: Some("2".to_owned()),
+                value: Some(false),
+            }
         );
         assert_eq!(
             command("set-window-option monitor-activity"),
-            Command::SetMonitorActivity(None)
+            Command::SetMonitorActivity {
+                target: None,
+                value: None,
+            }
         );
         assert_eq!(
             parse(&words("set status off")).unwrap_err(),
             "invalid option: status"
         );
         assert!(parse(&words("setw monitor-activity maybe")).is_err());
+        assert!(parse(&words("setw monitor-activity on now")).is_err());
     }
 
     #[test]
@@ -676,20 +1038,20 @@ mod tests {
             command(r#"confirm-before -p "sure?" kill-pane"#),
             Command::ConfirmBefore {
                 prompt: Some("sure?".to_owned()),
-                command: Box::new(Command::KillPane),
+                command: Box::new(command("kill-pane")),
             }
         );
         assert_eq!(
             command(r#"confirm "resize-pane -Z""#),
             Command::ConfirmBefore {
                 prompt: None,
-                command: Box::new(Command::ToggleZoom),
+                command: Box::new(Command::ToggleZoom { target: None }),
             }
         );
     }
 
     fn flags<'a>(args: &'a [String], spec: &str) -> Result<Flags<'a>, String> {
-        Flags::parse(args, spec)
+        Flags::parse("test", args, spec)
     }
 
     #[test]
@@ -709,10 +1071,16 @@ mod tests {
         assert_eq!(flags(&args, "ab").unwrap().rest, ["-", "word"]);
 
         let args = words("-x");
-        assert_eq!(flags(&args, "ab").err().unwrap(), "unknown flag -x");
+        assert_eq!(
+            flags(&args, "ab").err().unwrap(),
+            "command test: unknown flag -x"
+        );
 
         let args = words("-t");
-        assert_eq!(flags(&args, "t:").err().unwrap(), "-t expects an argument");
+        assert_eq!(
+            flags(&args, "t:").err().unwrap(),
+            "command test: -t expects an argument"
+        );
     }
 
     #[test]
@@ -722,8 +1090,11 @@ mod tests {
             "unknown command: frobnicate"
         );
         assert!(parse(&words("resize-pane -X")).is_err());
-        assert!(parse(&words("select-window -t nope")).is_err());
-        assert!(parse(&words("kill-pane now")).is_err());
+        assert!(parse(&words("resize-pane")).is_err());
+        assert_eq!(
+            parse(&words("kill-pane now")).unwrap_err(),
+            "command kill-pane: too many arguments (need at most 0)"
+        );
         assert!(parse(&[]).is_err());
     }
 

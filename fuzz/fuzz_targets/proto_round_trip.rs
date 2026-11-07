@@ -28,6 +28,7 @@ fuzz_target!(|input: (u8, u32, [u16; 4], Vec<String>, Vec<u8>)| {
         2 => ClientMessage::Resize(size),
         _ => ClientMessage::Command {
             version,
+            pane: Some(version),
             args: words,
         },
     };
