@@ -132,6 +132,16 @@ pub enum PaneScope {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Moves a pane to a window of its own.
+    BreakPane {
+        source: Target,
+        target: Target,
+        name: Option<String>,
+        /// Stay in the window at hand.
+        detached: bool,
+        /// A format for telling about the pane.
+        print: Option<String>,
+    },
     Buffer(BufferCommand),
     /// Lets the user pick a window from a list.
     ChooseTree,
@@ -158,6 +168,14 @@ pub enum Command {
     },
     /// Shows the number of each pane for a while, or until a key if zero.
     DisplayPanes(Option<Duration>),
+    /// Moves a pane next to another one.
+    JoinPane {
+        source: Target,
+        target: Target,
+        place: Place,
+        /// Leave the active pane and window as they are.
+        detached: bool,
+    },
     KillPane {
         target: Target,
         /// Everything in its window but this pane.
@@ -187,6 +205,11 @@ pub enum Command {
         all: bool,
         format: Option<String>,
         filter: Option<String>,
+    },
+    /// Toggles the mark on a pane, or clears the mark from wherever it is.
+    MarkPane {
+        target: Target,
+        clear: bool,
     },
     NewWindow {
         target: Target,
@@ -248,6 +271,15 @@ pub enum Command {
         print: Option<String>,
         program: Vec<String>,
     },
+    /// Puts two panes in each other's place. With a direction, that is the
+    /// target and the pane before or after it.
+    SwapPane {
+        source: Target,
+        target: Target,
+        direction: Option<Direction>,
+        /// Leave the active pane where it is, rather than go with the target.
+        detached: bool,
+    },
     ToggleZoom {
         target: Target,
     },
@@ -259,6 +291,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         return Err("no command".to_owned());
     };
     match name.as_str() {
+        "break-pane" | "breakp" => parse_break_pane(args),
         "choose-buffer" => parse_choose_buffer(args),
         "choose-tree" => parse_choose_tree(args),
         "command-prompt" => parse_command_prompt(args),
@@ -270,6 +303,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
             parse_buffer_name("delete-buffer", args, BufferCommand::Delete)
         }
         "display-panes" | "displayp" => parse_display_panes(args),
+        "join-pane" | "joinp" | "move-pane" | "movep" => parse_join_pane(args),
         "kill-pane" | "killp" => parse_kill_pane(args),
         "kill-server" => no_args("kill-server", args, Command::KillServer),
         "kill-window" | "killw" => parse_kill_window(args),
@@ -298,6 +332,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "set-option" | "set" | "set-window-option" | "setw" => parse_set_option(args),
         "show-buffer" | "showb" => parse_buffer_name("show-buffer", args, BufferCommand::Show),
         "split-window" | "splitw" => parse_split_window(args),
+        "swap-pane" | "swapp" => parse_swap_pane(args),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -387,6 +422,23 @@ impl<'a> Flags<'a> {
         self.has('P').then(|| {
             self.value('F')
                 .unwrap_or_else(|| "#{session_name}:#{window_index}.#{pane_index}".to_owned())
+        })
+    }
+
+    /// Where `-b`, `-f`, `-h`, `-l`, `-p` and `-v` put a pane.
+    fn place(&self) -> Result<Place, String> {
+        let percent = self.value('p').map(|percent| format!("{percent}%"));
+        let size = self.value('l').or(percent);
+        let kind = if self.has('h') {
+            SplitKind::Horizontal
+        } else {
+            SplitKind::Vertical
+        };
+        Ok(Place {
+            kind,
+            before: self.has('b'),
+            full: self.has('f'),
+            size: size.as_deref().map(Size::parse).transpose()?,
         })
     }
 
@@ -524,6 +576,40 @@ fn parse_display_panes(args: &[String]) -> Result<Command, String> {
             .map_err(|error| format!("{text}: {error}"))
     });
     millis.transpose().map(Command::DisplayPanes)
+}
+
+fn parse_break_pane(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("break-pane", args, "dF:n:Ps:t:")?;
+    flags.at_most(0)?;
+    Ok(Command::BreakPane {
+        source: flags.value('s'),
+        target: flags.value('t'),
+        name: flags.value('n'),
+        detached: flags.has('d'),
+        print: flags.print_format(),
+    })
+}
+
+fn parse_join_pane(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("join-pane", args, "bdfhl:p:s:t:v")?;
+    flags.at_most(0)?;
+    Ok(Command::JoinPane {
+        source: flags.value('s'),
+        target: flags.value('t'),
+        place: flags.place()?,
+        detached: flags.has('d'),
+    })
+}
+
+fn parse_swap_pane(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("swap-pane", args, "dDs:t:UZ")?;
+    flags.at_most(0)?;
+    Ok(Command::SwapPane {
+        source: flags.value('s'),
+        target: flags.value('t'),
+        direction: flags.direction(),
+        detached: flags.has('d'),
+    })
 }
 
 fn parse_kill_pane(args: &[String]) -> Result<Command, String> {
@@ -665,11 +751,17 @@ fn parse_restart_server(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_select_pane(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse("select-pane", args, "DLlRt:UZ")?;
+    let flags = Flags::parse("select-pane", args, "DLlMmRt:UZ")?;
     flags.at_most(0)?;
     let target = flags.value('t');
     if flags.has('l') {
         return Ok(Command::LastPane { target });
+    }
+    if flags.has('m') || flags.has('M') {
+        return Ok(Command::MarkPane {
+            target,
+            clear: flags.has('M'),
+        });
     }
     Ok(Command::SelectPane {
         target,
@@ -730,21 +822,9 @@ fn parse_set_option(args: &[String]) -> Result<Command, String> {
 
 fn parse_split_window(args: &[String]) -> Result<Command, String> {
     let flags = Flags::parse("split-window", args, "bc:dF:fhl:p:Pt:vZ")?;
-    let percent = flags.value('p').map(|percent| format!("{percent}%"));
-    let size = flags.value('l').or(percent);
-    let kind = if flags.has('h') {
-        SplitKind::Horizontal
-    } else {
-        SplitKind::Vertical
-    };
     Ok(Command::SplitWindow {
         target: flags.value('t'),
-        place: Place {
-            kind,
-            before: flags.has('b'),
-            full: flags.has('f'),
-            size: size.as_deref().map(Size::parse).transpose()?,
-        },
+        place: flags.place()?,
         directory: flags.value('c'),
         detached: flags.has('d'),
         print: flags.print_format(),
@@ -885,6 +965,67 @@ mod tests {
         assert_eq!(Size::Percent(30).cells(10), 3);
         assert_eq!(Size::Percent(100).cells(80), 80);
         assert_eq!(Size::Percent(u16::MAX).cells(u16::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn parses_moving_panes() {
+        assert_eq!(
+            command("swap-pane -d -U -t 1"),
+            Command::SwapPane {
+                source: None,
+                target: Some("1".to_owned()),
+                direction: Some(Direction::Up),
+                detached: true,
+            }
+        );
+        assert_eq!(
+            command("swapp -s 0 -t 2"),
+            Command::SwapPane {
+                source: Some("0".to_owned()),
+                target: Some("2".to_owned()),
+                direction: None,
+                detached: false,
+            }
+        );
+        assert_eq!(
+            command("break-pane -d -n logs -s 1.2 -t 7"),
+            Command::BreakPane {
+                source: Some("1.2".to_owned()),
+                target: Some("7".to_owned()),
+                name: Some("logs".to_owned()),
+                detached: true,
+                print: None,
+            }
+        );
+        assert_eq!(
+            command("join-pane -h -b -l 10 -s 1 -t 2"),
+            Command::JoinPane {
+                source: Some("1".to_owned()),
+                target: Some("2".to_owned()),
+                place: Place {
+                    kind: SplitKind::Horizontal,
+                    before: true,
+                    full: false,
+                    size: Some(Size::Cells(10)),
+                },
+                detached: false,
+            }
+        );
+        assert_eq!(command("movep -s 1"), command("joinp -s 1"));
+        assert_eq!(
+            command("select-pane -m"),
+            Command::MarkPane {
+                target: None,
+                clear: false,
+            }
+        );
+        assert_eq!(
+            command("selectp -M"),
+            Command::MarkPane {
+                target: None,
+                clear: true,
+            }
+        );
     }
 
     #[test]

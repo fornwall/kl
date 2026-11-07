@@ -399,6 +399,10 @@ impl<'a> Context<'a> {
             "window_id" => format!("@{}", window.id),
             "window_index" => window.index.to_string(),
             "window_last_flag" => flag(session.last == Some(window.index)),
+            "window_marked_flag" => {
+                let marked = session.marked_pane();
+                flag(marked.is_some_and(|id| window.root.contains(id)))
+            }
             "window_name" => window.name.clone(),
             "window_panes" => window.root.panes(area).len().to_string(),
             "window_width" => area.width.to_string(),
@@ -427,6 +431,8 @@ impl<'a> Context<'a> {
                 panes.iter().position(|(id, _)| *id == pane.id)?.to_string()
             }
             "pane_left" => rect.x.to_string(),
+            "pane_marked" => flag(self.session.marked_pane() == Some(pane.id)),
+            "pane_marked_set" => flag(self.session.marked_pane().is_some()),
             "pane_mode" => {
                 if pane.copy_mode.is_some() {
                     "copy-mode".to_owned()

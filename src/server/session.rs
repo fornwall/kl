@@ -52,6 +52,30 @@ impl Window {
     }
 }
 
+/// Takes note of `out` having gone from a window and `into` coming in its place,
+/// or of the two having changed places if they are both in it.
+fn swap_active(window: &mut Window, out: PaneId, into: PaneId, detached: bool, same_window: bool) {
+    let was_active = window.active;
+    if same_window && detached {
+        if window.active == out {
+            window.active = into;
+        } else if window.active == into {
+            window.active = out;
+        }
+    } else if window.active == out || !detached {
+        window.active = into;
+    }
+    if window.active != was_active {
+        window.last_active = Some(was_active).filter(|id| window.root.contains(*id));
+    }
+    if window.last_active == Some(window.active) {
+        window.last_active = None;
+    }
+    if !same_window && window.last_active == Some(out) {
+        window.last_active = None;
+    }
+}
+
 pub struct Session {
     /// Sorted by index.
     pub windows: Vec<Window>,
@@ -79,6 +103,8 @@ pub struct Session {
     pub next_window: u32,
     /// The pane the command being run came from, if it was run from a pane.
     pub origin: Option<PaneId>,
+    /// The pane `select-pane -m` marked, which may be gone by now.
+    pub marked: Option<PaneId>,
 }
 
 impl Session {
@@ -104,6 +130,7 @@ impl Session {
             next_pane: 0,
             next_window: 0,
             origin: None,
+            marked: None,
         }
     }
 
@@ -219,6 +246,10 @@ impl Session {
         }
     }
 
+    pub fn marked_pane(&self) -> Option<PaneId> {
+        self.marked.filter(|id| self.panes.contains_key(id))
+    }
+
     /// The marks after a window's name on the status line.
     pub fn window_flags(&self, window: &Window) -> String {
         let mut flags = String::new();
@@ -232,6 +263,12 @@ impl Session {
             flags.push('*');
         } else if self.last == Some(window.index) {
             flags.push('-');
+        }
+        if self
+            .marked_pane()
+            .is_some_and(|id| window.root.contains(id))
+        {
+            flags.push('M');
         }
         if window.zoomed {
             flags.push('Z');
@@ -372,10 +409,15 @@ impl Session {
         Ok(id)
     }
 
-    /// Takes a pane out of its window, and closes the window if that was the
-    /// last one in it.
+    /// Ends a pane, and closes its window if that was the last one in it.
     pub fn remove_pane(&mut self, id: PaneId) {
         self.panes.remove(&id);
+        self.detach_pane(id);
+    }
+
+    /// Takes a pane out of its window, and closes the window if that was the
+    /// last one in it.
+    fn detach_pane(&mut self, id: PaneId) {
         let Some(position) = self.windows.iter().position(|w| w.root.contains(id)) else {
             return;
         };
@@ -501,6 +543,142 @@ impl Session {
             self.report_focus(true);
         }
         self.repaint = true;
+    }
+
+    /// Puts two panes in each other's place, which can be in different windows.
+    /// The target stays or becomes the active one, unless `detached`: then what
+    /// is active stays where it is on the screen.
+    pub fn swap_panes(&mut self, source: PaneId, target: PaneId, detached: bool) {
+        let index = |id| self.window_of(id).map(|window| window.index);
+        let (Some(source_window), Some(target_window)) = (index(source), index(target)) else {
+            return;
+        };
+        if source == target {
+            return;
+        }
+        self.unzoom(source_window);
+        self.unzoom(target_window);
+        let before = self.active_id();
+        for window in &mut self.windows {
+            if window.index == source_window || window.index == target_window {
+                window.root.swap(source, target);
+                let (out, into) = if window.index == source_window {
+                    (source, target)
+                } else {
+                    (target, source)
+                };
+                swap_active(window, out, into, detached, source_window == target_window);
+            }
+        }
+        self.report_focus_change(before);
+        self.relayout();
+    }
+
+    /// Tells panes about the active one having changed from this one.
+    fn report_focus_change(&mut self, before: Option<PaneId>) {
+        let after = self.active_id();
+        if before != after {
+            if let Some(pane) = before.and_then(|id| self.panes.get_mut(&id)) {
+                pane.report_focus(false);
+            }
+            self.report_focus(true);
+        }
+    }
+
+    /// Moves a pane to a window of its own, at `index` or else at the first one
+    /// free. A pane alone in its window takes the window along.
+    pub fn break_pane(
+        &mut self,
+        id: PaneId,
+        name: Option<String>,
+        index: Option<u32>,
+        detached: bool,
+    ) -> Result<(), String> {
+        let new_index = index.unwrap_or_else(|| self.free_index());
+        if self.window_at(new_index).is_some() {
+            return Err(format!("index in use: {new_index}"));
+        }
+        let Some(position) = self.windows.iter().position(|w| w.root.contains(id)) else {
+            return Err("no such pane".to_owned());
+        };
+        let window = if matches!(self.windows[position].root, Node::Leaf(_)) {
+            let mut window = self.windows.remove(position);
+            if self.current == window.index {
+                self.current = new_index;
+            }
+            window.index = new_index;
+            if let Some(name) = name {
+                window.name = name;
+                window.automatic_name = false;
+            }
+            window
+        } else {
+            self.detach_pane(id);
+            let foreground = self.panes.get(&id).and_then(Pane::foreground_name);
+            let window = Window {
+                id: self.next_window,
+                index: new_index,
+                automatic_name: name.is_none(),
+                name: name
+                    .or(foreground)
+                    .unwrap_or_else(|| pane::default_name(&[])),
+                root: Node::Leaf(id),
+                active: id,
+                last_active: None,
+                zoomed: false,
+                bell: false,
+                monitor: Monitor::Off,
+            };
+            self.next_window += 1;
+            window
+        };
+        let position = self.windows.partition_point(|w| w.index < new_index);
+        self.windows.insert(position, window);
+        if !detached {
+            self.select_window(new_index);
+        }
+        self.relayout();
+        Ok(())
+    }
+
+    /// Moves a pane next to another one, as `place` says.
+    pub fn join_pane(
+        &mut self,
+        source: PaneId,
+        target: PaneId,
+        place: Place,
+        detached: bool,
+    ) -> Result<(), String> {
+        if source == target {
+            return Err("source and target panes must be different".to_owned());
+        }
+        let area = self.area();
+        let Some(window) = self.window_of(target) else {
+            return Err("no such pane".to_owned());
+        };
+        let panes = window.root.panes(area);
+        let rect = panes
+            .iter()
+            .find(|(id, _)| *id == target && !place.full)
+            .map_or(area, |(_, rect)| *rect);
+        if rect.extent(place.kind) < 3 {
+            return Err("no space for a new pane".to_owned());
+        }
+        self.detach_pane(source);
+        let index = self.window_of(target).map(|window| window.index);
+        if let Some(window) = self.window_of_mut(target) {
+            window.zoomed = false;
+            window.root.place(target, source, place, area);
+        }
+        self.marked = None;
+        if !detached {
+            self.select_pane(source);
+            if let Some(index) = index {
+                self.select_window(index);
+            }
+        }
+        self.relayout();
+        Ok(())
     }
 
     /// Makes a pane active, showing it if its window is zoomed in on another.

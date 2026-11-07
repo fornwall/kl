@@ -33,6 +33,7 @@ const fn repeat(key: &'static str, command: &'static str, note: &'static str) ->
 
 /// tmux's default key table, or the part of it that exists here, in its order.
 pub const PREFIX_TABLE: &[Binding] = &[
+    bind("!", "break-pane", "Break pane to a new window"),
     bind("\"", "split-window", "Split window vertically"),
     bind("#", "list-buffers", "List all paste buffers"),
     bind("%", "split-window -h", "Split window horizontally"),
@@ -61,12 +62,14 @@ pub const PREFIX_TABLE: &[Binding] = &[
     bind(";", "last-pane", "Move to the previously active pane"),
     bind("=", "choose-buffer -Z", "Choose a paste buffer from a list"),
     bind("?", "list-keys -N", "List key bindings"),
+    bind("M", "select-pane -M", "Clear the marked pane"),
     bind("[", "copy-mode", "Enter copy mode"),
     bind("]", "paste-buffer -p", "Paste the most recent paste buffer"),
     bind("c", "new-window", "Create a new window"),
     bind("d", "detach-client", "Detach the current client"),
     bind("i", "display-message", "Display window information"),
     bind("l", "last-window", "Select the previously current window"),
+    bind("m", "select-pane -m", "Toggle the marked pane"),
     bind("n", "next-window", "Select the next window"),
     bind("o", "select-pane -t :.+", "Select the next pane"),
     bind("p", "previous-window", "Select the previous window"),
@@ -78,6 +81,16 @@ pub const PREFIX_TABLE: &[Binding] = &[
         "Kill the active pane",
     ),
     bind("z", "resize-pane -Z", "Zoom the active pane"),
+    bind(
+        "{",
+        "swap-pane -U",
+        "Swap the active pane with the pane above",
+    ),
+    bind(
+        "}",
+        "swap-pane -D",
+        "Swap the active pane with the pane below",
+    ),
     bind("PPage", "copy-mode -u", "Enter copy mode and scroll up"),
     repeat(
         "Up",

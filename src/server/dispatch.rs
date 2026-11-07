@@ -14,7 +14,7 @@ use super::pane::Pane;
 use super::session::{Monitor, Window};
 use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
 use super::{Lifecycle, Server, color_queries};
-use crate::command::{self, BufferCommand, Command, PaneScope, PasteOptions};
+use crate::command::{self, BufferCommand, Command, Direction, PaneScope, PasteOptions};
 use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
     Autoscroll, KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MULTI_CLICK_TIME, MouseAction,
@@ -600,6 +600,19 @@ impl Server {
         self.dirty = true;
         self.names_may_change();
         match command {
+            Command::BreakPane {
+                source,
+                target,
+                name,
+                detached,
+                print,
+            } => {
+                let id = self.session.find_pane(source.as_deref())?;
+                let index = target.map(|target| self.session.find_index(&target));
+                let index = index.transpose()?.flatten();
+                self.session.break_pane(id, name, index, detached)?;
+                return Ok(self.tell_about(id, print.as_deref()));
+            }
             Command::Buffer(command) => return self.run_buffer_command(command),
             Command::ChooseTree => self.choose_tree(),
             Command::Prompt {
@@ -621,6 +634,16 @@ impl Server {
                 format,
             } => return self.display_message(target.as_deref(), print, format.as_deref()),
             Command::DisplayPanes(time) => self.ui.show_pane_numbers(time),
+            Command::JoinPane {
+                source,
+                target,
+                place,
+                detached,
+            } => {
+                let source = self.session.find_source(source.as_deref())?;
+                let target = self.session.find_pane(target.as_deref())?;
+                self.session.join_pane(source, target, place, detached)?;
+            }
             Command::KillPane { target, others } => {
                 let id = self.session.find_pane(target.as_deref())?;
                 self.kill_pane(id, others);
@@ -660,6 +683,12 @@ impl Server {
                 format,
                 filter,
             } => return Ok(self.list_windows(all, format.as_deref(), filter.as_deref())),
+            Command::MarkPane { target, clear } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                let marked = self.session.marked_pane() == Some(id);
+                self.session.marked = (!clear && !marked).then_some(id);
+                self.session.repaint = true;
+            }
             Command::NewWindow {
                 target,
                 name,
@@ -668,11 +697,12 @@ impl Server {
                 print,
                 program,
             } => {
-                let index = target.map(|target| self.session.find_free_index(&target));
-                let index = index
-                    .transpose()
-                    .map_err(|error| format!("create window failed: {error}"))?
-                    .flatten();
+                let index = target.map(|target| self.session.find_index(&target));
+                let index = index.transpose()?.flatten();
+                if let Some(index) = index.filter(|index| self.session.window_at(*index).is_some())
+                {
+                    return Err(format!("create window failed: index {index} in use"));
+                }
                 let directory = self.expand_directory(directory);
                 let id = self.session.new_window(
                     name,
@@ -765,6 +795,24 @@ impl Server {
                     self.session
                         .split(target, place, &program, directory.as_deref(), detached)?;
                 return Ok(self.tell_about(id, print.as_deref()));
+            }
+            Command::SwapPane {
+                source,
+                target,
+                direction,
+                detached,
+            } => {
+                let target = self.session.find_pane(target.as_deref())?;
+                let source = match direction {
+                    Some(direction) => {
+                        let next = self
+                            .session
+                            .pane_next_to(target, direction == Direction::Down);
+                        next.unwrap_or(target)
+                    }
+                    None => self.session.find_source(source.as_deref())?,
+                };
+                self.session.swap_panes(source, target, detached);
             }
             Command::ToggleZoom { target } => {
                 let id = self.session.find_pane(target.as_deref())?;

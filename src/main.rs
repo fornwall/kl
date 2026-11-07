@@ -42,10 +42,13 @@ Windows:
 Panes:
   split-window (splitw) [-bdfhv] [-c dir] [-l size] [-P [-F format]] [-t pane]
                         [command]
-  select-pane (selectp) [-L|-R|-U|-D|-l] [-t pane]
+  select-pane (selectp) [-L|-R|-U|-D|-l|-m|-M] [-t pane]
   last-pane (lastp) [-t window]
   resize-pane (resizep) -L|-R|-U|-D [-t pane] [cells]
   resize-pane (resizep) -Z [-t pane]          toggle zoom
+  swap-pane (swapp) [-dDU] [-s pane] [-t pane]  swap two panes
+  break-pane (breakp) [-d] [-n name] [-P [-F format]] [-s pane] [-t index]
+  join-pane (joinp, move-pane, movep) [-bdfhv] [-l size] [-s pane] [-t pane]
   kill-pane (killp) [-a] [-t pane]
   list-panes (lsp) [-as] [-F format] [-f filter] [-t window]
   display-panes (displayp) [-d ms]            show the number of each pane
@@ -72,7 +75,7 @@ Commands run in a pane are about that pane by default. Formats are tmux's, such
 as #{window_name} or #W, with conditions, comparisons and the usual modifiers.
 
 Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , & for windows,
-% \" o ; q z x arrows for panes, [ ] # = - for copying and paste buffers, : for
+% \" o ; q z x { } ! m M arrows for panes, [ ] # = - for copying and paste buffers, : for
 commands, ? to list the keys and d to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a
 second, so that C-b C-Up C-Up resizes twice.

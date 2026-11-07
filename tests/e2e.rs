@@ -1270,6 +1270,229 @@ fn goes_to_the_next_window_with_an_alert() {
     screen.wait_for_text("0:a*");
 }
 
+/// Each pane as `window.number %id`, with a star on those that are active.
+fn pane_list(screen: &Screen) -> String {
+    let format = "#I.#P #D#{?pane_active,*,}";
+    output_of(screen, &["list-panes", "-a", "-F", format]).replace('\n', " ")
+}
+
+/// Three panes as in tmux with `split-window -h`, then `split-window`.
+fn three_panes() -> Screen {
+    let screen = Screen::new(80, 25);
+    assert!(screen.command(&["split-window", "-h"]).status.success());
+    assert!(screen.command(&["split-window"]).status.success());
+    screen
+}
+
+/// Waits for what comes of a key, which takes effect after it was sent.
+fn wait_for_pane_list(screen: &Screen, wanted: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    while pane_list(screen) != wanted {
+        assert!(Instant::now() < deadline, "{}", pane_list(screen));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn swaps_panes_with_their_neighbors() {
+    let mut screen = three_panes();
+    assert_eq!(pane_list(&screen), "0.0 %0 0.1 %1 0.2 %2* ");
+    screen.prefix("{");
+    wait_for_pane_list(&screen, "0.0 %0 0.1 %2* 0.2 %1 ");
+    screen.prefix("}");
+    wait_for_pane_list(&screen, "0.0 %0 0.1 %1 0.2 %2* ");
+}
+
+#[test]
+fn swapping_past_the_ends_wraps_around() {
+    let screen = three_panes();
+    screen.command(&["select-pane", "-t", "0"]);
+    screen.command(&["swap-pane", "-U"]);
+    assert_eq!(pane_list(&screen), "0.0 %2 0.1 %1 0.2 %0* ");
+}
+
+#[test]
+fn swap_pane_can_leave_the_active_pane_in_its_place() {
+    let screen = three_panes();
+    screen.command(&["select-pane", "-t", "0"]);
+    screen.command(&["swap-pane", "-U"]);
+    screen.command(&["swap-pane", "-d", "-D"]);
+    assert_eq!(pane_list(&screen), "0.0 %0 0.1 %1 0.2 %2* ");
+}
+
+#[test]
+fn swaps_panes_between_windows() {
+    let screen = Screen::new(80, 24);
+    screen.command(&["new-window"]);
+    screen.command(&["split-window"]);
+    screen.command(&["swap-pane", "-s", "0.0", "-t", "1.1"]);
+    assert_eq!(pane_list(&screen), "0.0 %2* 1.0 %1 1.1 %0* ");
+    screen.command(&["swap-pane", "-d", "-s", "0.0", "-t", "1.0"]);
+    assert_eq!(pane_list(&screen), "0.0 %1* 1.0 %2 1.1 %0* ");
+}
+
+#[test]
+fn a_pane_keeps_running_where_it_is_swapped_to() {
+    let mut screen = two_panes();
+    screen.command(&["select-pane", "-t", "0"]);
+    screen.run("echo was-on-the-left");
+    screen.wait_for_text("was-on-the-left");
+    screen.command(&["swap-pane", "-s", ":.0", "-t", ":.1"]);
+    screen.wait_for("the text on the right", |lines| {
+        lines.iter().any(|line| {
+            line.find("was-on-the-left")
+                .is_some_and(|column| column > 40)
+        })
+    });
+}
+
+#[test]
+fn breaks_a_pane_out_to_its_own_window() {
+    let mut screen = three_panes();
+    screen.prefix("!");
+    screen.wait_for_text("1:sh*");
+    assert_eq!(pane_list(&screen), "0.0 %0 0.1 %1* 1.0 %2* ");
+    let windows = output_of(&screen, &["list-windows", "-F", "#I:#W#F"]);
+    assert_eq!(windows, "0:sh-\n1:sh*\n");
+}
+
+#[test]
+fn break_pane_can_name_the_window_and_stay() {
+    let screen = three_panes();
+    let args = ["break-pane", "-d", "-n", "logs", "-s", ":.1", "-t", "7"];
+    assert!(screen.command(&args).status.success());
+    assert_eq!(
+        output_of(&screen, &["list-windows", "-F", "#I:#W#F"]),
+        "0:sh*\n7:logs\n"
+    );
+}
+
+#[test]
+fn break_pane_explains_an_index_in_use() {
+    let screen = three_panes();
+    assert_eq!(
+        error_of(&screen, &["break-pane", "-t", "0"]),
+        "kl: index in use: 0\n"
+    );
+}
+
+#[test]
+fn breaking_the_only_pane_moves_its_window() {
+    let screen = Screen::new(80, 24);
+    screen.command(&["rename-window", "kept"]);
+    assert!(screen.command(&["break-pane", "-t", "5"]).status.success());
+    assert_eq!(
+        output_of(&screen, &["list-windows", "-F", "#I:#W#F"]),
+        "5:kept*\n"
+    );
+}
+
+#[test]
+fn joins_a_pane_from_another_window() {
+    let screen = Screen::new(80, 24);
+    screen.command(&["new-window"]);
+    assert!(
+        screen
+            .command(&["join-pane", "-h", "-s", ":1", "-t", ":0"])
+            .status
+            .success()
+    );
+    assert_eq!(pane_list(&screen), "0.0 %0 0.1 %1* ");
+    let sizes = output_of(&screen, &["list-panes", "-F", "#{pane_width}"]);
+    assert_eq!(sizes, "40\n39\n");
+    assert_eq!(output_of(&screen, &["list-windows", "-F", "#I"]), "0\n");
+}
+
+#[test]
+fn join_pane_can_stay_and_choose_a_size() {
+    let screen = Screen::new(80, 24);
+    screen.command(&["new-window"]);
+    screen.command(&["new-window"]);
+    let args = ["join-pane", "-d", "-b", "-l", "10", "-s", ":1", "-t", ":0"];
+    assert!(screen.command(&args).status.success());
+    assert_eq!(pane_list(&screen), "0.0 %1 0.1 %0* 2.0 %2* ");
+    assert_eq!(
+        output_of(&screen, &["list-panes", "-t", "0", "-F", "#{pane_height}"]),
+        "10\n12\n"
+    );
+}
+
+#[test]
+fn join_pane_needs_two_panes() {
+    let screen = Screen::new(80, 24);
+    assert_eq!(
+        error_of(&screen, &["join-pane", "-t", ":0"]),
+        "kl: source and target panes must be different\n"
+    );
+}
+
+#[test]
+fn join_pane_moves_within_a_window_too() {
+    let screen = three_panes();
+    let args = ["move-pane", "-h", "-b", "-s", ":.2", "-t", ":.0"];
+    assert!(screen.command(&args).status.success());
+    assert_eq!(pane_list(&screen), "0.0 %2* 0.1 %0 0.2 %1 ");
+}
+
+#[test]
+fn the_marked_pane_is_the_source_of_a_join() {
+    let mut screen = Screen::new(80, 24);
+    screen.command(&["new-window"]);
+    screen.command(&["split-window"]);
+    screen.prefix("m");
+    screen.wait_for_text("1:sh*M");
+    screen.command(&["select-window", "-t", "0"]);
+    screen.wait_for_text("1:sh-M");
+    assert!(screen.command(&["join-pane"]).status.success());
+    screen.wait_for_no_text("-M");
+    assert_eq!(pane_list(&screen), "0.0 %0 0.1 %2* 1.0 %1* ");
+}
+
+#[test]
+fn swap_pane_without_a_source_takes_the_marked_pane() {
+    let screen = Screen::new(80, 24);
+    screen.command(&["split-window"]);
+    screen.command(&["select-pane", "-m", "-t", "0"]);
+    screen.command(&["select-pane", "-t", "1"]);
+    assert!(screen.command(&["swap-pane"]).status.success());
+    assert_eq!(pane_list(&screen), "0.0 %1* 0.1 %0 ");
+    // The mark stays with its pane, unlike after a join.
+    assert_eq!(
+        output_of(&screen, &["list-panes", "-f", "#{pane_marked}", "-F", "#D"]),
+        "%0\n"
+    );
+}
+
+#[test]
+fn swap_pane_without_a_source_or_mark_does_nothing() {
+    let screen = Screen::new(80, 24);
+    screen.command(&["split-window"]);
+    assert!(screen.command(&["swap-pane"]).status.success());
+    assert_eq!(pane_list(&screen), "0.0 %0 0.1 %1* ");
+}
+
+#[test]
+fn clears_the_mark() {
+    let mut screen = two_panes();
+    screen.prefix("m");
+    screen.wait_for_text("0:sh*M");
+    screen.prefix("m");
+    screen.wait_for_no_text("*M");
+    screen.prefix("m");
+    screen.wait_for_text("0:sh*M");
+    screen.prefix("M");
+    screen.wait_for_no_text("*M");
+}
+
+#[test]
+fn the_mark_goes_with_its_pane() {
+    let mut screen = two_panes();
+    screen.prefix("m");
+    screen.wait_for_text("0:sh*M");
+    assert!(screen.command(&["kill-pane"]).status.success());
+    screen.wait_for_no_text("*M");
+}
+
 #[test]
 fn renames_a_window() {
     let mut screen = Screen::new(80, 24);

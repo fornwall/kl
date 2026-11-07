@@ -349,6 +349,21 @@ impl Node {
         }
     }
 
+    /// Puts two panes in each other's place. One of them can be somewhere else,
+    /// which makes this replace the other one.
+    pub fn swap(&mut self, a: PaneId, b: PaneId) {
+        match self {
+            Self::Leaf(id) if *id == a => *id = b,
+            Self::Leaf(id) if *id == b => *id = a,
+            Self::Leaf(_) => {}
+            Self::Split { children, .. } => {
+                for child in children {
+                    child.swap(a, b);
+                }
+            }
+        }
+    }
+
     /// Removes a pane, giving its space to the child before it, or after it for
     /// the first. Returns `None` if this node was the pane itself, so nothing is
     /// left of it.
@@ -712,6 +727,17 @@ mod tests {
         node.place(2, 3, place, area);
         assert_eq!(node.dividers(area).len(), 2);
         assert_eq!(node.panes(area)[0], (3, rect(0, 0, 40, 24)));
+    }
+
+    #[test]
+    fn swapping_leaves_the_sizes_where_they_are() {
+        let mut node = three_panes();
+        let before = node.panes(AREA);
+        node.swap(1, 3);
+        let after = node.panes(AREA);
+        assert_eq!(after[0], (3, before[0].1));
+        assert_eq!(after[1], before[1]);
+        assert_eq!(after[2], (1, before[2].1));
     }
 
     #[test]

@@ -311,7 +311,11 @@ impl Renderer {
         {
             let active = visible.iter().find(|(id, _)| *id == window.active);
             let active = active.map(|(_, rect)| *rect).unwrap_or_default();
-            self.draw_borders(&window.root.dividers(session.area()), active);
+            let marked = visible
+                .iter()
+                .find(|(id, _)| session.marked_pane() == Some(*id))
+                .map(|(_, rect)| *rect);
+            self.draw_borders(&window.root.dividers(session.area()), active, marked);
         }
     }
 
@@ -359,7 +363,7 @@ impl Renderer {
         }
     }
 
-    fn draw_borders(&mut self, dividers: &[Divider], active: Rect) {
+    fn draw_borders(&mut self, dividers: &[Divider], active: Rect, marked: Option<Rect>) {
         let on_line = |x: Option<u16>, y: Option<u16>| match (x, y) {
             (Some(x), Some(y)) => dividers.iter().any(|d| d.line.contains(x, y)),
             _ => false,
@@ -374,13 +378,17 @@ impl Renderer {
                         on_line(x.checked_sub(1), Some(y)),
                         on_line(x.checked_add(1), Some(y)),
                     ]);
+                    let mut style = border_style(touches(active, x, y));
+                    if marked.is_some_and(|marked| touches(marked, x, y)) {
+                        style.flags |= STYLE_INVERSE;
+                    }
                     let mut encoded = [0; 4];
                     self.next.set(
                         x,
                         y,
                         Cell {
                             text: Text::new(c.encode_utf8(&mut encoded)),
-                            style: border_style(touches(active, x, y)),
+                            style,
                             ..Cell::default()
                         },
                     );

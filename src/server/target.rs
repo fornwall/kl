@@ -288,6 +288,23 @@ impl Session {
         found.or_else(as_window).ok_or_else(not_found)
     }
 
+    /// The pane a source is about. Without one, that is the marked pane if
+    /// there is one, and the current pane otherwise.
+    pub fn find_source(&self, source: Option<&str>) -> Result<PaneId, String> {
+        match (source, self.marked_pane()) {
+            (None, Some(marked)) => Ok(marked),
+            _ => self.find_pane(source),
+        }
+    }
+
+    /// The pane before or after a pane of its window, which wraps around.
+    pub fn pane_next_to(&self, id: PaneId, forward: bool) -> Option<PaneId> {
+        let panes = self.window_of(id)?.root.panes(self.area());
+        let position = panes.iter().position(|(pane, _)| *pane == id)?;
+        let target = stepped(position, panes.len(), forward, 1);
+        panes.get(target).map(|(pane, _)| *pane)
+    }
+
     /// The index of the window a target is about. Without one, that is the
     /// current window.
     pub fn find_window(&self, target: Option<&str>) -> Result<u32, String> {
@@ -316,22 +333,19 @@ impl Session {
     }
 
     /// Where a target for a new window puts it, if it says anything about that.
-    pub fn find_free_index(&self, target: &str) -> Result<Option<u32>, String> {
+    /// The index can be taken already.
+    pub fn find_index(&self, target: &str) -> Result<Option<u32>, String> {
         let parts = Parts::of(target, Wanted::Window);
         Self::check_session(parts.session)?;
         let Some(spec) = parts.window else {
             return Ok(None);
         };
-        let index = spec
-            .parse()
-            .ok()
-            .filter(|index| self.window_at(*index).is_none());
-        if index.is_some() {
-            return Ok(index);
+        if let Ok(index) = spec.parse() {
+            return Ok(Some(index));
         }
         let window = self.window_by_spec(spec, parts.exact_window);
         let window = window.ok_or_else(|| format!("can't find window: {spec}"))?;
-        Err(format!("index {} in use", window.index))
+        Ok(Some(window.index))
     }
 }
 

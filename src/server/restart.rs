@@ -28,7 +28,7 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 6;
+pub const STATE_VERSION: u32 = 7;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
@@ -292,6 +292,7 @@ pub fn read_state(state: &Path, socket: &Path) -> Result<Restored, Box<dyn Error
     session.colors = take_colors(reader)?;
     session.next_pane = reader.take_u32()?;
     session.next_window = reader.take_u32()?;
+    session.marked = take_optional_u32(reader)?;
     session.environment = reader.take_texts_counted()?;
     for _ in 0..reader.take_u32()? {
         session.windows.push(take_window(reader)?);
@@ -320,6 +321,7 @@ impl Server {
         put_colors(&mut out, &session.colors);
         put_u32(&mut out, session.next_pane);
         put_u32(&mut out, session.next_window);
+        put_optional_u32(&mut out, session.marked);
         proto::put_texts_counted(&mut out, &session.environment);
         let count = |len| u32::try_from(len).unwrap_or(u32::MAX);
         put_u32(&mut out, count(session.windows.len()));
