@@ -55,7 +55,8 @@ Panes:
                         [command]
   select-pane (selectp) [-L|-R|-U|-D|-l|-m|-M] [-t pane]
   last-pane (lastp) [-t window]
-  resize-pane (resizep) [-L|-R|-U|-D] [-x width] [-y height] [-t pane] [cells]
+  resize-pane (resizep) [-L|-R|-U|-D] [-x width] [-y height] [-t pane]
+                        [cells]
   resize-pane (resizep) -Z [-t pane]          toggle zoom
   swap-pane (swapp) [-dDU] [-s pane] [-t pane]  swap two panes
   break-pane (breakp) [-d] [-n name] [-P [-F format]] [-s pane] [-t index]
@@ -73,8 +74,8 @@ Panes:
 Other:
   list-keys (lsk) [-N]                        list the keys after the prefix
   send-keys (send) [-l] [-N count] [-t pane] key...  type into a pane
-  send-keys (send) -X [-N count] [-t pane] command [args]  run a command of copy
-                                              mode, by tmux's names
+  send-keys (send) -X [-N count] [-t pane] command [args]  run a command of
+                                              copy mode, by tmux's names
   send-prefix [-t pane]                       type the prefix key into a pane
   command-prompt [-I text] [-p prompt] [template]  ask for a command to run
   confirm-before [-p prompt] command          run a command after asking

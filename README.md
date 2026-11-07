@@ -103,6 +103,9 @@ each target has been verified.
   under the cursor. Searching ignores case and takes the text literally, where
   tmux takes a regular expression. Relative paths for `save-buffer` and
   `load-buffer` go by the active pane's directory, not the client's.
+- **Layouts come out as the JSON of tmux 3.8.** `select-layout` takes that and the
+  older notation with a checksum, but `#{window_layout}` only writes the former,
+  like tmux outside of control mode.
 - **A layout written down keeps its proportions in a window of another size.**
   tmux adds or takes the difference evenly from each pane, which can leave some
   of them a single cell wide, as it does when a window changes size.

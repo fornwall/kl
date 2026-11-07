@@ -152,6 +152,20 @@ Today: kl searches the way the library does. An option for case-sensitive
 matching would give it tmux's behavior for the case, and regular expressions
 would need a matcher in the library, since kl only sees the matches.
 
+### Where the output of a command starts
+
+Rows know whether a prompt starts on them, with
+`GHOSTTY_ROW_DATA_SEMANTIC_PROMPT`, but nothing says that OSC 133;C was on a row,
+which is what `next-prompt -o` in tmux goes by. Cells have
+`GHOSTTY_CELL_DATA_SEMANTIC_CONTENT`, where output is also what everything is by
+default, including rows nothing was written to.
+
+Today: `starts_output` in `src/server/copy_mode.rs` looks for a row that starts
+with output below one that does not, with text somewhere from there on, so that
+the empty rows below the last prompt do not count. A command without output has no
+such row, where tmux stops at the next prompt. With a value for this in
+`GhosttyRowSemanticPrompt`, or a flag next to it: go by that instead.
+
 ### Source tarballs for a commit
 
 `libghostty-vt-source.tar.gz` holds just what the library needs, but it is only
