@@ -22,9 +22,10 @@ The first iteration has the core of tmux, with no configuration:
   and libghostty-vt's encoders towards panes. Programs get the encoding they
   asked for, as if no multiplexer was in between.
 - Clipboard writes, bells, titles, desktop notifications and progress reports
-  reach the outer terminal, and its colors and color scheme reach programs that
-  ask for them, also when they change. Colors a program changes for itself, with
-  OSC 4, 10 and 11 or reverse video, stay in its pane.
+  reach the outer terminal, as does the pointer shape of the pane under the
+  pointer. Its colors and color scheme reach programs that ask for them, also
+  when they change. Colors a program changes for itself, with OSC 4, 10 and 11 or
+  reverse video, stay in its pane.
 
 ### What has and has not been verified
 
@@ -88,7 +89,7 @@ Things panes can ask for that stop at kl today.
   panes and follow scrolling. libghostty-vt's `kitty_graphics` feature tracks
   images and placements.
 - Reading the clipboard (OSC 52 `?`), which needs a decision on who may do that.
-- Mouse pointer shapes (OSC 22), and SGR-pixels mouse reports at real pixels.
+- SGR-pixels mouse reports at real pixels.
 
 ### 6. Clients and persistence
 

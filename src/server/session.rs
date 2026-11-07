@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use super::layout::{self, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
 use crate::command::{Direction, SplitKind};
-use crate::ghostty::{OuterColors, Progress};
+use crate::ghostty::{DEFAULT_POINTER_SHAPE, OuterColors, Progress};
 use crate::sys::WinSize;
 
 pub struct Window {
@@ -61,6 +61,8 @@ pub struct Session {
     /// What new panes get of the environment of the latest client, in the form
     /// of [`crate::proto::ClientMessage::Attach`].
     pub environment: Vec<String>,
+    /// Where the mouse pointer was last seen, once it has been.
+    pub pointer: Option<(u16, u16)>,
     /// A pane reported progress, which the outer terminal wants to hear even if
     /// it is the same as before: it gives up on a report that stays quiet.
     pub progress_reported: bool,
@@ -84,6 +86,7 @@ impl Session {
             repaint: true,
             colors: OuterColors::default(),
             environment: Vec::new(),
+            pointer: None,
             progress_reported: false,
             socket,
             next_pane: 0,
@@ -143,6 +146,23 @@ impl Session {
     /// Whether this pane is on the screen right now.
     pub fn is_visible(&self, pane: PaneId) -> bool {
         self.visible_panes().iter().any(|(id, _)| *id == pane)
+    }
+
+    /// The pane on display at a position of the screen.
+    pub fn pane_at(&self, x: u16, y: u16) -> Option<PaneId> {
+        let panes = self.visible_panes();
+        let pane = panes.iter().find(|(_, rect)| rect.contains(x, y));
+        pane.map(|(id, _)| *id)
+    }
+
+    /// The shape for the pointer, which is about what is under it: what that
+    /// pane asked for, or the active pane's while the pointer has not been seen.
+    pub fn pointer_shape(&self) -> &'static str {
+        let id = self
+            .pointer
+            .map_or_else(|| self.active_id(), |(x, y)| self.pane_at(x, y));
+        let pane = id.and_then(|id| self.panes.get(&id));
+        pane.map_or(DEFAULT_POINTER_SHAPE, |pane| pane.terminal.pointer_shape())
     }
 
     /// The progress to show, as there is room for just one: that of the active

@@ -43,6 +43,7 @@ pub const DATA_COLOR_BACKGROUND_DEFAULT: c_int = 23;
 pub const DATA_COLOR_PALETTE_DEFAULT: c_int = 25;
 pub const DATA_SELECTION: c_int = 31;
 pub const DATA_MODE: c_int = 37;
+pub const DATA_MOUSE_SHAPE: c_int = 41;
 #[cfg(test)]
 pub const DATA_MEMORY_USAGE: c_int = 42;
 

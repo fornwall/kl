@@ -42,7 +42,6 @@ const LEAVE_TERMINAL: &[u8] = b"\x1b[?2031l\
     \x1b[?2027r\
     \x1b[<u\
     \x1b[0m\x1b[0 q\x1b[?25h\
-    \x1b]9;4;0\x1b\\\
     \x1b[?1049l";
 
 /// Variables that come with the terminal a client runs in rather than with the
@@ -58,6 +57,11 @@ const UPDATE_ENVIRONMENT: [&str; 8] = [
     "WINDOWID",
     "XAUTHORITY",
 ];
+
+/// Undoes what panes got the outer terminal to show. It goes out whenever a
+/// server is gone, which is when nobody remembers what is showing: the renderer
+/// counts on this, whether the next server is a restart or a later attach.
+const FORGET_FRAMES: &[u8] = b"\x1b]9;4;0\x1b\\\x1b]22;\x1b\\";
 
 /// Where the server's socket lives, in a directory only this user can enter.
 pub fn socket_path() -> io::Result<PathBuf> {
@@ -188,14 +192,19 @@ pub fn attach(socket: &Path) -> Result<String, Box<dyn Error>> {
     let result = loop {
         match attached_loop(&stream, &signals) {
             Ok(Some(text)) => break Ok(text),
-            Ok(None) => match UnixStream::connect(socket) {
-                Ok(next) => stream = next,
-                Err(error) => break Err(error.into()),
-            },
+            Ok(None) => {
+                stdout.write_all(FORGET_FRAMES)?;
+                stdout.flush()?;
+                match UnixStream::connect(socket) {
+                    Ok(next) => stream = next,
+                    Err(error) => break Err(error.into()),
+                }
+            }
             Err(error) => break Err(error),
         }
     };
 
+    stdout.write_all(FORGET_FRAMES)?;
     stdout.write_all(LEAVE_TERMINAL)?;
     stdout.flush()?;
     result

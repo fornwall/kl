@@ -53,9 +53,9 @@ What does not work today. [PLAN.md](PLAN.md) has what is planned, and how far
 each target has been verified.
 
 - **One client at a time.** A new client takes over from the one attached.
-- **Not everything programs ask for gets through.** OSC 8 hyperlinks, Kitty
-  graphics and mouse pointer shapes stop at kl, and SGR-pixels mouse reports give
-  cells rather than real pixels.
+- **Not everything programs ask for gets through.** OSC 8 hyperlinks and Kitty
+  graphics stop at kl, and SGR-pixels mouse reports give cells rather than real
+  pixels.
 - **Programs cannot read the clipboard.** They can write to it, but who should be
   allowed to read it is undecided, so OSC 52 queries get no answer.
 - **`restart-server` has some rough edges:**

@@ -613,6 +613,7 @@ impl Server {
 
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.dirty = true;
+        self.session.pointer = Some((event.x, event.y));
         if self.ui.list.is_some() {
             self.list_mouse(event);
             return;
@@ -639,19 +640,11 @@ impl Server {
 
     /// Programs that track all motion get it without a button held.
     fn mouse_hover(&mut self, event: MouseEvent) {
-        if let Some(id) = self.pane_at(event.x, event.y)
+        if let Some(id) = self.session.pane_at(event.x, event.y)
             && self.pane_takes_mouse(id, event)
         {
             self.forward_mouse(id, event);
         }
-    }
-
-    fn pane_at(&self, x: u16, y: u16) -> Option<PaneId> {
-        let panes = self.session.visible_panes();
-        panes
-            .iter()
-            .find(|(_, rect)| rect.contains(x, y))
-            .map(|(id, _)| *id)
     }
 
     fn divider_at(&self, x: u16, y: u16) -> Option<Divider> {
@@ -698,7 +691,7 @@ impl Server {
             if event.button == Some(MouseButton::Left) {
                 self.drag = Drag::Divider(divider);
             }
-        } else if let Some(id) = self.pane_at(event.x, event.y) {
+        } else if let Some(id) = self.session.pane_at(event.x, event.y) {
             self.press_in_pane(id, event);
         }
     }

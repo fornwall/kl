@@ -240,6 +240,19 @@ impl Screen {
         }
     }
 
+    /// Waits for the outer terminal to show this pointer shape.
+    fn wait_for_pointer_shape(&mut self, shape: &str) {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.terminal.pointer_shape() != shape {
+            self.pump();
+            assert!(
+                Instant::now() < deadline,
+                "the pointer is a {}",
+                self.terminal.pointer_shape()
+            );
+        }
+    }
+
     /// The style of the first character of `text`, once it is on the screen.
     fn style_of(&mut self, text: &str) -> Style {
         let deadline = Instant::now() + TIMEOUT;
@@ -1122,6 +1135,18 @@ fn a_restart_keeps_history_and_copied_text() {
 }
 
 #[test]
+fn a_restart_leaves_nothing_showing_that_nobody_remembers() {
+    let mut screen = Screen::new(80, 24);
+    screen.run(r"printf '\033]9;4;1;50\033\\'");
+    screen.wait_for_progress(Some(Progress {
+        state: 1,
+        percent: Some(50),
+    }));
+    screen.restart_server();
+    screen.wait_for_progress(None);
+}
+
+#[test]
 fn a_failed_restart_leaves_the_server_running() {
     let mut screen = Screen::new(80, 24);
     let output = screen.command(&["restart-server", "/bin/false"]);
@@ -1571,6 +1596,38 @@ fn two_panes() -> Screen {
     screen.wait_for("a prompt in the new pane", |lines| lines[0].ends_with("│$"));
     screen.prefix("o");
     screen
+}
+
+#[test]
+fn the_pointer_shape_goes_with_the_pane_under_it() {
+    let mut screen = two_panes();
+    screen.run(r"printf '\033]22;pointer\033\\'");
+    // Before the pointer has been seen, the active pane is the best guess.
+    screen.wait_for_pointer_shape("pointer");
+
+    screen.mouse(35, 60, 5, true);
+    screen.wait_for_pointer_shape("text");
+    screen.mouse(35, 10, 5, true);
+    screen.wait_for_pointer_shape("pointer");
+    // Neither a border nor the status line is part of a pane.
+    screen.mouse(35, 39, 5, true);
+    screen.wait_for_pointer_shape("text");
+    screen.mouse(35, 10, 5, true);
+    screen.wait_for_pointer_shape("pointer");
+    screen.mouse(35, 10, 23, true);
+    screen.wait_for_pointer_shape("text");
+    screen.mouse(35, 10, 5, true);
+    screen.wait_for_pointer_shape("pointer");
+
+    // A pane out of sight has no say, and comes back with its window.
+    screen.prefix("c");
+    screen.wait_for_pointer_shape("text");
+    screen.prefix("0");
+    screen.wait_for_pointer_shape("pointer");
+
+    screen.prefix("d");
+    screen.wait_for_exit();
+    assert_eq!(screen.terminal.pointer_shape(), "text");
 }
 
 #[test]

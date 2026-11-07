@@ -5,9 +5,9 @@ use super::layout::{Divider, Rect};
 use super::session::{Session, Window};
 use super::ui::{List, Ui};
 use crate::ghostty::{
-    self, Cell, CursorShape, Progress, STYLE_BLINK, STYLE_BOLD, STYLE_FAINT, STYLE_INVERSE,
-    STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH, STYLE_UNDERLINE_MASK,
-    STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text, Width,
+    self, Cell, CursorShape, DEFAULT_POINTER_SHAPE, Progress, STYLE_BLINK, STYLE_BOLD, STYLE_FAINT,
+    STYLE_INVERSE, STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH,
+    STYLE_UNDERLINE_MASK, STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text, Width,
 };
 use crate::sys;
 
@@ -200,6 +200,8 @@ pub struct Renderer {
     title: String,
     /// The progress the terminal is showing.
     progress: Option<Progress>,
+    /// The pointer shape the terminal is showing, if not the one it started with.
+    pointer_shape: Option<&'static str>,
     pub status_entries: Vec<StatusEntry>,
 }
 
@@ -209,8 +211,9 @@ impl Renderer {
         self.reset = true;
         self.cursor = None;
         self.title.clear();
-        // The client cleared it on leaving.
+        // The client undid these on leaving.
         self.progress = None;
+        self.pointer_shape = None;
     }
 
     fn resize(&mut self, cols: u16, rows: u16) -> bool {
@@ -248,6 +251,7 @@ impl Renderer {
         self.emit_cursor(session, ui, &mut out);
         self.emit_title(session, &mut out);
         self.emit_progress(session, &mut out);
+        self.emit_pointer_shape(session, &mut out);
         if out.is_empty() {
             return out;
         }
@@ -455,6 +459,14 @@ impl Renderer {
             out.extend(osc_text(&title));
             out.extend_from_slice(b"\x1b\\");
             self.title = title;
+        }
+    }
+
+    fn emit_pointer_shape(&mut self, session: &Session, out: &mut Vec<u8>) {
+        let wanted = session.pointer_shape();
+        if wanted != self.pointer_shape.unwrap_or(DEFAULT_POINTER_SHAPE) {
+            out.extend_from_slice(format!("\x1b]22;{wanted}\x1b\\").as_bytes());
+            self.pointer_shape = Some(wanted);
         }
     }
 

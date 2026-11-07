@@ -49,6 +49,47 @@ pub const MODE_BRACKETED_PASTE: u16 = 2004;
 const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 const MODE_REPORT_COLOR_SCHEME: u16 = 2031;
 
+/// The names OSC 22 knows pointer shapes by, in the order of `GhosttyMouseShape`.
+const POINTER_SHAPES: [&str; 34] = [
+    "default",
+    "context-menu",
+    "help",
+    "pointer",
+    "progress",
+    "wait",
+    "cell",
+    "crosshair",
+    "text",
+    "vertical-text",
+    "alias",
+    "copy",
+    "move",
+    "no-drop",
+    "not-allowed",
+    "grab",
+    "grabbing",
+    "all-scroll",
+    "col-resize",
+    "row-resize",
+    "n-resize",
+    "e-resize",
+    "s-resize",
+    "w-resize",
+    "ne-resize",
+    "nw-resize",
+    "se-resize",
+    "sw-resize",
+    "ew-resize",
+    "ns-resize",
+    "nesw-resize",
+    "nwse-resize",
+    "zoom-in",
+    "zoom-out",
+];
+
+/// The pointer shape of a terminal nobody asked anything of.
+pub const DEFAULT_POINTER_SHAPE: &str = "text";
+
 /// A `GhosttyResult` other than success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error(c_int);
@@ -872,6 +913,14 @@ impl Terminal {
 
     pub fn alternate_screen(&self) -> bool {
         self.get::<c_int>(ffi::DATA_ACTIVE_SCREEN) == Some(ffi::SCREEN_ALTERNATE)
+    }
+
+    /// The name of the pointer shape the program asked for with OSC 22.
+    pub fn pointer_shape(&self) -> &'static str {
+        self.get::<c_int>(ffi::DATA_MOUSE_SHAPE)
+            .and_then(|shape| POINTER_SHAPES.get(usize::try_from(shape).ok()?))
+            .copied()
+            .unwrap_or(DEFAULT_POINTER_SHAPE)
     }
 
     /// How far along the program last said it was, unless it finished.
@@ -2176,6 +2225,18 @@ mod tests {
         assert_eq!(terminal.set_outer_colors(&light), b"");
         assert_eq!(terminal.set_outer_colors(&dark), b"\x1b[?997;1n");
         assert_eq!(terminal.set_outer_colors(&light), b"\x1b[?997;2n");
+    }
+
+    #[test]
+    fn names_every_pointer_shape_as_the_library_does() {
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        assert_eq!(terminal.pointer_shape(), DEFAULT_POINTER_SHAPE);
+        for shape in POINTER_SHAPES {
+            terminal.write(format!("\x1b]22;{shape}\x1b\\").as_bytes());
+            assert_eq!(terminal.pointer_shape(), shape);
+        }
+        terminal.write(b"\x1b]22;\x1b\\");
+        assert_eq!(terminal.pointer_shape(), DEFAULT_POINTER_SHAPE);
     }
 
     #[test]
