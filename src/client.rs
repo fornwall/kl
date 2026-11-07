@@ -23,11 +23,13 @@ const SERVER_START_TIME: Duration = Duration::from_secs(5);
 ///
 /// The keyboard flags ask for everything, so panes can get full-fidelity events
 /// whatever they ask for. Grapheme clustering is saved rather than just turned
-/// off afterwards, since it is on by default in Ghostty.
+/// off afterwards, since it is on by default in Ghostty. Ghostty keeps shift with
+/// the mouse for itself unless told otherwise (XTSHIFTESCAPE), which would leave
+/// a pane's program holding on to the mouse.
 const ENTER_TERMINAL: &[u8] = b"\x1b[?1049h\
     \x1b[>31u\
     \x1b[?2027s\x1b[?2027h\
-    \x1b[?1003h\x1b[?1006h\
+    \x1b[?1003h\x1b[?1006h\x1b[>1s\
     \x1b[?2004h\
     \x1b[?1004h\
     \x1b[?2031h";
@@ -38,7 +40,7 @@ const ENTER_TERMINAL: &[u8] = b"\x1b[?1049h\
 const LEAVE_TERMINAL: &[u8] = b"\x1b[?2031l\
     \x1b[?1004l\
     \x1b[?2004l\
-    \x1b[?1006l\x1b[?1003l\
+    \x1b[>0s\x1b[?1006l\x1b[?1003l\
     \x1b[?2027r\
     \x1b[<u\
     \x1b[0m\x1b[0 q\x1b[?25h\
