@@ -459,6 +459,7 @@ impl Server {
             }
         }
         self.renderer.invalidate();
+        self.session.pixel_mouse = false;
         self.session.pointer = None;
         self.dirty = true;
         self.send_output(&color_queries());

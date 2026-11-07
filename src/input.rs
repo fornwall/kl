@@ -128,6 +128,9 @@ pub struct MouseEvent {
     /// Zero-based cell position.
     pub x: u16,
     pub y: u16,
+    /// The position as reported, which is in pixels if the terminal was asked
+    /// for that. Only the server knows, and it knows the size of a cell too.
+    pub report: (u16, u16),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +143,9 @@ pub enum Event {
     Foreground(Rgb),
     /// The terminal's default background color, from OSC 11.
     Background(Rgb),
+    /// Whether mouse reports come in pixels from here on, in answer to asking
+    /// about the mode. A report does not look any different.
+    PixelMouse(bool),
     /// An entry of the terminal's palette, from OSC 4.
     Palette(u8, Rgb),
     /// The terminal's color scheme, as asked for or from mode 2031.
@@ -441,6 +447,10 @@ fn parse_csi(rest: &[u8]) -> Step {
         (b'Z', "") => Step::Consumed(used, Some(key_event(key::TAB, MOD_SHIFT))),
         (b'I', "") => Step::Consumed(used, Some(Event::Focus(true))),
         (b'O', "") => Step::Consumed(used, Some(Event::Focus(false))),
+        (b'y', "?1016;1$" | "?1016;3$") => Step::Consumed(used, Some(Event::PixelMouse(true))),
+        (b'y', _) if params.starts_with("?1016;") => {
+            Step::Consumed(used, Some(Event::PixelMouse(false)))
+        }
         (b'n', "?997;1") => Step::Consumed(used, Some(Event::ColorScheme { dark: true })),
         (b'n', "?997;2") => Step::Consumed(used, Some(Event::ColorScheme { dark: false })),
         (b'M' | b'm', _) if params.starts_with('<') => {
@@ -566,12 +576,14 @@ fn parse_functional(params: &str, lookup: impl Fn(u32) -> Option<c_int>) -> Opti
 
 /// `CSI < button ; x ; y M` for a press or motion, with `m` for a release.
 fn parse_mouse(params: &str, pressed: bool) -> Option<MouseEvent> {
-    let mut fields = params.split(';').map(str::parse::<u16>);
-    let (code, x, y) = (
-        fields.next()?.ok()?,
-        fields.next()?.ok()?,
-        fields.next()?.ok()?,
-    );
+    let mut fields = params.split(';');
+    let code = fields.next()?.parse::<u16>().ok()?;
+    // Pixels count from the text, so that the padding around it is negative.
+    let mut position = || {
+        let value = fields.next()?.parse::<i32>().ok()?;
+        Some(u16::try_from(value.max(0)).unwrap_or(u16::MAX))
+    };
+    let (x, y) = (position()?, position()?);
 
     let mut mods = 0;
     for (bit, value) in [(4, MOD_SHIFT), (8, MOD_ALT), (16, MOD_CTRL)] {
@@ -602,6 +614,7 @@ fn parse_mouse(params: &str, pressed: bool) -> Option<MouseEvent> {
         mods,
         x: x.saturating_sub(1),
         y: y.saturating_sub(1),
+        report: (x, y),
     })
 }
 
@@ -797,6 +810,7 @@ mod tests {
             mods: 0,
             x: 9,
             y: 19,
+            report: (10, 20),
         };
         assert_eq!(events(b"\x1b[<0;10;20M"), [Event::Mouse(press)]);
         assert_eq!(
@@ -847,8 +861,29 @@ mod tests {
                 mods: 0,
                 x: 0,
                 y: 0,
+                report: (1, 1),
             })]
         );
+    }
+
+    #[test]
+    fn keeps_a_mouse_report_in_the_padding_around_the_text() {
+        assert!(matches!(
+            events(b"\x1b[<0;-3;70000M")[..],
+            [Event::Mouse(MouseEvent {
+                report: (0, u16::MAX),
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn hears_when_mouse_reports_change_to_pixels() {
+        assert_eq!(events(b"\x1b[?1016;1$y"), [Event::PixelMouse(true)]);
+        assert_eq!(events(b"\x1b[?1016;3$y"), [Event::PixelMouse(true)]);
+        assert_eq!(events(b"\x1b[?1016;2$y"), [Event::PixelMouse(false)]);
+        // A terminal that does not know the mode is not in it.
+        assert_eq!(events(b"\x1b[?1016;0$y"), [Event::PixelMouse(false)]);
     }
 
     #[test]

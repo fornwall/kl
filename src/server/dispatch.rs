@@ -80,6 +80,31 @@ fn in_pane(pane: &Pane, event: MouseEvent) -> (u16, u16) {
     )
 }
 
+/// A position relative to a pane in pixels, held inside of it like [`in_pane`].
+/// Without real pixels to go by, it is the corner of the cell.
+fn pixels_in_pane(
+    pane: &Pane,
+    event: MouseEvent,
+    pixels: Option<(u16, u16)>,
+    (width, height): (u16, u16),
+) -> (u16, u16) {
+    let (width, height) = (width.max(1), height.max(1));
+    let rect = pane.rect;
+    let corner = || {
+        (
+            event.x.saturating_mul(width),
+            event.y.saturating_mul(height),
+        )
+    };
+    let (x, y) = pixels.unwrap_or_else(corner);
+    (
+        x.saturating_sub(rect.x.saturating_mul(width))
+            .min(rect.width.saturating_mul(width).saturating_sub(1)),
+        y.saturating_sub(rect.y.saturating_mul(height))
+            .min(rect.height.saturating_mul(height).saturating_sub(1)),
+    )
+}
+
 impl Server {
     pub fn handle_input(&mut self, bytes: &[u8]) {
         let events = self.parser.feed(bytes);
@@ -99,9 +124,10 @@ impl Server {
         self.names_may_change();
         match event {
             Event::Key(event) => self.handle_key(&event),
-            Event::Mouse(event) => self.handle_mouse(event),
+            Event::Mouse(event) => self.handle_mouse(self.in_cells(event)),
             Event::Paste(text) => self.handle_paste(&text),
             Event::Focus(focused) => self.session.report_focus(focused),
+            Event::PixelMouse(pixels) => self.session.pixel_mouse = pixels,
             Event::Foreground(rgb) => self.session.colors.foreground = Some(rgb),
             Event::Background(rgb) => self.session.colors.background = Some(rgb),
             Event::Palette(index, rgb) => {
@@ -618,6 +644,26 @@ impl Server {
         panes.iter().enumerate().map(line).collect()
     }
 
+    /// A report in pixels as the cell it is in, for everything but the program
+    /// that asked for them. Pixels can lie in the padding beyond the last cell.
+    fn in_cells(&self, event: MouseEvent) -> MouseEvent {
+        if !self.session.pixel_mouse {
+            return event;
+        }
+        let (width, height) = self.session.cell_size();
+        let (x, y) = event.report;
+        let size = self.session.size;
+        MouseEvent {
+            x: x.checked_div(width)
+                .unwrap_or(0)
+                .min(size.cols.saturating_sub(1)),
+            y: y.checked_div(height)
+                .unwrap_or(0)
+                .min(size.rows.saturating_sub(1)),
+            ..event
+        }
+    }
+
     fn handle_mouse(&mut self, event: MouseEvent) {
         self.dirty = true;
         self.session.pointer = Some((event.x, event.y));
@@ -671,10 +717,12 @@ impl Server {
     }
 
     fn forward_mouse(&mut self, id: PaneId, event: MouseEvent) {
+        let cell_size = self.session.cell_size();
+        let pixels = self.session.pixel_mouse.then_some(event.report);
         let Some(pane) = self.session.panes.get_mut(&id) else {
             return;
         };
-        let (x, y) = in_pane(pane, event);
+        let (x, y) = pixels_in_pane(pane, event, pixels, cell_size);
         let held = event.action == MouseAction::Press
             || (event.action == MouseAction::Motion && event.button.is_some());
         let input = MouseInput {
@@ -683,6 +731,7 @@ impl Server {
             mods: event.mods,
             x,
             y,
+            cell_size,
             any_pressed: held,
         };
         let (cols, rows) = (pane.rect.width.max(1), pane.rect.height.max(1));

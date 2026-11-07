@@ -26,6 +26,7 @@ fuzz_target!(|input: (&[u8], &[u8])| {
                     mods: mouse.mods,
                     x: mouse.x,
                     y: mouse.y,
+                    cell_size: (1, 1),
                     any_pressed: mouse.button.is_some(),
                 };
                 drop(terminal.encode_mouse(&input, COLS, ROWS));

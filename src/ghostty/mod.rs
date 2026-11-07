@@ -45,6 +45,7 @@ pub const STYLE_UNDERLINE_MASK: u16 = 0x7 << STYLE_UNDERLINE_SHIFT;
 /// DEC private modes, as `GhosttyMode` values.
 pub const MODE_FOCUS_EVENT: u16 = 1004;
 pub const MODE_ALTERNATE_SCROLL: u16 = 1007;
+pub const MODE_SGR_PIXELS: u16 = 1016;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 const MODE_REPORT_COLOR_SCHEME: u16 = 2031;
@@ -311,14 +312,18 @@ pub struct Notification {
     pub body: String,
 }
 
-/// A mouse event at a cell position of a terminal.
+/// A mouse event in a terminal.
 #[derive(Clone, Copy, Debug)]
 pub struct MouseInput {
     pub action: MouseAction,
     pub button: Option<MouseButton>,
     pub mods: u16,
+    /// The position in pixels, of which the encoder makes cells for programs
+    /// that want those.
     pub x: u16,
     pub y: u16,
+    /// The size of a cell in pixels.
+    pub cell_size: (u16, u16),
     pub any_pressed: bool,
 }
 
@@ -1209,14 +1214,14 @@ impl Terminal {
     pub fn encode_mouse(&mut self, input: &MouseInput, cols: u16, rows: u16) -> Vec<u8> {
         let handles = &mut self.handles;
         let (encoder, event) = (handles.mouse_encoder, handles.mouse_event);
-        // Reporting cell positions with one pixel per cell keeps every format
-        // but SGR-pixels exact, without needing the outer terminal's cell size.
+        let (cell_width, cell_height) = input.cell_size;
+        let (cell_width, cell_height) = (cell_width.max(1).into(), cell_height.max(1).into());
         let size = ffi::MouseEncoderSize {
             size: size_of::<ffi::MouseEncoderSize>(),
-            screen_width: u32::from(cols),
-            screen_height: u32::from(rows),
-            cell_width: 1,
-            cell_height: 1,
+            screen_width: u32::from(cols) * cell_width,
+            screen_height: u32::from(rows) * cell_height,
+            cell_width,
+            cell_height,
             padding_top: 0,
             padding_bottom: 0,
             padding_right: 0,
@@ -2440,11 +2445,30 @@ mod tests {
             mods: 0,
             x: 2,
             y: 3,
+            cell_size: (1, 1),
             any_pressed: true,
         };
         assert_eq!(terminal.encode_mouse(&click, 10, 5), b"");
         terminal.write(b"\x1b[?1000h\x1b[?1006h");
         assert_eq!(terminal.encode_mouse(&click, 10, 5), b"\x1b[<0;3;4M");
+    }
+
+    #[test]
+    fn encodes_pixels_for_those_who_ask_and_cells_for_the_rest() {
+        let mut terminal = Terminal::new(10, 5).unwrap();
+        let click = MouseInput {
+            action: MouseAction::Press,
+            button: Some(MouseButton::Left),
+            mods: 0,
+            x: 37,
+            y: 65,
+            cell_size: (10, 20),
+            any_pressed: true,
+        };
+        terminal.write(b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(terminal.encode_mouse(&click, 10, 5), b"\x1b[<0;4;4M");
+        terminal.write(b"\x1b[?1016h");
+        assert_eq!(terminal.encode_mouse(&click, 10, 5), b"\x1b[<0;37;65M");
     }
 
     #[test]

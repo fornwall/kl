@@ -87,7 +87,6 @@ Things panes can ask for that stop at kl today.
   panes and follow scrolling. libghostty-vt's `kitty_graphics` feature tracks
   images and placements.
 - Reading the clipboard (OSC 52 `?`), which needs a decision on who may do that.
-- SGR-pixels mouse reports at real pixels.
 
 ### 6. Clients and persistence
 

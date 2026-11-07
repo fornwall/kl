@@ -240,6 +240,22 @@ impl Screen {
         }
     }
 
+    /// A mouse report in pixels, as the outer terminal sends them when asked.
+    fn mouse_pixels(&mut self, x: i32, y: i32) {
+        self.send_bytes(format!("\x1b[<0;{x};{y}M").as_bytes());
+        self.send_bytes(format!("\x1b[<0;{x};{y}m").as_bytes());
+    }
+
+    /// Waits for a mode of the outer terminal. Its reply, if it is asked about
+    /// the mode, gets to kl before anything sent after this.
+    fn wait_for_outer_mode(&mut self, mode: u16, value: bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.terminal.mode(mode) != value {
+            self.pump();
+            assert!(Instant::now() < deadline, "mode {mode} is not {value}");
+        }
+    }
+
     /// Waits for the outer terminal to show this pointer shape.
     fn wait_for_pointer_shape(&mut self, shape: &str) {
         let deadline = Instant::now() + TIMEOUT;
@@ -1631,6 +1647,51 @@ fn the_pointer_shape_goes_with_the_pane_under_it() {
     screen.prefix("d");
     screen.wait_for_exit();
     assert_eq!(screen.terminal.pointer_shape(), "text");
+}
+
+#[test]
+fn programs_get_real_pixels_when_they_ask() {
+    let mut screen = two_panes();
+    // Both programs track the mouse, and only the right one wants pixels.
+    screen.run(r"printf '\033[?1000h\033[?1006hrea''dy\n'; cat -v");
+    screen.wait_for_text("ready");
+    screen.prefix("o");
+    screen.run_setup_then_cat(r"printf '\033[?1000h\033[?1016h'");
+    screen.wait_for_outer_mode(1016, true);
+
+    // The right pane starts after the border, with cells of 10 by 20 pixels.
+    let border = screen.lines()[0].chars().position(|c| c == '│').unwrap();
+    let right_pane = i32::try_from(border + 1).unwrap() * 10;
+    screen.mouse_pixels(right_pane + 37, 125);
+    screen.wait_for_text("^[[<0;37;125M");
+    screen.mouse_pixels(123, 45);
+    screen.wait_for_text("^[[<0;13;3M");
+    // The padding around the text counts from the same place, so it is negative.
+    screen.mouse_pixels(-3, 125);
+    screen.wait_for_text("^[[<0;1;7M");
+
+    // It is only on while such a program is in view.
+    screen.prefix("c");
+    screen.wait_for_outer_mode(1016, false);
+    assert!(screen.terminal.mode(1006));
+    screen.prefix("0");
+    screen.wait_for_outer_mode(1016, true);
+
+    // kl's own parts work too, also from the padding below the last row.
+    let status = screen.lines().pop().unwrap();
+    let label = status.find(" 1:").unwrap() + 1;
+    screen.mouse_pixels(i32::try_from(label).unwrap() * 10 + 5, 500);
+    screen.wait_for("the click on the second window", |lines| {
+        let status = lines.last().unwrap();
+        status
+            .split(' ')
+            .any(|word| word.starts_with("1:") && word.ends_with('*'))
+    });
+    screen.wait_for_outer_mode(1016, false);
+
+    screen.prefix("d");
+    screen.wait_for_exit();
+    assert!(!screen.terminal.mode(1006));
 }
 
 #[test]

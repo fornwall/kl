@@ -218,6 +218,8 @@ pub struct Renderer {
     progress: Option<Progress>,
     /// The pointer shape the terminal is showing, if not the one it started with.
     pointer_shape: Option<&'static str>,
+    /// Mouse reports were asked to come in pixels.
+    pixel_mouse: bool,
     pub status_entries: Vec<StatusEntry>,
 }
 
@@ -230,6 +232,7 @@ impl Renderer {
         // The client undid these on leaving.
         self.progress = None;
         self.pointer_shape = None;
+        self.pixel_mouse = false;
     }
 
     fn resize(&mut self, cols: u16, rows: u16) -> bool {
@@ -268,6 +271,7 @@ impl Renderer {
         self.emit_title(session, &mut out);
         self.emit_progress(session, &mut out);
         self.emit_pointer_shape(session, &mut out);
+        self.emit_mouse_format(session, &mut out);
         if out.is_empty() {
             return out;
         }
@@ -487,6 +491,22 @@ impl Renderer {
         if wanted != self.pointer_shape.unwrap_or(DEFAULT_POINTER_SHAPE) {
             out.extend_from_slice(format!("\x1b]22;{wanted}\x1b\\").as_bytes());
             self.pointer_shape = Some(wanted);
+        }
+    }
+
+    /// Asks for the mouse in pixels only while a program can use them, so that
+    /// everything else does not depend on them being what they seem to be. The
+    /// reply to asking about the mode marks where in the input the format changes,
+    /// and tells whether it did. Leaving the mode leaves no format at all.
+    fn emit_mouse_format(&mut self, session: &Session, out: &mut Vec<u8>) {
+        let wanted = session.wants_pixel_mouse();
+        if wanted != self.pixel_mouse {
+            self.pixel_mouse = wanted;
+            out.extend_from_slice(if wanted {
+                b"\x1b[?1016h\x1b[?1016$p"
+            } else {
+                b"\x1b[?1016l\x1b[?1006h\x1b[?1016$p"
+            });
         }
     }
 

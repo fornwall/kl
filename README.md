@@ -54,8 +54,7 @@ each target has been verified.
 
 - **One client at a time.** A new client takes over from the one attached.
 - **Not everything programs ask for gets through.** OSC 8 hyperlinks and Kitty
-  graphics stop at kl, and SGR-pixels mouse reports give cells rather than real
-  pixels.
+  graphics stop at kl.
 - **The terminal's title does not come back in Ghostty.** It has no title stack,
   so leaving kl clears the title rather than restoring it, until something like
   the shell's prompt sets it again.

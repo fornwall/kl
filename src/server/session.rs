@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use super::layout::{self, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
 use crate::command::{Direction, SplitKind};
-use crate::ghostty::{DEFAULT_POINTER_SHAPE, OuterColors, Progress};
+use crate::ghostty::{DEFAULT_POINTER_SHAPE, MODE_SGR_PIXELS, OuterColors, Progress};
 use crate::sys::WinSize;
 
 pub struct Window {
@@ -61,6 +61,8 @@ pub struct Session {
     /// What new panes get of the environment of the latest client, in the form
     /// of [`crate::proto::ClientMessage::Attach`].
     pub environment: Vec<String>,
+    /// Mouse reports come in pixels, as of the event being handled.
+    pub pixel_mouse: bool,
     /// Where the mouse pointer was last seen, once it has been.
     pub pointer: Option<(u16, u16)>,
     /// A pane reported progress, which the outer terminal wants to hear even if
@@ -86,6 +88,7 @@ impl Session {
             repaint: true,
             colors: OuterColors::default(),
             environment: Vec::new(),
+            pixel_mouse: false,
             pointer: None,
             progress_reported: false,
             socket,
@@ -103,7 +106,7 @@ impl Session {
         }
     }
 
-    fn cell_size(&self) -> (u16, u16) {
+    pub fn cell_size(&self) -> (u16, u16) {
         (
             self.size.width_px.checked_div(self.size.cols).unwrap_or(0),
             self.size.height_px.checked_div(self.size.rows).unwrap_or(0),
@@ -163,6 +166,17 @@ impl Session {
             .map_or_else(|| self.active_id(), |(x, y)| self.pane_at(x, y));
         let pane = id.and_then(|id| self.panes.get(&id));
         pane.map_or(DEFAULT_POINTER_SHAPE, |pane| pane.terminal.pointer_shape())
+    }
+
+    /// Whether a program on display wants the mouse in pixels. Making anything
+    /// of those takes knowing the size of a cell.
+    pub fn wants_pixel_mouse(&self) -> bool {
+        let wants = |id: &PaneId| {
+            let pane = self.panes.get(id);
+            pane.is_some_and(|pane| pane.terminal.mode(MODE_SGR_PIXELS))
+        };
+        let (width, height) = self.cell_size();
+        width > 0 && height > 0 && self.visible_panes().iter().any(|(id, _)| wants(id))
     }
 
     /// The progress to show, as there is room for just one: that of the active
