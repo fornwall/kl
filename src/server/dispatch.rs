@@ -11,7 +11,7 @@ use super::pane::Pane;
 use super::session::{Monitor, Window};
 use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
 use super::{Lifecycle, Server, color_queries};
-use crate::command::{self, Command};
+use crate::command::{self, BufferCommand, Command, PasteOptions};
 use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
     Autoscroll, KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MULTI_CLICK_TIME, MouseAction,
@@ -189,7 +189,7 @@ impl Server {
             && let Some(pane) = self.session.active_pane_mut()
             && pane.copy_mode.is_none()
         {
-            let bytes = pane.terminal.encode_paste(text);
+            let bytes = pane.terminal.encode_paste(text, true);
             pane.send(&bytes);
         }
     }
@@ -332,6 +332,11 @@ impl Server {
             ListOutcome::Run(command) => {
                 self.close_list();
                 self.run_interactive(command);
+            }
+            ListOutcome::Delete(command, row) => {
+                self.close_list();
+                self.run_interactive(command);
+                self.choose_buffer(row);
             }
         }
     }
@@ -539,11 +544,10 @@ impl Server {
         if outcome != Outcome::Stay {
             CopyMode::exit(pane);
         }
-        if let Some(text) = copied {
-            let start = (outcome == Outcome::Append).then(|| self.buffer.take());
-            let mut buffer = start.flatten().unwrap_or_default();
-            buffer.push_str(&text);
-            self.store_buffer(buffer);
+        match copied {
+            Some(text) if outcome == Outcome::Append => self.append_buffer(&text),
+            Some(text) => self.store_buffer(text),
+            None => {}
         }
     }
 
@@ -552,6 +556,7 @@ impl Server {
         self.dirty = true;
         self.names_may_change();
         match command {
+            Command::Buffer(command) => return self.run_buffer_command(command),
             Command::ChooseTree => self.choose_tree(),
             Command::Prompt {
                 prompt,
@@ -588,7 +593,6 @@ impl Server {
             Command::NewWindow { name, program } => self.session.new_window(name, &program)?,
             Command::NextPane => self.session.select_next_pane(),
             Command::NextWindow => self.session.next_window(),
-            Command::PasteBuffer => self.paste_buffer(),
             Command::PreviousWindow => self.session.previous_window(),
             Command::RenameWindow(name) => {
                 if let Some(window) = self.session.window_mut() {
@@ -642,16 +646,6 @@ impl Server {
             if page_up {
                 copy_mode::page_up(pane, false);
             }
-        }
-    }
-
-    fn paste_buffer(&mut self) {
-        let Some(text) = &self.buffer else {
-            return;
-        };
-        if let Some(pane) = self.session.active_pane_mut() {
-            let bytes = pane.terminal.encode_paste(text.as_bytes());
-            pane.send(&bytes);
         }
     }
 
@@ -819,7 +813,13 @@ impl Server {
         }
         match event.button {
             Some(MouseButton::Left) => self.press_to_select(id, event),
-            Some(MouseButton::Middle) => self.paste_buffer(),
+            Some(MouseButton::Middle) => {
+                let options = PasteOptions {
+                    bracket: true,
+                    ..PasteOptions::default()
+                };
+                self.run_interactive(Command::Buffer(BufferCommand::Paste(options)));
+            }
             _ => {}
         }
     }

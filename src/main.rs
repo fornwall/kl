@@ -55,11 +55,18 @@ Other:
   send-prefix                                 type the prefix key into the pane
   command-prompt [-I text] [-p prompt] [template]  ask for a command to run
   confirm-before [-p prompt] command          run a command after asking
-  copy-mode [-u], paste-buffer (pasteb), display-message (display) text
+  copy-mode [-u], display-message (display) text
+
+Paste buffers, the top one unless -b names another:
+  paste-buffer (pasteb) [-dpr] [-s sep] [-b name]  paste into the active pane
+  set-buffer (setb) [-aw] [-b name] [-n new-name] [data]  set or rename
+  show-buffer (showb) [-b name], delete-buffer (deleteb) [-b name]
+  save-buffer (saveb) [-a] [-b name] path, load-buffer (loadb) [-w] [-b name] path
+  list-buffers (lsb), choose-buffer           list them, or pick one to paste
 
 Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , & for windows,
-% \" o ; q z x arrows for panes, [ ] for copying, : for commands, ? to list the
-keys and d to detach.
+% \" o ; q z x arrows for panes, [ ] # = - for copying and paste buffers, : for
+commands, ? to list the keys and d to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a
 second, so that C-b C-Up C-Up resizes twice.
 Copy mode has the keys of tmux's copy-mode-vi table, with y to copy as well, and

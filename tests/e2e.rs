@@ -1235,6 +1235,29 @@ fn a_restart_keeps_history_and_copied_text() {
     screen.wait_for_no_text("for i in");
     screen.prefix("]");
     screen.wait_for_text("$ history-100");
+
+    // Named buffers come along, and so does the numbering of the others.
+    let run = |args: &[&str]| {
+        assert!(screen.command(args).status.success());
+    };
+    run(&["set-buffer", "-b", "notes", "kept-text"]);
+    run(&["restart-server"]);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let output = screen.command(&["list-buffers"]);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        if output.status.success() {
+            assert!(text.contains("notes: 9 bytes: \"kept-text\""), "{text}");
+            assert!(text.contains("buffer0: "), "{text}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the server did not come back");
+    }
+    let copied = screen.command(&["set-buffer", "another"]);
+    assert!(copied.status.success());
+    let listed = screen.command(&["list-buffers"]);
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert!(text.starts_with("buffer1: "), "{text}");
 }
 
 #[test]
@@ -2316,6 +2339,204 @@ fn prompts_in_view_count_when_jumping_from_the_cursor() {
     screen.type_text("$");
     screen.enter();
     assert_eq!(screen.wait_for_clipboard(), [b"mark 2".to_vec()]);
+}
+
+/// Copies the output of the last command, leaving copy mode.
+fn copy_line_above_the_prompt(screen: &mut Screen) {
+    copy_last_output(screen);
+    screen.type_text(" ");
+    screen.type_text("$");
+    screen.enter();
+    screen.wait_for_clipboard();
+}
+
+fn output_of(screen: &Screen, args: &[&str]) -> String {
+    let output = screen.command(args);
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn copies_pile_up_in_paste_buffers() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; echo first-copy");
+    screen.wait_for_line("first-copy");
+    copy_line_above_the_prompt(&mut screen);
+    screen.run("clear; echo second-copy");
+    screen.wait_for_line("second-copy");
+    copy_line_above_the_prompt(&mut screen);
+    assert_eq!(
+        output_of(&screen, &["list-buffers"]),
+        "buffer1: 11 bytes: \"second-copy\"\nbuffer0: 10 bytes: \"first-copy\"\n"
+    );
+    assert_eq!(output_of(&screen, &["show-buffer"]), "second-copy");
+    assert_eq!(
+        output_of(&screen, &["show-buffer", "-b", "buffer0"]),
+        "first-copy"
+    );
+
+    screen.prefix("-");
+    let deadline = Instant::now() + TIMEOUT;
+    while output_of(&screen, &["show-buffer"]) != "first-copy" {
+        assert!(Instant::now() < deadline, "the buffer stayed");
+    }
+}
+
+#[test]
+fn named_buffers_work_like_in_tmux() {
+    let mut screen = Screen::new(80, 24);
+    assert_eq!(screen.command(&["show-buffer"]).status.code(), Some(1));
+    let run = |args: &[&str]| output_of(&screen, args);
+    run(&["set-buffer", "-b", "notes", "hello"]);
+    run(&["set-buffer", "-a", "-b", "notes", " there"]);
+    assert_eq!(run(&["show-buffer", "-b", "notes"]), "hello there");
+    run(&["set-buffer", "-b", "notes", "-n", "renamed"]);
+    assert_eq!(
+        run(&["list-buffers"]),
+        "renamed: 11 bytes: \"hello there\"\n"
+    );
+
+    let error = |args: &[&str]| {
+        let output = screen.command(args);
+        assert!(!output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    assert!(error(&["show-buffer", "-b", "nope"]).contains("no buffer nope"));
+    assert!(error(&["delete-buffer", "-b", "nope"]).contains("unknown buffer: nope"));
+    assert!(error(&["delete-buffer"]).contains("no buffer"));
+    assert!(error(&["set-buffer"]).contains("no data specified"));
+    assert!(error(&["set-buffer", "-b", "", "x"]).contains("empty buffer name"));
+    run(&["delete-buffer", "-b", "renamed"]);
+    assert_eq!(run(&["list-buffers"]), "");
+
+    screen.run("cat");
+    output_of(&screen, &["set-buffer", "-b", "typed", "a named paste"]);
+    output_of(&screen, &["paste-buffer", "-d", "-b", "typed"]);
+    screen.wait_for_text("a named paste");
+    assert_eq!(output_of(&screen, &["list-buffers"]), "", "-d deletes it");
+}
+
+#[test]
+fn saves_buffers_to_files_and_back() {
+    let screen = Screen::new(80, 24);
+    let path = screen.dir.0.join("saved");
+    let path = path.to_str().unwrap();
+    let run = |args: &[&str]| output_of(&screen, args);
+    run(&["set-buffer", "-b", "notes", "one"]);
+    run(&["save-buffer", "-b", "notes", path]);
+    run(&["save-buffer", "-a", "-b", "notes", path]);
+    assert_eq!(fs::read_to_string(path).unwrap(), "oneone");
+    run(&["load-buffer", "-b", "loaded", path]);
+    assert_eq!(run(&["show-buffer", "-b", "loaded"]), "oneone");
+    assert_eq!(run(&["save-buffer", "-b", "notes", "-"]), "one");
+
+    let refused = screen.command(&["load-buffer", screen.dir.0.to_str().unwrap()]);
+    assert!(!refused.status.success(), "a directory is not a file");
+    let missing = screen.command(&["load-buffer", "/no/such/file"]);
+    let error = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        error.contains("No such file or directory: /no/such/file"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_relative_path_is_taken_from_the_active_pane() {
+    let mut screen = Screen::new(80, 24);
+    let dir = screen.dir.0.join("here");
+    fs::create_dir(&dir).unwrap();
+    let dir_name = dir.to_str().unwrap();
+    screen.run(&format!(
+        "cd {dir_name}; printf '\\033]7;file://host%s\\007' \"$PWD\"; echo cd-done"
+    ));
+    screen.wait_for_line("cd-done");
+    output_of(&screen, &["set-buffer", "-b", "notes", "text"]);
+    output_of(&screen, &["save-buffer", "-b", "notes", "saved"]);
+    assert_eq!(fs::read_to_string(dir.join("saved")).unwrap(), "text");
+}
+
+#[test]
+fn choose_buffer_pastes_what_was_picked() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("cat");
+    output_of(&screen, &["set-buffer", "-b", "older", "older-text"]);
+    output_of(&screen, &["set-buffer", "-b", "newer", "newer-text"]);
+    screen.prefix("=");
+    screen.wait_for_text("(1) older: 10 bytes: \"older-text\"");
+    screen.wait_for_text("(0) newer: 10 bytes: \"newer-text\"");
+    screen.key(key::ARROW_DOWN, 0, "", 0);
+    screen.enter();
+    screen.wait_for_no_text("(1) older");
+    screen.wait_for_text("older-text");
+}
+
+#[test]
+fn choose_buffer_deletes_with_d_and_goes_away_with_the_last_one() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("cat");
+    output_of(&screen, &["set-buffer", "-b", "one", "text-one"]);
+    output_of(&screen, &["set-buffer", "-b", "two", "text-two"]);
+    screen.prefix("=");
+    screen.wait_for_text("(0) two");
+    screen.type_text("d");
+    screen.wait_for_text("(0) one");
+    assert_eq!(
+        output_of(&screen, &["list-buffers"]),
+        "one: 8 bytes: \"text-one\"\n"
+    );
+    screen.type_text("d");
+    screen.wait_for_no_text("(0) one");
+    assert_eq!(output_of(&screen, &["list-buffers"]), "");
+    screen.type_text("typing");
+    screen.wait_for_text("typing");
+}
+
+#[test]
+fn choose_buffer_without_buffers_shows_nothing() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("=");
+    screen.type_text("echo still-a-shell");
+    screen.wait_for_text("still-a-shell");
+}
+
+#[test]
+fn appending_a_selection_adds_to_the_last_copy() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf 'one\\ntwo\\n'");
+    screen.wait_for_line("two");
+    copy_last_output(&mut screen);
+    screen.type_text(" ");
+    screen.type_text("$");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"two".to_vec()]);
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("kk0 ");
+    screen.type_text("$");
+    screen.type_text("A");
+    assert_eq!(
+        screen.wait_for_clipboard(),
+        [b"one".to_vec()],
+        "only what is new goes on the clipboard"
+    );
+    assert_eq!(output_of(&screen, &["show-buffer"]), "twoone");
+    assert_eq!(output_of(&screen, &["list-buffers"]).lines().count(), 1);
+}
+
+#[test]
+fn pasting_can_leave_programs_out_of_it() {
+    let mut screen = Screen::new(80, 24);
+    screen.run_setup_then_cat("printf '\\033[?2004h'");
+    output_of(&screen, &["set-buffer", "marked"]);
+    output_of(&screen, &["paste-buffer", "-p"]);
+    screen.wait_for_text("^[[200~marked^[[201~");
+    output_of(&screen, &["set-buffer", "plain"]);
+    output_of(&screen, &["paste-buffer"]);
+    screen.wait_for("the plain paste", |lines| {
+        lines
+            .iter()
+            .any(|line| line.ends_with("plain") && !line.contains("200~plain"))
+    });
 }
 
 #[test]

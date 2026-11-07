@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::Server;
+use super::buffers::{Buffer, Buffers};
 use super::copy_mode::CopyMode;
 use super::layout::{Node, PaneId};
 use super::pane::Pane;
@@ -27,13 +28,13 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 4;
+pub const STATE_VERSION: u32 = 5;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
     pub listener: UnixListener,
     pub session: Session,
-    pub buffer: Option<String>,
+    pub buffers: Buffers,
 }
 
 /// Whether this binary can read what this server is about to write.
@@ -249,6 +250,30 @@ fn take_pane(reader: &mut Reader<'_>, colors: &OuterColors) -> Result<Pane, Box<
     Ok(Pane::adopt(id, pid, start_command, pty, terminal))
 }
 
+fn put_buffers(out: &mut Vec<u8>, buffers: &Buffers) {
+    put_u32(out, buffers.next_index);
+    put_u32(out, u32::try_from(buffers.list.len()).unwrap_or(u32::MAX));
+    for buffer in &buffers.list {
+        proto::put_bytes(out, buffer.name.as_bytes());
+        proto::put_bytes(out, buffer.text.as_bytes());
+        put_bool(out, buffer.automatic);
+    }
+}
+
+fn take_buffers(reader: &mut Reader<'_>) -> Result<Buffers, Malformed> {
+    let next_index = reader.take_u32()?;
+    let list = (0..reader.take_u32()?)
+        .map(|_| {
+            Ok(Buffer {
+                name: reader.take_text()?,
+                text: reader.take_text()?,
+                automatic: reader.take_bool()?,
+            })
+        })
+        .collect::<Result<_, Malformed>>()?;
+    Ok(Buffers { list, next_index })
+}
+
 /// Reads what [`Server::restart`] left behind, which is only good for one use.
 pub fn read_state(state: &Path, socket: &Path) -> Result<Restored, Box<dyn Error>> {
     let bytes = fs::read(state)?;
@@ -257,8 +282,7 @@ pub fn read_state(state: &Path, socket: &Path) -> Result<Restored, Box<dyn Error
     let reader = &mut reader;
 
     let listener = UnixListener::from(take_fd(reader)?);
-    let buffer = reader.take_bool()?;
-    let text = reader.take_text()?;
+    let buffers = take_buffers(reader)?;
     let mut session = Session::new(socket.display().to_string());
     session.current = reader.take_u32()?;
     session.last = take_optional_u32(reader)?;
@@ -277,7 +301,7 @@ pub fn read_state(state: &Path, socket: &Path) -> Result<Restored, Box<dyn Error
     Ok(Restored {
         listener,
         session,
-        buffer: buffer.then_some(text),
+        buffers,
     })
 }
 
@@ -286,8 +310,7 @@ impl Server {
         let mut out = Vec::new();
         let session = &self.session;
         put_fd(&mut out, self.listener.as_fd());
-        put_bool(&mut out, self.buffer.is_some());
-        proto::put_bytes(&mut out, self.buffer.as_deref().unwrap_or("").as_bytes());
+        put_buffers(&mut out, &self.buffers);
         put_u32(&mut out, session.current);
         put_optional_u32(&mut out, session.last);
         out.extend(proto::size_bytes(session.size));

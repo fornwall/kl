@@ -1386,9 +1386,10 @@ impl Terminal {
         })
     }
 
-    /// Bytes for pasting `text`, with control characters made harmless.
-    pub fn encode_paste(&self, text: &[u8]) -> Vec<u8> {
-        let bracketed = self.mode(MODE_BRACKETED_PASTE);
+    /// Bytes for pasting `text`, with control characters made harmless. With
+    /// `bracket`, a program that asked for it gets told that this is a paste.
+    pub fn encode_paste(&self, text: &[u8], bracket: bool) -> Vec<u8> {
+        let bracketed = bracket && self.mode(MODE_BRACKETED_PASTE);
         let mut data = text.to_vec();
         let (ptr, len) = (data.as_mut_ptr().cast(), data.len());
         encode_into(|buf, buf_len, written| {
@@ -3117,16 +3118,17 @@ mod tests {
     #[test]
     fn brackets_pastes_when_asked_to() {
         let mut terminal = Terminal::new(10, 2).unwrap();
-        assert_eq!(terminal.encode_paste(b"a\nb"), b"a\rb");
+        assert_eq!(terminal.encode_paste(b"a\nb", true), b"a\rb");
         terminal.write(b"\x1b[?2004h");
-        assert_eq!(terminal.encode_paste(b"ab"), b"\x1b[200~ab\x1b[201~");
+        assert_eq!(terminal.encode_paste(b"ab", true), b"\x1b[200~ab\x1b[201~");
+        assert_eq!(terminal.encode_paste(b"ab", false), b"ab");
     }
 
     #[test]
     fn pastes_more_than_the_encoder_buffer_at_first_holds() {
         let terminal = Terminal::new(10, 2).unwrap();
         let text = vec![b'a'; 1000];
-        assert_eq!(terminal.encode_paste(&text), text);
+        assert_eq!(terminal.encode_paste(&text, true), text);
     }
 
     #[test]

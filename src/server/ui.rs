@@ -138,6 +138,8 @@ pub struct ListRow {
     pub text: String,
     /// What choosing this row does. Rows without one are only there to read.
     pub command: Option<Command>,
+    /// What `d` does on this row.
+    delete: Option<Command>,
 }
 
 impl ListRow {
@@ -145,6 +147,7 @@ impl ListRow {
         Self {
             text,
             command: Some(command),
+            delete: None,
         }
     }
 
@@ -152,6 +155,14 @@ impl ListRow {
         Self {
             text,
             command: None,
+            delete: None,
+        }
+    }
+
+    pub fn with_delete(self, command: Command) -> Self {
+        Self {
+            delete: Some(command),
+            ..self
         }
     }
 }
@@ -170,6 +181,8 @@ pub enum ListOutcome {
     Stay,
     Close,
     Run(Command),
+    /// Run this, and show the list again on this row.
+    Delete(Command, usize),
 }
 
 impl List {
@@ -232,6 +245,12 @@ impl List {
             (key::PAGE_DOWN, _) => self.move_by(page),
             (key::HOME, _) | (_, Some('g')) => self.selected = 0,
             (key::END, _) | (_, Some('G')) => self.move_by(isize::MAX),
+            (_, Some('d')) => {
+                let row = self.rows.get(self.selected);
+                if let Some(command) = row.and_then(|row| row.delete.clone()) {
+                    return ListOutcome::Delete(command, self.selected);
+                }
+            }
             (_, Some(digit @ '0'..='9')) => {
                 let index = digit.to_digit(10).and_then(|digit| digit.try_into().ok());
                 let row = index.and_then(|index: usize| self.rows.get(index));

@@ -1,6 +1,7 @@
 //! The server: owns the session and runs it in a single-threaded event loop,
 //! independently of any client, so that panes outlive detaching.
 
+mod buffers;
 mod copy_mode;
 mod dispatch;
 mod format;
@@ -27,6 +28,7 @@ use crate::ghostty::Notification;
 use crate::input::Parser;
 use crate::proto::{self, ClientMessage, ServerMessage};
 use crate::sys::{self, SIGCHLD, SIGHUP, SIGINT, SIGTERM, Selector, WinSize};
+use buffers::Buffers;
 use dispatch::{Click, Drag};
 use layout::PaneId;
 use pane::Activity;
@@ -137,8 +139,7 @@ pub struct Server {
     swallowed: Vec<c_int>,
     drag: Drag,
     last_click: Option<Click>,
-    /// The text copied last.
-    buffer: Option<String>,
+    buffers: Buffers,
     /// Something changed that may need a new frame.
     dirty: bool,
     last_frame: Instant,
@@ -210,16 +211,16 @@ fn bind(path: &Path) -> io::Result<Option<UnixListener>> {
 /// Runs a server on the given socket until the session ends, taking over from
 /// the server that left `state` if there is one.
 pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
-    let (listener, session, buffer, lifecycle) = if let Some(state) = state {
+    let (listener, session, buffers, lifecycle) = if let Some(state) = state {
         let restored = restart::read_state(state, socket)?;
-        let (listener, session, buffer) = (restored.listener, restored.session, restored.buffer);
-        (listener, session, buffer, Lifecycle::Running)
+        let (listener, session, buffers) = (restored.listener, restored.session, restored.buffers);
+        (listener, session, buffers, Lifecycle::Running)
     } else {
         let Some(listener) = bind(socket)? else {
             return Ok(());
         };
         let session = Session::new(socket.display().to_string());
-        (listener, session, None, Lifecycle::Starting)
+        (listener, session, Buffers::default(), Lifecycle::Starting)
     };
     listener.set_nonblocking(true)?;
     let signals = sys::watch_signals(&[SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
@@ -239,7 +240,7 @@ pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
         swallowed: Vec::new(),
         drag: Drag::None,
         last_click: None,
-        buffer,
+        buffers,
         dirty: false,
         last_frame: now,
         last_tick: now,
@@ -551,13 +552,6 @@ impl Server {
         osc.extend_from_slice(base64::encode(text).as_bytes());
         osc.extend_from_slice(b"\x1b\\");
         self.send_output(&osc);
-    }
-
-    fn store_buffer(&mut self, text: String) {
-        if !text.is_empty() {
-            self.send_clipboard(text.as_bytes());
-            self.buffer = Some(text);
-        }
     }
 
     fn handle_timers(&mut self) {

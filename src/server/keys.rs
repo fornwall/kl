@@ -34,6 +34,7 @@ const fn repeat(key: &'static str, command: &'static str, note: &'static str) ->
 /// tmux's default key table, or the part of it that exists here, in its order.
 pub const PREFIX_TABLE: &[Binding] = &[
     bind("\"", "split-window", "Split window vertically"),
+    bind("#", "list-buffers", "List all paste buffers"),
     bind("%", "split-window -h", "Split window horizontally"),
     bind(
         "&",
@@ -45,6 +46,7 @@ pub const PREFIX_TABLE: &[Binding] = &[
         "command-prompt -I \"#W\" \"rename-window \\\"%%\\\"\"",
         "Rename current window",
     ),
+    bind("-", "delete-buffer", "Delete the most recent paste buffer"),
     bind("0", "select-window -t 0", "Select window 0"),
     bind("1", "select-window -t 1", "Select window 1"),
     bind("2", "select-window -t 2", "Select window 2"),
@@ -57,9 +59,10 @@ pub const PREFIX_TABLE: &[Binding] = &[
     bind("9", "select-window -t 9", "Select window 9"),
     bind(":", "command-prompt", "Prompt for a command"),
     bind(";", "last-pane", "Move to the previously active pane"),
+    bind("=", "choose-buffer -Z", "Choose a paste buffer from a list"),
     bind("?", "list-keys -N", "List key bindings"),
     bind("[", "copy-mode", "Enter copy mode"),
-    bind("]", "paste-buffer", "Paste the most recent paste buffer"),
+    bind("]", "paste-buffer -p", "Paste the most recent paste buffer"),
     bind("c", "new-window", "Create a new window"),
     bind("d", "detach-client", "Detach the current client"),
     bind("l", "last-window", "Select the previously current window"),

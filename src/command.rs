@@ -23,8 +23,56 @@ pub enum SplitKind {
     Vertical,
 }
 
+/// How `paste-buffer` goes about it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PasteOptions {
+    /// The buffer to paste, if not the top one.
+    pub name: Option<String>,
+    /// Delete the buffer afterwards.
+    pub delete: bool,
+    /// Tell programs that ask for it that this is a paste.
+    pub bracket: bool,
+    /// Leave line breaks alone.
+    pub raw: bool,
+    /// What goes in place of line breaks.
+    pub separator: Option<String>,
+}
+
+/// What `set-buffer` was asked to do.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetBuffer {
+    pub name: Option<String>,
+    pub new_name: Option<String>,
+    pub append: bool,
+    /// Put the text on the clipboard too.
+    pub clipboard: bool,
+    pub data: Option<String>,
+}
+
+/// The commands that work on paste buffers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BufferCommand {
+    Choose,
+    Delete(Option<String>),
+    List,
+    Load {
+        name: Option<String>,
+        path: PathBuf,
+        clipboard: bool,
+    },
+    Paste(PasteOptions),
+    Save {
+        name: Option<String>,
+        path: PathBuf,
+        append: bool,
+    },
+    Set(SetBuffer),
+    Show(Option<String>),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    Buffer(BufferCommand),
     /// Lets the user pick a window from a list.
     ChooseTree,
     /// Asks for a line, and runs it or fills it in to a template at `%%`.
@@ -61,7 +109,6 @@ pub enum Command {
     },
     NextPane,
     NextWindow,
-    PasteBuffer,
     PreviousWindow,
     RenameWindow(String),
     ResizePane {
@@ -89,33 +136,40 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         return Err("no command".to_owned());
     };
     match name.as_str() {
+        "choose-buffer" => parse_choose_buffer(args),
         "choose-tree" => parse_choose_tree(args),
         "command-prompt" => parse_command_prompt(args),
         "confirm-before" | "confirm" => parse_confirm_before(args),
         "copy-mode" => parse_copy_mode(args),
         "detach-client" | "detach" => no_args(name, args, Command::DetachClient),
         "display-message" | "display" => Ok(Command::DisplayMessage(args.join(" "))),
+        "delete-buffer" | "deleteb" => parse_buffer_name(args, BufferCommand::Delete),
         "display-panes" | "displayp" => parse_display_panes(args),
         "kill-pane" | "killp" => no_args(name, args, Command::KillPane),
         "kill-server" => no_args(name, args, Command::KillServer),
         "kill-window" | "killw" => no_args(name, args, Command::KillWindow),
         "last-pane" | "lastp" => no_args(name, args, Command::LastPane),
         "last-window" | "last" => no_args(name, args, Command::LastWindow),
+        "list-buffers" | "lsb" => no_args(name, args, Command::Buffer(BufferCommand::List)),
         "list-keys" | "lsk" => parse_list_keys(args),
         "list-panes" | "lsp" => no_args(name, args, Command::ListPanes),
         "list-windows" | "lsw" => no_args(name, args, Command::ListWindows),
+        "load-buffer" | "loadb" => parse_load_buffer(args),
         "new-window" | "neww" => parse_new_window(args),
         "next-window" | "next" => no_args(name, args, Command::NextWindow),
-        "paste-buffer" | "pasteb" => no_args(name, args, Command::PasteBuffer),
+        "paste-buffer" | "pasteb" => parse_paste_buffer(args),
         "previous-window" | "prev" => no_args(name, args, Command::PreviousWindow),
         "rename-window" | "renamew" => parse_rename_window(args),
         "resize-pane" | "resizep" => parse_resize_pane(args),
         "restart-server" => parse_restart_server(args),
+        "save-buffer" | "saveb" => parse_save_buffer(args),
         "select-pane" | "selectp" => parse_select_pane(args),
         "select-window" | "selectw" => parse_select_window(args),
         "send-keys" | "send" => Ok(Command::SendKeys(args.to_vec())),
         "send-prefix" => no_args(name, args, Command::SendPrefix),
+        "set-buffer" | "setb" => parse_set_buffer(args),
         "set-option" | "set" | "set-window-option" | "setw" => parse_set_option(args),
+        "show-buffer" | "showb" => parse_buffer_name(args, BufferCommand::Show),
         "split-window" | "splitw" => Ok(parse_split_window(args)),
         other => Err(format!("unknown command: {other}")),
     }
@@ -222,6 +276,78 @@ fn parse_confirm_before(args: &[String]) -> Result<Command, String> {
 
 /// With a single session, `-s` and `-w` end up with the same list, and it
 /// always covers the window as with `-Z`.
+fn parse_choose_buffer(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "NrZ")?;
+    if !flags.rest.is_empty() {
+        return Err("usage: choose-buffer [-NrZ]".to_owned());
+    }
+    Ok(Command::Buffer(BufferCommand::Choose))
+}
+
+/// Commands that take the name of a buffer, and nothing else.
+fn parse_buffer_name(
+    args: &[String],
+    command: fn(Option<String>) -> BufferCommand,
+) -> Result<Command, String> {
+    let flags = Flags::parse(args, "b:")?;
+    if !flags.rest.is_empty() {
+        return Err("usage: [-b buffer-name]".to_owned());
+    }
+    Ok(Command::Buffer(command(flags.value('b'))))
+}
+
+fn parse_load_buffer(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "b:w")?;
+    let [path] = flags.rest else {
+        return Err("usage: load-buffer [-w] [-b buffer-name] path".to_owned());
+    };
+    Ok(Command::Buffer(BufferCommand::Load {
+        name: flags.value('b'),
+        path: PathBuf::from(path),
+        clipboard: flags.has('w'),
+    }))
+}
+
+fn parse_paste_buffer(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "b:dprs:")?;
+    if !flags.rest.is_empty() {
+        return Err("usage: paste-buffer [-dpr] [-s separator] [-b buffer-name]".to_owned());
+    }
+    Ok(Command::Buffer(BufferCommand::Paste(PasteOptions {
+        name: flags.value('b'),
+        delete: flags.has('d'),
+        bracket: flags.has('p'),
+        raw: flags.has('r'),
+        separator: flags.value('s'),
+    })))
+}
+
+fn parse_save_buffer(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "ab:")?;
+    let [path] = flags.rest else {
+        return Err("usage: save-buffer [-a] [-b buffer-name] path".to_owned());
+    };
+    Ok(Command::Buffer(BufferCommand::Save {
+        name: flags.value('b'),
+        path: PathBuf::from(path),
+        append: flags.has('a'),
+    }))
+}
+
+fn parse_set_buffer(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse(args, "ab:n:w")?;
+    if flags.rest.len() > 1 {
+        return Err("usage: set-buffer [-aw] [-b buffer-name] [-n new-name] [data]".to_owned());
+    }
+    Ok(Command::Buffer(BufferCommand::Set(SetBuffer {
+        name: flags.value('b'),
+        new_name: flags.value('n'),
+        append: flags.has('a'),
+        clipboard: flags.has('w'),
+        data: flags.rest.first().cloned(),
+    })))
+}
+
 fn parse_choose_tree(args: &[String]) -> Result<Command, String> {
     let flags = Flags::parse(args, "swZ")?;
     if !flags.rest.is_empty() {
