@@ -3853,6 +3853,316 @@ fn the_mark_starts_out_where_copy_mode_did() {
     assert_eq!(background_of(&mut screen, "98"), None);
 }
 
+/// Runs commands of copy mode, one each.
+fn send_x(screen: &Screen, commands: &[&[&str]]) {
+    for command in commands {
+        let args = [&["send-keys", "-X"], *command].concat();
+        assert_eq!(output_of(screen, &args), "", "{command:?}");
+    }
+}
+
+/// Where copy mode has its cursor, and how far up it is.
+fn copy_cursor(screen: &Screen) -> String {
+    let format = "#{copy_cursor_x},#{copy_cursor_y} #{scroll_position}";
+    output_of(screen, &["display", "-p", format])
+}
+
+fn in_mode(screen: &Screen) -> String {
+    output_of(screen, &["display", "-p", "#{pane_in_mode}"])
+}
+
+/// Copy mode at the bottom of the numbers from 1 to 100.
+fn numbers_in_copy_mode() -> Screen {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; seq 1 100");
+    screen.wait_for_line("100");
+    assert_eq!(output_of(&screen, &["copy-mode"]), "");
+    screen.wait_for_text("[0/");
+    screen
+}
+
+#[test]
+fn scripts_run_the_commands_of_copy_mode() {
+    // Where each of these leaves the cursor comes from running tmux.
+    let screen = numbers_in_copy_mode();
+    send_x(&screen, &[&["history-top"], &["cursor-down"]]);
+    assert_eq!(copy_cursor(&screen), "0,1 78\n");
+    send_x(&screen, &[&["-N", "3", "cursor-down"], &["cursor-right"]]);
+    assert_eq!(copy_cursor(&screen), "0,5 78\n");
+    send_x(&screen, &[&["goto-line", "10"], &["top-line"]]);
+    assert_eq!(copy_cursor(&screen), "0,0 10\n");
+    send_x(
+        &screen,
+        &[&["set-mark"], &["history-bottom"], &["jump-to-mark"]],
+    );
+    assert_eq!(copy_cursor(&screen), "0,0 10\n");
+
+    send_x(&screen, &[&["search-backward", "51"]]);
+    assert_eq!(copy_cursor(&screen), "0,18 46\n");
+    send_x(&screen, &[&["search-forward-text", "68"]]);
+    assert_eq!(copy_cursor(&screen), "0,18 29\n");
+    send_x(&screen, &[&["jump-forward", "8"]]);
+    assert_eq!(copy_cursor(&screen), "1,18 29\n");
+
+    send_x(&screen, &[&["cancel"]]);
+    assert_eq!(in_mode(&screen), "0\n");
+}
+
+#[test]
+fn commands_of_copy_mode_need_copy_mode() {
+    let screen = Screen::new(80, 24);
+    assert_eq!(
+        error_of(&screen, &["send-keys", "-X", "cursor-up"]),
+        "kl: not in a mode\n"
+    );
+    assert_eq!(
+        error_of(&screen, &["send-keys", "-X", "no-such-command"]),
+        "kl: not in a mode\n"
+    );
+}
+
+#[test]
+fn what_is_no_command_of_copy_mode_does_nothing() {
+    let screen = numbers_in_copy_mode();
+    let before = copy_cursor(&screen);
+    send_x(
+        &screen,
+        &[&["no-such-command"], &["cursor-up", "extra"], &[]],
+    );
+    assert_eq!(copy_cursor(&screen), before);
+    assert_eq!(
+        error_of(&screen, &["send-keys", "-X", "-N", "0", "cursor-up"]),
+        "kl: repeat count too small\n"
+    );
+    assert_eq!(
+        error_of(&screen, &["send-keys", "-X", "copy-pipe", "xclip"]),
+        "kl: copy-pipe: piping is not supported\n"
+    );
+    assert_eq!(in_mode(&screen), "1\n");
+}
+
+#[test]
+fn scripts_copy_and_stay_or_leave() {
+    let screen = numbers_in_copy_mode();
+    let first_line: &[&[&str]] = &[&["history-top"], &["begin-selection"], &["end-of-line"]];
+    send_x(&screen, first_line);
+    send_x(&screen, &[&["copy-selection-no-clear", "kept"]]);
+    assert_eq!(in_mode(&screen), "1\n");
+    send_x(&screen, &[&["cursor-down"], &["copy-selection", "cleared"]]);
+    assert_eq!(in_mode(&screen), "1\n");
+    let format = "#{buffer_name}=#{buffer_sample}";
+    let names = output_of(&screen, &["list-buffers", "-F", format]);
+    assert_eq!(names, "cleared1=1\\n2\nkept0=1\n");
+
+    // With the selection gone, leaving has nothing to add.
+    send_x(&screen, &[&["cursor-down"], &["copy-selection-and-cancel"]]);
+    assert_eq!(in_mode(&screen), "0\n");
+    assert_eq!(output_of(&screen, &["list-buffers", "-F", format]), names);
+}
+
+#[test]
+fn copying_a_line_leaves_the_cursor_alone() {
+    let screen = numbers_in_copy_mode();
+    send_x(
+        &screen,
+        &[&["goto-line", "50"], &["top-line"], &["cursor-right"]],
+    );
+    assert_eq!(copy_cursor(&screen), "1,0 50\n");
+    send_x(&screen, &[&["copy-end-of-line"]]);
+    assert_eq!(output_of(&screen, &["show-buffer"]), "9");
+    assert_eq!(copy_cursor(&screen), "1,0 50\n");
+    send_x(&screen, &[&["copy-line"]]);
+    assert_eq!(output_of(&screen, &["show-buffer"]), "29");
+    assert_eq!(copy_cursor(&screen), "1,0 50\n");
+
+    send_x(&screen, &[&["-N", "2", "copy-line-and-cancel"]]);
+    assert_eq!(output_of(&screen, &["show-buffer"]), "29\n30");
+    assert_eq!(in_mode(&screen), "0\n");
+}
+
+#[test]
+fn a_copy_can_stay_out_of_the_buffers_or_off_the_clipboard() {
+    let mut screen = numbers_in_copy_mode();
+    let line: &[&[&str]] = &[&["history-top"], &["begin-selection"], &["end-of-line"]];
+    send_x(&screen, line);
+    send_x(&screen, &[&["copy-selection", "-P"]]);
+    assert_eq!(screen.wait_for_clipboard(), [b"1".to_vec()]);
+    assert_eq!(output_of(&screen, &["list-buffers"]), "");
+
+    send_x(&screen, line);
+    send_x(&screen, &[&["copy-selection", "-C"]]);
+    assert_eq!(output_of(&screen, &["show-buffer"]), "1");
+
+    // The next write to the clipboard shows that this was the first since then.
+    send_x(&screen, &[&["cursor-down"], &["copy-line"]]);
+    assert_eq!(screen.wait_for_clipboard(), [b"2".to_vec()]);
+}
+
+#[test]
+fn appending_stays_unless_told_to_leave() {
+    let screen = numbers_in_copy_mode();
+    let line: &[&[&str]] = &[&["begin-selection"], &["end-of-line"]];
+    send_x(&screen, &[&["history-top"]]);
+    send_x(&screen, line);
+    send_x(&screen, &[&["copy-selection"], &["cursor-down"]]);
+    send_x(&screen, line);
+    send_x(&screen, &[&["append-selection"]]);
+    assert_eq!(in_mode(&screen), "1\n");
+    assert_eq!(output_of(&screen, &["show-buffer"]), "12");
+    send_x(
+        &screen,
+        &[&["begin-selection"], &["append-selection-and-cancel"]],
+    );
+    assert_eq!(in_mode(&screen), "0\n");
+}
+
+#[test]
+fn a_stopped_selection_stays_where_it_is() {
+    let screen = numbers_in_copy_mode();
+    send_x(
+        &screen,
+        &[&["history-top"], &["begin-selection"], &["end-of-line"]],
+    );
+    send_x(&screen, &[&["stop-selection"], &["-N", "2", "cursor-down"]]);
+    send_x(&screen, &[&["copy-selection-and-cancel"]]);
+    assert_eq!(output_of(&screen, &["show-buffer"]), "1");
+}
+
+#[test]
+fn rectangles_go_on_and_off_by_name() {
+    let screen = numbers_in_copy_mode();
+    send_x(
+        &screen,
+        &[
+            &["goto-line", "78"],
+            &["top-line"],
+            &["-N", "9", "cursor-down"],
+        ],
+    );
+    send_x(
+        &screen,
+        &[&["begin-selection"], &["rectangle-on"], &["rectangle-on"]],
+    );
+    send_x(&screen, &[&["-N", "2", "cursor-down"], &["cursor-right"]]);
+    send_x(&screen, &[&["copy-selection"], &["rectangle-off"]]);
+    assert_eq!(output_of(&screen, &["show-buffer"]), "10\n11\n12");
+}
+
+#[test]
+fn commands_with_and_cancel_leave_at_the_bottom() {
+    let screen = numbers_in_copy_mode();
+    send_x(&screen, &[&["page-up"], &["scroll-down-and-cancel"]]);
+    assert_eq!(in_mode(&screen), "1\n");
+    send_x(&screen, &[&["history-bottom"], &["scroll-down-and-cancel"]]);
+    assert_eq!(in_mode(&screen), "0\n");
+
+    output_of(&screen, &["copy-mode"]);
+    send_x(&screen, &[&["page-down-and-cancel"]]);
+    assert_eq!(in_mode(&screen), "0\n");
+
+    output_of(&screen, &["copy-mode"]);
+    send_x(&screen, &[&["halfpage-down-and-cancel"]]);
+    assert_eq!(in_mode(&screen), "0\n");
+
+    output_of(&screen, &["copy-mode"]);
+    send_x(&screen, &[&["cursor-up"], &["cursor-down-and-cancel"]]);
+    assert_eq!(in_mode(&screen), "1\n");
+    send_x(&screen, &[&["cursor-down-and-cancel"]]);
+    assert_eq!(in_mode(&screen), "0\n");
+}
+
+#[test]
+fn scrolls_the_line_of_the_cursor_to_the_top_or_the_bottom() {
+    let screen = numbers_in_copy_mode();
+    send_x(&screen, &[&["goto-line", "20"], &["middle-line"]]);
+    assert_eq!(copy_cursor(&screen), "0,11 20\n");
+    send_x(&screen, &[&["scroll-top"]]);
+    assert_eq!(copy_cursor(&screen), "0,0 9\n");
+    send_x(&screen, &[&["scroll-bottom"]]);
+    assert_eq!(copy_cursor(&screen), "0,22 31\n");
+}
+
+#[test]
+fn a_command_of_copy_mode_goes_to_the_pane_asked_for() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; seq 1 40");
+    screen.wait_for_line("40");
+    let copying = screen.command(&["display", "-p", "#{pane_id}"]);
+    let pane = String::from_utf8(copying.stdout).unwrap();
+    let pane = pane.trim();
+    assert_eq!(output_of(&screen, &["copy-mode"]), "");
+    screen.prefix("%");
+    screen.wait_for_text("[0/");
+    let args = ["send-keys", "-X", "-t", pane, "history-top"];
+    assert_eq!(output_of(&screen, &args), "");
+    screen.wait_for_text("[18/");
+    assert_eq!(
+        error_of(&screen, &["send-keys", "-X", "history-top"]),
+        "kl: not in a mode\n"
+    );
+}
+
+#[test]
+fn keys_can_be_sent_more_than_once() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("cat");
+    let args = ["send-keys", "-N", "3", "ab"];
+    assert_eq!(output_of(&screen, &args), "");
+    screen.wait_for_text("ababab");
+}
+
+/// A prompt that says where it ends and where the output starts, as shells do
+/// with OSC 133, for three commands.
+const COMMANDS_WITH_OUTPUT: &str = "for i in 1 2 3; do \
+     printf '\\033]133;A\\007p> \\033]133;B\\007cmd %s\\n\\033]133;C\\007out %s\\n' $i $i; \
+     seq 1 30; done; echo fin''ished";
+
+#[test]
+fn goes_to_the_output_of_a_command_rather_than_its_prompt() {
+    let mut screen = Screen::new(80, 24);
+    screen.run(COMMANDS_WITH_OUTPUT);
+    screen.wait_for_line("finished");
+    assert_eq!(output_of(&screen, &["copy-mode"]), "");
+    screen.wait_for_text("[0/");
+
+    send_x(&screen, &[&["previous-prompt", "-o"]]);
+    screen.wait_for("the last output", |lines| lines[0].starts_with("out 3"));
+    send_x(&screen, &[&["previous-prompt", "-o"]]);
+    screen.wait_for("the output before it", |lines| {
+        lines[0].starts_with("out 2")
+    });
+    send_x(&screen, &[&["-N", "2", "previous-prompt"]]);
+    screen.wait_for("a prompt", |lines| lines[0].starts_with("p> cmd 1"));
+    send_x(&screen, &[&["next-prompt", "-o"]]);
+    screen.wait_for("the output after it", |lines| lines[0].starts_with("out 1"));
+    send_x(&screen, &[&["next-prompt", "-o"]]);
+    screen.wait_for("the next one", |lines| lines[0].starts_with("out 2"));
+}
+
+#[test]
+fn nothing_counts_as_output_without_a_shell_saying_so() {
+    let screen = numbers_in_copy_mode();
+    let before = copy_cursor(&screen);
+    send_x(
+        &screen,
+        &[&["previous-prompt", "-o"], &["next-prompt", "-o"]],
+    );
+    assert_eq!(copy_cursor(&screen), before);
+}
+
+#[test]
+fn what_is_below_the_last_prompt_is_not_output() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf '\\033]133;A\\007p> \\033]133;B\\007'");
+    screen.wait_for_text("p> ");
+    assert_eq!(output_of(&screen, &["copy-mode"]), "");
+    screen.wait_for_text("[0/");
+    send_x(&screen, &[&["history-top"]]);
+    let before = copy_cursor(&screen);
+    send_x(&screen, &[&["next-prompt", "-o"]]);
+    assert_eq!(copy_cursor(&screen), before);
+}
+
 #[test]
 fn copy_mode_goes_to_a_line() {
     let mut screen = Screen::new(80, 24);

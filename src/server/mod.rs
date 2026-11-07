@@ -3,6 +3,7 @@
 
 mod buffers;
 mod client;
+mod copy_commands;
 mod copy_mode;
 mod dispatch;
 mod format;

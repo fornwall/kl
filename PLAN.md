@@ -124,8 +124,14 @@ What is missing for daily use compared with tmux.
 
 What is left of tmux's `copy-mode-vi` table, and the differences that remain:
 
-- `send-keys -X`, for scripts to run the commands of copy mode.
-- `-o` for going to the output of a command rather than its prompt.
+- A few commands of `send-keys -X`: `select-word`, `selection-mode`,
+  `previous-matching-bracket`, `cursor-centre-horizontal`,
+  `cursor-centre-vertical`, `recentre-top-bottom`, `toggle-position` (also on
+  `P`), line numbers, `scroll-exit-*`, `scroll-to-mouse` and the incremental
+  searches. They do nothing here, as anything else that is no command does.
+- Piping what is copied to a program: `copy-pipe` with a command and `pipe`, which
+  say that they are not supported. That needs a way to run programs that does not
+  hold up the server.
 - Copy mode shows the live screen where tmux shows a copy of it. At the bottom of
   the history, new output moves the text under the cursor.
 - Searching ignores case and takes the text literally, see

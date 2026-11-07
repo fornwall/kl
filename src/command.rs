@@ -68,6 +68,35 @@ pub struct ListBuffers {
     pub reverse: bool,
 }
 
+/// A command of copy mode as `send-keys -X` has it, for the server to find out
+/// what it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CopyModeCommand {
+    pub name: String,
+    pub args: Vec<String>,
+    /// `-o`, for the output of a command rather than its prompt.
+    pub output: bool,
+    /// `-P`, to leave the paste buffers alone.
+    pub no_buffer: bool,
+    /// `-C`, to leave the clipboard alone.
+    pub no_clipboard: bool,
+}
+
+impl CopyModeCommand {
+    /// Nothing, for words that a command of copy mode cannot be made of.
+    fn parse(words: &[String]) -> Option<Self> {
+        let (name, args) = words.split_first()?;
+        let flags = Flags::parse("send-keys", args, "CPo").ok()?;
+        Some(Self {
+            name: name.clone(),
+            args: flags.rest.to_vec(),
+            output: flags.has('o'),
+            no_buffer: flags.has('P'),
+            no_clipboard: flags.has('C'),
+        })
+    }
+}
+
 /// The commands that work on paste buffers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BufferCommand {
@@ -343,10 +372,19 @@ pub enum Command {
     SelectWindow {
         target: Target,
     },
+    /// Runs a command of copy mode, if there is one. Being in copy mode is what
+    /// counts either way.
+    SendToCopyMode {
+        target: Target,
+        repeat: u32,
+        command: Option<CopyModeCommand>,
+    },
     SendKeys {
         target: Target,
         /// As they are, rather than looking for names of keys in them.
         literal: bool,
+        /// How many times to send them.
+        repeat: usize,
         keys: Vec<String>,
     },
     SendPrefix {
@@ -1021,11 +1059,30 @@ fn parse_select_window(args: &[String]) -> Result<Command, String> {
     })
 }
 
+/// The value of `-N`, with tmux's words for what is wrong with it.
+fn parse_repeat(text: &str) -> Result<u32, String> {
+    if text.starts_with('-') || text == "0" {
+        return Err("repeat count too small".to_owned());
+    }
+    let repeat = text.parse().ok();
+    repeat.ok_or_else(|| "repeat count invalid".to_owned())
+}
+
 fn parse_send_keys(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse("send-keys", args, "lt:")?;
+    let flags = Flags::parse("send-keys", args, "lN:t:X")?;
+    let target = flags.value('t');
+    let repeat = flags.value('N').as_deref().map_or(Ok(1), parse_repeat)?;
+    if flags.has('X') {
+        return Ok(Command::SendToCopyMode {
+            target,
+            repeat,
+            command: CopyModeCommand::parse(flags.rest),
+        });
+    }
     Ok(Command::SendKeys {
-        target: flags.value('t'),
+        target,
         literal: flags.has('l'),
+        repeat: usize::try_from(repeat).unwrap_or(usize::MAX),
         keys: flags.rest.to_vec(),
     })
 }
@@ -1535,6 +1592,67 @@ mod tests {
         assert_eq!(
             parse(&words("list-buffers -O time")).unwrap_err(),
             "invalid sort order"
+        );
+    }
+
+    #[test]
+    fn parses_sending_keys() {
+        assert_eq!(
+            command("send-keys -l -N 2 -t 1 a b"),
+            Command::SendKeys {
+                target: Some("1".to_owned()),
+                literal: true,
+                repeat: 2,
+                keys: words("a b"),
+            }
+        );
+        assert_eq!(
+            command("send -X -N 3 -t 1 next-prompt -o"),
+            Command::SendToCopyMode {
+                target: Some("1".to_owned()),
+                repeat: 3,
+                command: Some(CopyModeCommand {
+                    name: "next-prompt".to_owned(),
+                    output: true,
+                    ..CopyModeCommand::default()
+                }),
+            }
+        );
+        assert_eq!(
+            command("send -X copy-selection -CP -- clip"),
+            Command::SendToCopyMode {
+                target: None,
+                repeat: 1,
+                command: Some(CopyModeCommand {
+                    name: "copy-selection".to_owned(),
+                    args: words("clip"),
+                    no_buffer: true,
+                    no_clipboard: true,
+                    ..CopyModeCommand::default()
+                }),
+            }
+        );
+        for line in ["send -X", "send -X cursor-up -z"] {
+            assert_eq!(
+                command(line),
+                Command::SendToCopyMode {
+                    target: None,
+                    repeat: 1,
+                    command: None,
+                }
+            );
+        }
+        assert_eq!(
+            parse(&words("send -N 0 a")).unwrap_err(),
+            "repeat count too small"
+        );
+        assert_eq!(
+            parse(&words("send -N -2 a")).unwrap_err(),
+            "repeat count too small"
+        );
+        assert_eq!(
+            parse(&words("send -N x a")).unwrap_err(),
+            "repeat count invalid"
         );
     }
 

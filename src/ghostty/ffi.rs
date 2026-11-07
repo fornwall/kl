@@ -122,6 +122,7 @@ pub const CELL_DATA_CODEPOINT: c_int = 1;
 pub const CELL_DATA_CONTENT_TAG: c_int = 2;
 pub const CELL_DATA_WIDE: c_int = 3;
 pub const CELL_DATA_HAS_HYPERLINK: c_int = 7;
+pub const CELL_DATA_SEMANTIC_CONTENT: c_int = 9;
 pub const CELL_DATA_COLOR_PALETTE: c_int = 10;
 pub const CELL_DATA_COLOR_RGB: c_int = 11;
 
@@ -131,6 +132,8 @@ pub const SCREEN_ROW_DATA_SEMANTIC_PROMPT: c_int = 6;
 pub const SCREEN_ROW_DATA_KITTY_VIRTUAL_PLACEHOLDER: c_int = 7;
 
 pub const ROW_SEMANTIC_PROMPT: c_int = 1;
+
+pub const CELL_SEMANTIC_OUTPUT: c_int = 0;
 
 pub const CELL_CONTENT_BG_PALETTE: c_int = 2;
 pub const CELL_CONTENT_BG_RGB: c_int = 3;

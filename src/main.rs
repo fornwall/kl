@@ -65,7 +65,9 @@ Panes:
 
 Other:
   list-keys (lsk) [-N]                        list the keys after the prefix
-  send-keys (send) [-l] [-t pane] key...      type into a pane
+  send-keys (send) [-l] [-N count] [-t pane] key...  type into a pane
+  send-keys (send) -X [-N count] [-t pane] command [args]  run a command of copy
+                                              mode, by tmux's names
   send-prefix [-t pane]                       type the prefix key into a pane
   command-prompt [-I text] [-p prompt] [template]  ask for a command to run
   confirm-before [-p prompt] command          run a command after asking

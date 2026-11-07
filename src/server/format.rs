@@ -415,6 +415,8 @@ impl<'a> Context<'a> {
         let rect = pane.rect;
         let window = self.window?;
         Some(match name {
+            "copy_cursor_x" => pane.copy_mode?.x.to_string(),
+            "copy_cursor_y" => pane.copy_mode?.y.to_string(),
             "cursor_x" => pane.terminal.cursor()?.position?.0.to_string(),
             "cursor_y" => pane.terminal.cursor()?.position?.1.to_string(),
             "history_size" => pane.terminal.scrollbar()?.history().to_string(),
@@ -446,6 +448,10 @@ impl<'a> Context<'a> {
             "pane_title" => pane.terminal.title(),
             "pane_top" => rect.y.to_string(),
             "pane_width" => rect.width.to_string(),
+            "scroll_position" => {
+                pane.copy_mode?;
+                pane.terminal.scrollbar()?.lines_below().to_string()
+            }
             _ => return None,
         })
     }

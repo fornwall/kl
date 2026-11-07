@@ -4,9 +4,7 @@ use std::ffi::{CString, c_int};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use super::copy_mode::{
-    self, Action, Binding as CopyBinding, CopyMode, CopyPrompt, Outcome, Scroll,
-};
+use super::copy_mode::{self, Action, Binding as CopyBinding, CopyMode, CopyPrompt, Scroll};
 use super::format::Context;
 use super::keys;
 use super::layout::{Divider, Layout, PaneId, Rect};
@@ -572,23 +570,8 @@ impl Server {
     }
 
     fn copy_mode_action(&mut self, action: Action) {
-        let Some(pane) = self.session.active_pane_mut() else {
-            return;
-        };
-        if pane.copy_mode.is_none() {
-            return;
-        }
-        let outcome = copy_mode::run(pane, action);
-        let copied = matches!(outcome, Outcome::Copy | Outcome::Append)
-            .then(|| copy_mode::selected_text(pane))
-            .flatten();
-        if outcome != Outcome::Stay {
-            CopyMode::exit(pane);
-        }
-        match copied {
-            Some(text) if outcome == Outcome::Append => self.append_buffer(&text),
-            Some(text) => self.store_buffer(text),
-            None => {}
+        if let Some(id) = self.session.active_id() {
+            self.copy_mode_action_in(id, action);
         }
     }
 
@@ -760,9 +743,18 @@ impl Server {
                 let index = self.session.find_window(target.as_deref())?;
                 self.session.select_window(index);
             }
+            Command::SendToCopyMode {
+                target,
+                repeat,
+                command,
+            } => {
+                let id = self.session.find_pane(target.as_deref())?;
+                self.run_copy_command(id, repeat, command.as_ref())?;
+            }
             Command::SendKeys {
                 target,
                 literal,
+                repeat,
                 keys,
             } => {
                 let id = self.session.find_pane(target.as_deref())?;
@@ -777,7 +769,7 @@ impl Server {
                     })
                     .collect();
                 if let Some(pane) = self.session.panes.get_mut(&id) {
-                    pane.send(&bytes);
+                    pane.send(&bytes.repeat(repeat));
                 }
             }
             Command::SendPrefix { target } => {

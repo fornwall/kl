@@ -104,6 +104,11 @@ impl Buffers {
     /// Adds a buffer with a name of its own, dropping the oldest of these if
     /// there are too many.
     pub fn add(&mut self, text: String) {
+        self.add_with_prefix("buffer", text);
+    }
+
+    /// Adds a buffer with a name of its own that starts like this.
+    pub fn add_with_prefix(&mut self, prefix: &str, text: String) {
         if text.is_empty() {
             return;
         }
@@ -114,7 +119,7 @@ impl Buffers {
             self.list.remove(oldest);
         }
         let name = loop {
-            let name = format!("buffer{}", self.next_index);
+            let name = format!("{prefix}{}", self.next_index);
             self.next_index = self.next_index.wrapping_add(1);
             if self.named(&name).is_none() {
                 break name;

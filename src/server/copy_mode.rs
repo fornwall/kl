@@ -35,6 +35,8 @@ enum Selecting {
     No,
     Cells,
     Lines(LineSelection),
+    /// There is a selection, which stays where it is.
+    Stopped,
 }
 
 /// A selection of whole lines, which stay selected whichever way it goes.
@@ -91,6 +93,26 @@ pub enum Outcome {
     Append,
 }
 
+/// What a command copies, if not simply the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Selection,
+    /// From the cursor to the end of its line.
+    EndOfLine,
+    /// All of the line of the cursor.
+    Line,
+}
+
+/// What comes after copying.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum After {
+    Leave,
+    /// Stay, with the cursor as it was and no selection.
+    Clear,
+    /// Stay, with the selection as it is.
+    Keep,
+}
+
 /// Moving the view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scroll {
@@ -108,11 +130,17 @@ pub enum Action {
     Move(Motion),
     CursorUp,
     CursorDown,
+    /// Leaves copy mode if there is nowhere further down to go.
+    CursorDownAndCancel,
     TopLine,
     MiddleLine,
     BottomLine,
     Scroll(Scroll),
+    /// Leaves copy mode at the bottom of the history.
+    ScrollAndCancel(Scroll),
+    ScrollTop,
     ScrollMiddle,
+    ScrollBottom,
     HistoryTop,
     HistoryBottom,
     PreviousParagraph,
@@ -127,9 +155,13 @@ pub enum Action {
     SearchWord(bool),
     PreviousPrompt,
     NextPrompt,
+    PreviousOutput,
+    NextOutput,
     GotoLine(u32),
     BeginSelection,
     ClearSelection,
+    StopSelection,
+    Rectangle(bool),
     RectangleToggle,
     SelectLine,
     OtherEnd,
@@ -148,6 +180,8 @@ impl Action {
             self,
             Self::BeginSelection
                 | Self::ClearSelection
+                | Self::StopSelection
+                | Self::Rectangle(_)
                 | Self::RectangleToggle
                 | Self::SelectLine
                 | Self::OtherEnd
@@ -596,15 +630,31 @@ fn jump_to_mark(pane: &mut Pane, mode: &mut CopyMode) {
     mode.x = at.x.min(pane.terminal.width().saturating_sub(1));
 }
 
-/// Goes to the closest prompt in a direction, with the semantic prompts of shells
-/// that report them with OSC 133. It ends up at the top of the view if possible.
-fn jump_to_prompt(pane: &mut Pane, mode: &mut CopyMode, forward: bool) {
+/// Whether the output of a command starts on this row, by what shells report with
+/// OSC 133. Rows that nothing was ever written to count as output too, so the
+/// rows below a prompt only do if there is more to come after them.
+fn starts_output(pane: &Pane, y: u32) -> bool {
+    let terminal = &pane.terminal;
+    y > 0
+        && terminal.holds_output(y)
+        && !terminal.holds_output(y - 1)
+        && (y..terminal.rows()).any(|y| terminal.line(y).length() > 0)
+}
+
+/// Goes to the closest row in a direction that a shell marked with OSC 133. It
+/// ends up at the top of the view if possible.
+fn jump_to_mark_of_shell(
+    pane: &mut Pane,
+    mode: &mut CopyMode,
+    forward: bool,
+    marked: impl Fn(&Pane, u32) -> bool,
+) {
     let row = cursor(pane, mode).y;
     let rows = pane.terminal.rows();
     let found = if forward {
-        (row + 1..rows).find(|y| pane.terminal.starts_prompt(*y))
+        (row + 1..rows).find(|y| marked(pane, *y))
     } else {
-        (0..row).rev().find(|y| pane.terminal.starts_prompt(*y))
+        (0..row).rev().find(|y| marked(pane, *y))
     };
     if let Some(y) = found {
         pane.terminal.scroll_to_row(y);
@@ -690,7 +740,7 @@ fn clear_selection(pane: &mut Pane, mode: &mut CopyMode) {
 /// on. A selection of lines becomes one of cells at that point, as in tmux.
 fn other_end(pane: &mut Pane, mode: &mut CopyMode) {
     let moved_end = match mode.selecting {
-        Selecting::No => return,
+        Selecting::No | Selecting::Stopped => return,
         // The cursor is at the end the terminal has as the start, and the one
         // to go to is already the one that moves.
         Selecting::Lines(lines) if !lines.forward => {
@@ -764,7 +814,7 @@ fn select_lines(pane: &mut Pane, mode: &CopyMode, lines: LineSelection) {
 /// Makes the selection reach the cursor.
 fn update_selection(pane: &mut Pane, mode: &CopyMode) {
     match mode.selecting {
-        Selecting::No => {}
+        Selecting::No | Selecting::Stopped => {}
         Selecting::Cells => pane.terminal.select_extend(mode.x, mode.y),
         Selecting::Lines(lines) => select_lines(pane, mode, lines),
     }
@@ -828,11 +878,26 @@ fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) ->
         Action::Move(step) => move_cursor(pane, mode, step),
         Action::CursorUp => move_row(pane, mode, true),
         Action::CursorDown => move_row(pane, mode, false),
+        Action::CursorDownAndCancel => {
+            let row = cursor(pane, mode).y;
+            move_row(pane, mode, false);
+            if cursor(pane, mode).y == row {
+                return Outcome::Cancel;
+            }
+        }
         Action::TopLine => to_row_of_view(pane, mode, 0),
         Action::MiddleLine => to_row_of_view(pane, mode, (height(pane) - 1) / 2),
         Action::BottomLine => to_row_of_view(pane, mode, height(pane) - 1),
         Action::Scroll(scroll) => return scroll_action(pane, mode, scroll),
+        Action::ScrollAndCancel(scroll) => {
+            scroll_action(pane, mode, scroll);
+            if lines_below(pane) == 0 {
+                return Outcome::Cancel;
+            }
+        }
+        Action::ScrollTop => scroll_cursor_to(pane, mode, 0),
         Action::ScrollMiddle => scroll_cursor_to(pane, mode, (height(pane) - 1) / 2),
+        Action::ScrollBottom => scroll_cursor_to(pane, mode, height(pane) - 1),
         Action::HistoryTop => {
             pane.terminal.scroll_to_top();
             to_row_of_view(pane, mode, 0);
@@ -865,14 +930,30 @@ fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) ->
                 start_search(pane, mode, word, forward);
             }
         }
-        Action::PreviousPrompt => jump_to_prompt(pane, mode, false),
-        Action::NextPrompt => jump_to_prompt(pane, mode, true),
+        Action::PreviousPrompt => {
+            jump_to_mark_of_shell(pane, mode, false, |pane, y| pane.terminal.starts_prompt(y));
+        }
+        Action::NextPrompt => {
+            jump_to_mark_of_shell(pane, mode, true, |pane, y| pane.terminal.starts_prompt(y));
+        }
+        Action::PreviousOutput => jump_to_mark_of_shell(pane, mode, false, starts_output),
+        Action::NextOutput => jump_to_mark_of_shell(pane, mode, true, starts_output),
         Action::GotoLine(line) => {
             let history = pane.terminal.rows().saturating_sub(u32::from(height(pane)));
             pane.terminal.scroll_to_row(history.saturating_sub(line));
         }
         Action::BeginSelection => begin_selection(pane, mode),
         Action::ClearSelection => clear_selection(pane, mode),
+        Action::StopSelection => {
+            if mode.selecting != Selecting::No {
+                mode.selecting = Selecting::Stopped;
+            }
+        }
+        Action::Rectangle(on) => {
+            if mode.rectangle != on {
+                toggle_rectangle(pane, mode);
+            }
+        }
         Action::RectangleToggle => toggle_rectangle(pane, mode),
         Action::SelectLine => select_line(pane, mode),
         Action::OtherEnd => other_end(pane, mode),
@@ -897,6 +978,39 @@ fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) ->
 
 /// The text to copy from the selection. As in tmux, a selection that goes past
 /// the end of its last line takes the line break and any blank lines with it.
+/// Gets text to copy for a command that says what happens next. `lines` is how
+/// many lines to take, for what does not go by the selection.
+pub fn take_text(pane: &mut Pane, source: Source, lines: u32, after: After) -> Option<String> {
+    let mut mode = pane.copy_mode.take()?;
+    let (x, y, row) = (mode.x, mode.y, top(pane));
+    match source {
+        Source::Selection => select_match(pane, &mode),
+        Source::EndOfLine => select_to_end_of_line(pane, &mut mode, lines),
+        Source::Line => {
+            let at = cursor(pane, &mode);
+            let start = motion::motion(&pane.terminal, at, Motion::StartOfLine);
+            go_to(pane, &mut mode, start);
+            select_to_end_of_line(pane, &mut mode, lines);
+        }
+    }
+    update_selection(pane, &mode);
+    pane.copy_mode = Some(mode);
+    let text = selected_text(pane);
+    match after {
+        After::Leave => CopyMode::exit(pane),
+        After::Keep => {}
+        After::Clear => {
+            clear_selection(pane, &mut mode);
+            pane.terminal.scroll_to_row(row);
+            mode.x = x;
+            mode.y = y;
+            pane.copy_mode = Some(mode);
+        }
+    }
+    pane.redraw = true;
+    text
+}
+
 pub fn selected_text(pane: &Pane) -> Option<String> {
     let mut text = pane.terminal.selected_text()?;
     let (start, end) = pane.terminal.selection_bounds()?;

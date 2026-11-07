@@ -1596,6 +1596,14 @@ impl Terminal {
         })
     }
 
+    /// Whether a row of the screen starts with output, rather than with a prompt
+    /// or what was typed at one, going by what a shell said with OSC 133. That
+    /// is all rows, if it says nothing.
+    pub fn holds_output(&self, y: u32) -> bool {
+        let cell = self.grid_ref(ffi::POINT_SCREEN, 0, y);
+        cell.is_some_and(|cell| is_output(&cell))
+    }
+
     fn grid_ref(&self, tag: c_int, x: u16, y: u32) -> Option<ffi::GridRef> {
         grid_ref(self.handles.terminal, tag, x, y)
     }
@@ -2146,6 +2154,14 @@ fn read_char(grid_ref: &ffi::GridRef) -> char {
         None | Some('\0') => ' ',
         Some(c) => c,
     }
+}
+
+fn is_output(grid_ref: &ffi::GridRef) -> bool {
+    let mut raw = 0;
+    // SAFETY: The reference was just made, and the out pointer is valid.
+    let result = unsafe { ffi::ghostty_grid_ref_cell(grid_ref, &raw mut raw) };
+    result == ffi::SUCCESS
+        && cell_value::<c_int>(raw, ffi::CELL_DATA_SEMANTIC_CONTENT) == ffi::CELL_SEMANTIC_OUTPUT
 }
 
 /// Reads something about the row of a reference, leaving `value` if that fails.
