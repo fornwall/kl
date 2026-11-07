@@ -131,6 +131,12 @@ fn send(mut stream: &UnixStream, message: &ClientMessage) -> io::Result<()> {
     stream.write_all(&bytes)
 }
 
+/// Sends to a server that may have just closed the connection. That is no error
+/// to report, since what it said on the way out is still there to read.
+fn send_while_attached(stream: &UnixStream, message: &ClientMessage) {
+    drop(send(stream, message));
+}
+
 /// Buffers what the server sends, and splits it into messages.
 #[derive(Default)]
 struct Receiver {
@@ -215,7 +221,7 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn 
         if selector.readable(signals.as_raw_fd()) {
             for signal in sys::pending_signals(signals) {
                 if signal == SIGWINCH {
-                    send(stream, &ClientMessage::Resize(sys::winsize(terminal)?))?;
+                    send_while_attached(stream, &ClientMessage::Resize(sys::winsize(terminal)?));
                 } else {
                     return Ok("[terminated]".to_owned());
                 }
@@ -227,7 +233,7 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn 
                 0 => return Ok("[detached]".to_owned()),
                 len => {
                     let bytes = buf.get(..len).unwrap_or(&[]).to_vec();
-                    send(stream, &ClientMessage::Input(bytes))?;
+                    send_while_attached(stream, &ClientMessage::Input(bytes));
                 }
             }
         }

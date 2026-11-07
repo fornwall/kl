@@ -658,6 +658,20 @@ fn survives_detaching_and_shows_new_output_on_return() {
 }
 
 #[test]
+fn typing_through_a_detach_does_not_lose_the_goodbye() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("d");
+    while screen.child.try_wait().unwrap().is_none() {
+        // Keeps the client busy sending, past the server closing the connection.
+        drop(screen.pty.write(b"x"));
+        screen.pump();
+    }
+    screen.pump();
+    let text = screen.raw_text();
+    assert!(text.contains("[detached]"), "{text}");
+}
+
+#[test]
 fn reattaching_at_another_size_resizes_the_panes() {
     let mut screen = Screen::new(80, 24);
     screen.prefix("d");
