@@ -331,6 +331,16 @@ fn panes_see_a_ghostty_terminal_of_the_right_size() {
 }
 
 #[test]
+fn panes_find_the_terminfo_entry_whatever_the_outer_terminal_is() {
+    let dir = Rc::new(Scratch::new());
+    let mut command = kl_command(&dir.0);
+    command.env("TERM", "xterm-256color");
+    let mut screen = Screen::attach_with(command, dir, 80, 24);
+    screen.run("echo \"$TERM is $(tput longname)\"");
+    screen.wait_for_text("xterm-ghostty is Ghostty");
+}
+
+#[test]
 fn splits_side_by_side_and_keeps_typing_in_the_new_pane() {
     let mut screen = Screen::new(80, 24);
     screen.run("echo first");

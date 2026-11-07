@@ -97,9 +97,6 @@ Things panes can ask for that stop at kl today.
   This raises the question of which size wins, and tmux's answers are a good
   start.
 - Surviving a server restart, with libghostty-vt's `snapshot` feature.
-- `TERM=xterm-ghostty` where Ghostty started the server, `xterm-256color`
-  otherwise. Installing the terminfo entry on demand would give every host the
-  accurate one, which matters most over ssh.
 
 ### Later: settings
 

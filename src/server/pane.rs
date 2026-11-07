@@ -1,7 +1,7 @@
 //! A pane: one program running on a pty, and the terminal emulating it.
 
 use std::env;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -15,6 +15,11 @@ use crate::sys::{self, WinSize};
 
 /// How much to read from a pty at a time.
 const READ_SIZE: usize = 64 * 1024;
+
+/// Ghostty's terminfo entry, compiled by `tic`. Programs in panes talk to
+/// libghostty-vt whatever the outer terminal is, so this is the accurate entry
+/// for them, but few hosts have it, least of all those reached over ssh.
+const TERMINFO_ENTRY: &[u8] = include_bytes!("../../terminfo/xterm-ghostty");
 
 /// What to run in a new pane, and where.
 pub struct Spawn<'a> {
@@ -73,6 +78,22 @@ fn shell_command() -> Command {
     command
 }
 
+/// Puts the terminfo entry in a directory of its own next to the socket, and
+/// returns the directory. Done for each pane, as something may clean up `/tmp`.
+fn install_terminfo(socket: &Path) -> io::Result<PathBuf> {
+    let root = socket.with_file_name("terminfo");
+    // Linux files entries by their first letter, and macOS by its hex code.
+    for directory in ["x", "78"] {
+        let directory = root.join(directory);
+        let entry = directory.join("xterm-ghostty");
+        if !entry.exists() {
+            fs::create_dir_all(&directory)?;
+            fs::write(entry, TERMINFO_ENTRY)?;
+        }
+    }
+    Ok(root)
+}
+
 fn build_command(spawn: &Spawn<'_>, id: PaneId) -> Command {
     let mut command = match spawn.program {
         [] => shell_command(),
@@ -90,15 +111,16 @@ fn build_command(spawn: &Spawn<'_>, id: PaneId) -> Command {
     if let Some(cwd) = spawn.cwd {
         command.current_dir(cwd);
     }
-    // libghostty-vt is the engine of Ghostty, so that is the terminal programs
-    // are talking to. Its terminfo entry is only certain to be installed where
-    // Ghostty itself is what started the server, though.
-    let term = match env::var("TERM").as_deref() {
-        Ok("xterm-ghostty") => "xterm-ghostty",
-        _ => "xterm-256color",
+    match install_terminfo(Path::new(spawn.socket)) {
+        Ok(terminfo) => command
+            .env("TERM", "xterm-ghostty")
+            .env("TERMINFO", terminfo),
+        Err(error) => {
+            sys::log(format_args!("installing the terminfo entry: {error}"));
+            command.env("TERM", "xterm-256color")
+        }
     };
     command
-        .env("TERM", term)
         .env("COLORTERM", "truecolor")
         .env("TERM_PROGRAM", "kl")
         .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))

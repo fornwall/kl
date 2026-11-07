@@ -54,6 +54,15 @@ source tarball addressable by commit would cut that down and drop the need for
 `git` in the build. The same goes for the dependency tarball, which would remove
 the package fetching step below.
 
+### A compiled terminfo entry
+
+kl gives panes `TERM=xterm-ghostty`, with the compiled entry in
+`terminfo/xterm-ghostty` installed next to its socket, since few hosts have it.
+The entry is the source of truth in `src/terminfo/ghostty.zig`, but only the
+build of the Ghostty app turns that into a file, so kl keeps a copy from an
+installed Ghostty. `ghostty_terminfo()` or an install step of `-Demit-lib-vt`
+would keep it in step with the pin, and let the file go.
+
 ### Scrollback default
 
 `GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES` defaults to 10,000 bytes, about one
