@@ -19,9 +19,11 @@ mod ghostty;
 #[path = "../src/sys.rs"]
 mod sys;
 
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::rc::Rc;
@@ -628,6 +630,17 @@ fn commands_explain_when_no_server_runs() {
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("no server running"), "{error}");
+}
+
+#[test]
+fn survives_arguments_that_are_not_text() {
+    let scratch = Scratch::new();
+    let output = kl_command(&scratch.0)
+        .args(["send-keys".as_ref(), OsStr::from_bytes(b"\xff")])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("kl: no server running"), "{stderr}");
 }
 
 #[test]

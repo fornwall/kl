@@ -11,6 +11,7 @@ mod sys;
 
 use std::env;
 use std::error::Error;
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
@@ -77,8 +78,14 @@ fn run_command(args: &[String]) -> Result<ExitCode, Box<dyn Error>> {
     }
 }
 
-fn run(args: &[String]) -> Result<ExitCode, Box<dyn Error>> {
-    match args.first().map(String::as_str) {
+fn run(args: &[OsString]) -> Result<ExitCode, Box<dyn Error>> {
+    // `env::args` would panic on an argument that is not text. Commands work
+    // with text, but the socket path of the server has to stay what it is.
+    let words: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    match words.first().map(String::as_str) {
         None | Some("attach-session" | "attach" | "a" | "new-session" | "new") => attach(),
         Some("--server") => {
             let socket = args.get(1).ok_or("--server needs a socket path")?;
@@ -108,12 +115,12 @@ fn run(args: &[String]) -> Result<ExitCode, Box<dyn Error>> {
             print(concat!("kl ", env!("CARGO_PKG_VERSION"), "\n"));
             Ok(ExitCode::SUCCESS)
         }
-        Some(_) => run_command(args),
+        Some(_) => run_command(&words),
     }
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     run(&args).unwrap_or_else(|error| {
         sys::log(format_args!("kl: {error}"));
         ExitCode::FAILURE
