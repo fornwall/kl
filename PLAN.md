@@ -20,7 +20,7 @@ The first iteration has the core of tmux, with no configuration:
   binary, with programs still running and clients attached again.
 - The mouse is always on: select panes and windows, drag borders, scroll, select
   text (double and triple click too), and paste with the middle button. Programs
-  that ask for the mouse get it, and holding shift takes it back.
+  that ask for the mouse get it, and holding shift leaves it to Ghostty.
 - Full-fidelity input: the kitty keyboard protocol towards the outer terminal,
   and libghostty-vt's encoders towards panes. Programs get the encoding they
   asked for, as if no multiplexer was in between.

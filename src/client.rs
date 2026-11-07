@@ -23,16 +23,15 @@ const SERVER_START_TIME: Duration = Duration::from_secs(5);
 ///
 /// The keyboard flags ask for everything, so panes can get full-fidelity events
 /// whatever they ask for. Grapheme clustering is saved rather than just turned
-/// off afterwards, since it is on by default in Ghostty. Ghostty keeps shift with
-/// the mouse for itself unless told otherwise (XTSHIFTESCAPE), which would leave
-/// a pane's program holding on to the mouse. The title goes on xterm's stack.
+/// off afterwards, since it is on by default in Ghostty. The title goes on
+/// xterm's stack.
 /// Asking for the cursor style comes before the first frame sets one, as that
 /// is how the user wants a cursor that no program has a say about to look.
 const ENTER_TERMINAL: &[u8] = b"\x1bP$q q\x1b\\\
     \x1b[?1049h\
     \x1b[>31u\
     \x1b[?2027s\x1b[?2027h\
-    \x1b[?1003h\x1b[?1006h\x1b[>1s\
+    \x1b[?1003h\x1b[?1006h\
     \x1b[22;2t\
     \x1b[?2004h\
     \x1b[?1004h\
@@ -46,7 +45,7 @@ const LEAVE_TERMINAL: &[u8] = b"\x1b[?2031l\
     \x1b[?1004l\
     \x1b[?2004l\
     \x1b]2;\x1b\\\x1b[23;2t\
-    \x1b[>0s\x1b[?1006l\x1b[?1003l\
+    \x1b[?1006l\x1b[?1003l\
     \x1b[?2027r\
     \x1b[<u\
     \x1b[0m\x1b[0 q\x1b[?25h\

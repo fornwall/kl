@@ -2090,7 +2090,6 @@ fn leaves_the_terminal_as_it_found_it() {
         "\x1b[?1049l",
         "\x1b[?1003l",
         "\x1b[?1006l",
-        "\x1b[>0s",
         "\x1b[?2004l",
         "\x1b[?25h",
     ] {

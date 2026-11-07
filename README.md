@@ -34,8 +34,10 @@ These are choices rather than gaps, and each has a reason.
   kl works around, including the patch it applies.
 - **No configuration yet.** The question to answer first is which defaults people
   actually want to change, rather than how to expose everything tmux exposes.
-- **The mouse is always on.** Programs that ask for it get it, and holding shift
-  takes it back.
+- **The mouse is always on.** Programs that ask for it get it. Holding shift
+  leaves it to Ghostty, as with tmux: its own selection, which knows nothing of
+  panes, and ctrl+shift+click for links, which it opens only while it has the
+  mouse.
 - **Panes always get `TERM=xterm-ghostty`,** since programs talk to libghostty-vt
   whatever the outer terminal is. kl carries the terminfo entry and installs it
   next to its socket, so it works on hosts without Ghostty. As with Ghostty
