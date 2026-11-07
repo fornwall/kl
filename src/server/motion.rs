@@ -570,11 +570,7 @@ mod tests {
                 .strip_suffix('\\')
                 .map_or((*row, false), |row| (row, true));
             let cells = row.chars().collect();
-            Line {
-                cells,
-                wrapped,
-                prompt: false,
-            }
+            Line { cells, wrapped }
         };
         Text(rows.iter().map(line).collect())
     }
@@ -713,7 +709,6 @@ mod tests {
         let line = Line {
             cells: vec!['a', '世', '\0', 'b'],
             wrapped: false,
-            prompt: false,
         };
         let text = Text(vec![line]);
         let right = Motion::Right { all: false };

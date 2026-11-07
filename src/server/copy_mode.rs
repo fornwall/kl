@@ -4,7 +4,7 @@
 
 use super::motion::{self, Jump, Lines, Motion, NO_SEPARATORS, Position, SEPARATORS};
 use super::pane::Pane;
-use crate::ghostty::key::{self, MOD_CTRL, MOD_SHIFT};
+use crate::ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{Line, Match, Scrollbar, Terminal};
 use crate::input::KeyEvent;
 
@@ -111,6 +111,8 @@ pub enum Action {
     SearchReverse,
     /// Looks for the word under the cursor, forward if set.
     SearchWord(bool),
+    PreviousPrompt,
+    NextPrompt,
     GotoLine(u32),
     BeginSelection,
     ClearSelection,
@@ -190,6 +192,8 @@ fn control_binding(event: &KeyEvent) -> Option<Action> {
     }
 }
 
+const CTRL_ALT: u16 = MOD_CTRL | MOD_ALT;
+
 const fn named_binding(event: &KeyEvent) -> Option<Action> {
     let mods = event.binding_mods();
     let action = match (event.key, mods) {
@@ -202,6 +206,9 @@ const fn named_binding(event: &KeyEvent) -> Option<Action> {
         (key::ARROW_DOWN, 0) => Action::CursorDown,
         (key::ARROW_UP, MOD_CTRL) => Action::Scroll(Scroll::Up),
         (key::ARROW_DOWN, MOD_CTRL) => Action::Scroll(Scroll::Down),
+        // These two are from tmux's emacs table. Its vi table has none.
+        (key::ARROW_UP, CTRL_ALT) => Action::PreviousPrompt,
+        (key::ARROW_DOWN, CTRL_ALT) => Action::NextPrompt,
         (key::PAGE_UP, 0) => Action::Scroll(Scroll::PageUp),
         (key::PAGE_DOWN, 0) => Action::Scroll(Scroll::PageDown),
         (key::HOME, 0) => Action::Move(Motion::StartOfLine),
@@ -243,6 +250,9 @@ fn char_binding(c: char) -> Option<Binding> {
         'T' => jump(Jump::ToBackward),
         'V' => run(Action::SelectLine),
         'W' => go(Motion::NextWord(NO_SEPARATORS)),
+        // Free in tmux, and the usual choice of those who bind these commands.
+        '[' => run(Action::PreviousPrompt),
+        ']' => run(Action::NextPrompt),
         '^' => go(Motion::BackToIndentation),
         'b' => go(Motion::PreviousWord(SEPARATORS)),
         'e' => go(Motion::NextWordEnd(SEPARATORS)),
@@ -547,6 +557,22 @@ fn jump(pane: &mut Pane, mode: &mut CopyMode, kind: Jump, c: char) {
     }
 }
 
+/// Goes to the closest prompt in a direction, with the semantic prompts of shells
+/// that report them with OSC 133. It ends up at the top of the view if possible.
+fn jump_to_prompt(pane: &mut Pane, mode: &mut CopyMode, forward: bool) {
+    let row = cursor(pane, mode).y;
+    let rows = pane.terminal.rows();
+    let found = if forward {
+        (row + 1..rows).find(|y| pane.terminal.starts_prompt(*y))
+    } else {
+        (0..row).rev().find(|y| pane.terminal.starts_prompt(*y))
+    };
+    if let Some(y) = found {
+        pane.terminal.scroll_to_row(y);
+        go_to(pane, mode, Position::new(0, y));
+    }
+}
+
 /// Goes to the next match, in either direction, around the ends of the screen.
 fn find(pane: &mut Pane, mode: &mut CopyMode, forward: bool) {
     let Some(text) = &pane.search else {
@@ -799,6 +825,8 @@ fn run_once(pane: &mut Pane, mode: &mut CopyMode, action: Action, lines: u32) ->
                 start_search(pane, mode, word, forward);
             }
         }
+        Action::PreviousPrompt => jump_to_prompt(pane, mode, false),
+        Action::NextPrompt => jump_to_prompt(pane, mode, true),
         Action::GotoLine(line) => {
             let history = pane.terminal.rows().saturating_sub(u32::from(height(pane)));
             pane.terminal.scroll_to_row(history.saturating_sub(line));

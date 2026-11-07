@@ -2271,6 +2271,54 @@ fn n_goes_on_with_the_last_search_in_a_later_copy_mode() {
 }
 
 #[test]
+fn copy_mode_jumps_between_shell_prompts() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("for i in 1 2 3; do printf '\\033]133;A\\007mark %s\\n' $i; seq 1 30; done");
+    screen.wait_for_line("30");
+    let copy_line = |screen: &mut Screen| {
+        screen.type_text(" ");
+        screen.type_text("$");
+        screen.enter();
+        screen.wait_for_clipboard()
+    };
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("[");
+    screen.wait_for("the last prompt at the top", |lines| {
+        lines[0].starts_with("mark 3")
+    });
+    assert_eq!(copy_line(&mut screen), [b"mark 3".to_vec()]);
+
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("[[");
+    screen.wait_for("the one before that", |lines| {
+        lines[0].starts_with("mark 2")
+    });
+    screen.type_text("[");
+    screen.wait_for("the first one", |lines| lines[0].starts_with("mark 1"));
+    screen.type_text("[");
+    screen.key(key::ARROW_DOWN, MOD_CTRL | MOD_ALT, "", 0);
+    screen.wait_for("the second one again", |lines| {
+        lines[0].starts_with("mark 2")
+    });
+    assert_eq!(copy_line(&mut screen), [b"mark 2".to_vec()]);
+}
+
+#[test]
+fn prompts_in_view_count_when_jumping_from_the_cursor() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("clear; printf '\\033]133;A\\007mark 1\\n\\033]133;A\\007mark 2\\nend\\n'");
+    screen.wait_for_line("end");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("[ ");
+    screen.type_text("$");
+    screen.enter();
+    assert_eq!(screen.wait_for_clipboard(), [b"mark 2".to_vec()]);
+}
+
+#[test]
 fn pastes_from_the_outer_terminal_are_bracketed_for_those_who_ask() {
     let mut screen = Screen::new(80, 24);
     screen.run_setup_then_cat(r"printf '\033[?2004h'");

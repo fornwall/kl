@@ -193,8 +193,6 @@ pub struct Line {
     pub cells: Vec<char>,
     /// The text goes on in the next row.
     pub wrapped: bool,
-    /// A shell prompt starts in this row.
-    pub prompt: bool,
 }
 
 impl Line {
@@ -1413,11 +1411,19 @@ impl Terminal {
                 break;
             };
             if x == 0 {
-                read_row_flags(&grid_ref, &mut line);
+                line.wrapped = row_value(&grid_ref, ffi::SCREEN_ROW_DATA_WRAP, false);
             }
             line.cells.push(read_char(&grid_ref));
         }
         line
+    }
+
+    /// Whether a shell said that a prompt starts in this row of the screen.
+    pub fn starts_prompt(&self, y: u32) -> bool {
+        self.grid_ref(ffi::POINT_SCREEN, 0, y).is_some_and(|row| {
+            let data = ffi::SCREEN_ROW_DATA_SEMANTIC_PROMPT;
+            row_value::<c_int>(&row, data, 0) == ffi::ROW_SEMANTIC_PROMPT
+        })
     }
 
     fn grid_ref(&self, tag: c_int, x: u16, y: u32) -> Option<ffi::GridRef> {
@@ -1972,24 +1978,17 @@ fn read_char(grid_ref: &ffi::GridRef) -> char {
     }
 }
 
-fn read_row_flags(grid_ref: &ffi::GridRef, line: &mut Line) {
+/// Reads something about the row of a reference, leaving `value` if that fails.
+fn row_value<T>(grid_ref: &ffi::GridRef, data: c_int, mut value: T) -> T {
     let mut row = 0;
     // SAFETY: The reference was just made, and the out pointer is valid.
-    if unsafe { ffi::ghostty_grid_ref_row(grid_ref, &raw mut row) } != ffi::SUCCESS {
-        return;
+    if unsafe { ffi::ghostty_grid_ref_row(grid_ref, &raw mut row) } == ffi::SUCCESS {
+        let out = (&raw mut value).cast();
+        // SAFETY: `out` is valid for what `data` documents, as callers pick `T`
+        // to match.
+        best_effort(check(unsafe { ffi::ghostty_row_get(row, data, out) }));
     }
-    let out = (&raw mut line.wrapped).cast();
-    // SAFETY: `out` is valid for the bool this data documents.
-    best_effort(check(unsafe {
-        ffi::ghostty_row_get(row, ffi::SCREEN_ROW_DATA_WRAP, out)
-    }));
-    let mut prompt: c_int = 0;
-    let out = (&raw mut prompt).cast();
-    // SAFETY: `out` is valid for the enum this data documents.
-    best_effort(check(unsafe {
-        ffi::ghostty_row_get(row, ffi::SCREEN_ROW_DATA_SEMANTIC_PROMPT, out)
-    }));
-    line.prompt = prompt == ffi::ROW_SEMANTIC_PROMPT;
+    value
 }
 
 /// Whether every row needs drawing, whatever each row says about itself.
@@ -3028,6 +3027,16 @@ mod tests {
         assert!(matches[0].contains(0, 1));
         assert!(!matches[0].contains(2, 1));
         assert!(!matches[0].contains(2, 0));
+    }
+
+    #[test]
+    fn shells_mark_where_their_prompts_start() {
+        let mut terminal = Terminal::new(10, 5).unwrap();
+        terminal.write(b"output\r\n\x1b]133;A\x07$ \x1b]133;B\x07ls\r\nmore\r\n");
+        assert!(!terminal.starts_prompt(0));
+        assert!(terminal.starts_prompt(1));
+        assert!(!terminal.starts_prompt(2));
+        assert!(!terminal.starts_prompt(9));
     }
 
     #[test]

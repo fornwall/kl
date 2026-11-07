@@ -72,7 +72,6 @@ What is missing for daily use compared with tmux.
 
 ### 4. Copy mode
 
-- Jumping between shell prompts, with semantic prompts from OSC 133.
 - Named paste buffers and `choose-buffer`.
 
 ### 5. Passing more through
