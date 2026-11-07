@@ -6,7 +6,7 @@ built on libghostty-vt. This file tracks where it stands and where it goes next.
 
 ## Where it stands
 
-The first iteration has the core of tmux, with no configuration:
+kl has the core of tmux, with no configuration:
 
 - A background server that keeps panes running, with a client that attaches to
   it. Starting `kl` attaches, creating the session if needed.
@@ -39,9 +39,12 @@ The first iteration has the core of tmux, with no configuration:
 
 | Target           | Builds | Tests run |
 | ---------------- | ------ | --------- |
-| Linux x86-64     | yes    | yes       |
-| Linux aarch64    | type-checked and linted, with libghostty-vt built | no |
-| macOS aarch64    | type-checked and linted, with libghostty-vt built | no |
+| Linux x86-64     | yes    | yes, here and in CI |
+| Linux aarch64    | yes    | yes, in CI |
+| macOS aarch64    | yes    | in CI: all 350 unit tests, and 341 of 369 end-to-end tests |
+
+CI runs formatting, clippy and all tests on each of them, and checks that
+libghostty-vt really is linked statically.
 
 The end-to-end tests use libghostty-vt as the outer terminal, so they exercise
 the core of Ghostty and the exact key sequences its encoder produces. That leaves
@@ -119,6 +122,14 @@ parsed events and program output through libghostty-vt have been fuzzed on Linux
 x86-64, for 11 to 21 minutes on 4 cores each without a crash. See
 [fuzz/README.md](fuzz/README.md).
 
+Three independent reviews went through the code, one each on the server and its
+clients, on the boundary with libghostty-vt and the outer terminal, and on the
+parsers and logic, with random commands and comparisons with tmux 3.8 on top.
+What they found that is not fixed is under known defects below. They found no way
+for a program to get out of the sequence carrying its data when the outer terminal
+is Ghostty, sending all 256 byte values through every path to it, and no memory
+safety defect.
+
 `KL_TMPDIR` moves the socket directory, as `TMUX_TMPDIR` does in tmux. It exists
 for the tests, and is not meant as a setting.
 
@@ -126,11 +137,77 @@ for the tests, and is not meant as a setting.
 
 ### 2. Confidence on every target
 
-Before adding much more, close the gaps in the table above.
+- Get the end-to-end tests passing on macOS, as of `b1d2ad3`. What is known of the
+  28 that fail:
+  - Those waiting for a window called `sh`, which `/bin/sh` is not on macOS: it
+    shows up as `bash`. `control_keys_reach_programs` is one, where the keys
+    themselves worked. So are others that time out on `0:sh*` or `1:sh*`.
+  - `a_failed_restart_leaves_the_server_running`, as there is no `/bin/false`.
+  - Not looked into, so these may be real bugs: layouts and moving panes with keys
+    (`spreads_panes_out_evenly`, `space_goes_through_the_layouts_like_tmux`,
+    `alt_keys_pick_layouts`, `control_o_rotates`, `swaps_panes_with_their_neighbors`,
+    `breaks_a_pane_out_to_its_own_window`, the tests of the mark), sizes with
+    several clients (`the_window_takes_the_size_of_the_client_active_last`, and
+    those on smaller clients), focus reports
+    (`programs_have_the_keyboard_while_any_terminal_does`), the color scheme
+    (`programs_hear_when_the_color_scheme_changes`), images, and clients that stop
+    reading or come back from a restart.
+- Try kl in the Ghostty app on macOS. Option composing a character is the first
+  thing to look at: kl takes alt that reaches it for alt, as the outer terminal
+  has decided what option means, but text that comes with it has not been tried.
 
-- Get CI running. `.github/workflows/ci.yml` covers Linux x86-64, Linux aarch64
-  and macOS aarch64 with clippy and all tests, but this repository has no remote
-  yet, so it has never run. The first run is what fills in the table above.
+### Known defects
+
+Found by the reviews and left for later, most severe first. Each was reproduced,
+unless it says otherwise.
+
+- A program can freeze every pane. Replacing a large image's frame with kitty's
+  `a=c` takes 13 ms in the library, and 64 KiB of those keeps a single write busy
+  for 38 seconds. Feeding `vt_write` small slices with a time budget would fix
+  this and anything like it. It needs the event loop to come back for the rest.
+- A program flooding the clipboard from a hidden pane can keep frames from a
+  client on a slow link. Frames wait for its output to be empty, and what is no
+  frame keeps topping that up.
+- Text can overrun the divider, where the outer terminal disagrees with a pane
+  about how wide a cell is. A pane turning off grapheme clustering with
+  `?2027l` gets there with emoji, and a flag written right to left shifts what
+  comes after it. The renderer trusts the cell width.
+- A resize in a split of a cell or less leaves it with no share of the space, so
+  its panes stay at zero size until another layout. The older layout notation has
+  no size check, which gets there too.
+- A split keeps one cell for a child that needs more because it is a split itself,
+  so panes can go to zero size in windows with plenty of room. `select-layout -o`
+  then refuses the layout it wrote.
+- Line selections and marks in copy mode keep absolute rows, which shift when
+  history is trimmed: a program can change what gets copied by printing more.
+- `restart-server`:
+  - A failed `exec` is reported as success, as clients have been told to come
+    back by then. The server carries on, without copy modes.
+  - A failed write leaves a partial state file behind (not reproduced).
+  - Focus does not survive it, so a program can miss that it got focus back.
+  - From the prompt it fails after the binary was replaced, as `current_exe` says
+    `(deleted)` on Linux. From the command line it works.
+  - Panes hidden by a zoom list as 0x0 until unzoomed.
+- `-c` formats go by the active pane rather than the target.
+- Hyperlinks amplify. 45 KB from a program came to an 8.4 MB frame, which only
+  delays that client.
+- `?2026l` is not part of leaving the terminal, so a frame cut off by a dying
+  server leaves synchronized output on until the terminal gives up (not
+  reproduced).
+- Two servers can end up running when many start at once after a crash left a
+  stale socket, as binding checks and then removes it.
+- `programs_get_real_pixels_when_they_ask` timed out once, and 120 runs under load
+  did not reproduce it.
+
+### Differences from tmux that are bugs
+
+- Directional pane selection ignores which pane was last active, so going down and
+  back up can land on another pane. People will run into this one.
+- `kill-pane` gives the space to the previous pane, where tmux 3.8 gives it to the
+  next.
+- `swap-pane -d` with an explicit source moves focus to the other pane.
+- `+0` is taken for index 0, `kill-window -t 2.%1` goes by the pane and ignores the
+  window, and `=kl:1` is refused.
 
 ### 3. Getting around
 

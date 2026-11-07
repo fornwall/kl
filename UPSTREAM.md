@@ -95,8 +95,10 @@ widget inside a TUI is in the same position. GUI embedders have a smaller gap:
 `linkCells` is Zig only, so from C they cannot reproduce whole-link highlighting
 on hover, which link runs would fix as well.
 
-Next step: a discussion in Feature Requests rather than a pull request, with kl
-as a working example. Nothing has been posted yet.
+None of this blocks kl, which works as described above, so it is only worth asking
+for if the highlighting of links matters enough. If so, that would be a discussion
+in Feature Requests rather than a pull request, with kl as a working example.
+Nothing has been posted.
 
 ### Reverse video does not mark anything dirty
 
@@ -165,6 +167,17 @@ with output below one that does not, with text somewhere from there on, so that
 the empty rows below the last prompt do not count. A command without output has no
 such row, where tmux stops at the next prompt. With a value for this in
 `GhosttyRowSemanticPrompt`, or a flag next to it: go by that instead.
+
+### Giving back control during a write
+
+`ghostty_terminal_vt_write` runs to completion, which is fine for almost anything,
+but replacing the frame of a large image with kitty's `a=c` takes 13 ms, and 64 KiB
+of those takes 38 seconds. A single threaded program running many terminals has
+no way to bound that.
+
+Today: nothing, see the known defects in [PLAN.md](PLAN.md). Slices with a time
+budget would do it from kl's side. A smaller `a=c`, or a cost that does not grow
+with the size of the image, would make that less urgent.
 
 ### Source tarballs for a commit
 

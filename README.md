@@ -31,7 +31,7 @@ These are choices rather than gaps, and each has a reason.
   release. Other terminals may work, but kl does not hold back for them.
 - **libghostty-vt is statically linked,** from a pinned commit on ghostty's `main`
   branch, never a release, branch or fork. [UPSTREAM.md](UPSTREAM.md) lists what
-  kl works around, including the patch it applies.
+  kl works around, including the two patches it applies.
 - **No configuration yet.** The question to answer first is which defaults people
   actually want to change, rather than how to expose everything tmux exposes.
 - **The mouse is always on.** Programs that ask for it get it. Holding shift
@@ -63,9 +63,12 @@ These are choices rather than gaps, and each has a reason.
   asked to hear of changes get told as the window moves between them.
 - **A program has the keyboard while any terminal showing it does.**
 - **Programs read kl's paste buffers, never the system clipboard.** An OSC 52 read
-  gets the newest automatic buffer, as with tmux's default, and only from the
-  active pane. Any other pane gets nothing. The answer goes to a program's pty,
-  which can lead to another host, so text copied outside kl stays out of reach.
+  gets the newest automatic buffer without asking, and only from the active pane.
+  Any other pane gets nothing. This goes further than tmux, which by default does
+  not answer such reads at all, and does what it does with `set-clipboard on`. The
+  answer goes to a program's pty, which can lead to another host, so a program
+  there can read what was last copied in kl, while text copied outside kl stays
+  out of reach.
 - **Notifications get through from every pane,** seen or not, since telling you
   about something out of sight is what they are for.
 - **Images are worth their size.** Kitty graphics and PNG decoding add about
@@ -92,6 +95,12 @@ each target has been verified.
   scaled to part of a cell in both directions, can come out up to half a cell off.
   A large PNG holds up every pane while it is decoded, which took 0.3 seconds for
   6000 by 4000 pixels.
+- **A program can slow everything down.** The server has one thread, and it can
+  not stop halfway through what a program wrote. Some image commands are slow
+  enough for a program sending them on purpose to hold up every pane for as long
+  as it keeps going, and one flooding the clipboard can keep frames from reaching a
+  client on a slow link. Nothing is lost, and a client shows at most 2000 images at
+  a time. Replies past 96 MiB to a program that does not read them are dropped.
 - **Hyperlinks only go by their URI.** libghostty-vt does not give out their
   `id`, so links in a pane with the same URI highlight together, even if the
   program kept them apart. A URI with anything but printable ASCII in it arrives
@@ -132,6 +141,8 @@ each target has been verified.
     otherwise, which leaves the server as it was.
   - What panes hold passes through a file next to the socket for a moment, in a
     directory only the user can enter.
-- **Tests have only run on Linux x86-64.** Linux aarch64 and macOS have been
-  type-checked and linted, but never run. The CI that would cover them has not
-  run yet either, since this repository has no remote.
+- **macOS is not all there yet.** kl builds and runs there, and CI runs all tests
+  on every target. They pass on Linux x86-64 and aarch64. On macOS all unit tests
+  pass and 28 of 369 end-to-end tests fail, some of which may be real bugs, as
+  [PLAN.md](PLAN.md) says. The Ghostty app has only been tried on Linux, so nothing
+  says yet what option composing a character does on macOS.

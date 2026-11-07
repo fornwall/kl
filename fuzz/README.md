@@ -2,7 +2,8 @@
 
 This needs a nightly toolchain and `cargo install cargo-fuzz`. Build kl first,
 since the targets link the libghostty-vt that leaves under `target/ghostty/`.
-Then, from this directory:
+They include kl's sources by path, so `cargo check --manifest-path fuzz/Cargo.toml`
+is what tells that a change broke them, and CI runs it. Then, from this directory:
 
 ```sh
 cargo +nightly fuzz run parser -- -dict=parser.dict -fork=8 -max_total_time=300
