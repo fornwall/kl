@@ -30,10 +30,13 @@ Session:
                                               still running
 
 Windows:
-  new-window (neww) [-d] [-c dir] [-n name] [-P [-F format]] [-t index] [command]
+  new-window (neww) [-abd] [-c dir] [-n name] [-P [-F format]] [-t index]
+                    [command]
   select-window (selectw) [-l|-n|-p] [-t window]
   next-window (next) [-a], previous-window (prev) [-a], last-window (last)
   rename-window (renamew) [-t window] name
+  move-window (movew) [-abdkr] [-s window] [-t index]
+  swap-window (swapw) [-d] [-s window] [-t window]
   kill-window (killw) [-a] [-t window]
   list-windows (lsw) [-a] [-F format] [-f filter]
   choose-tree                                 pick a window from a list
@@ -80,7 +83,7 @@ number, %id or window.pane, and {last}, {next}, {top} and the like work too.
 Commands run in a pane are about that pane by default. Formats are tmux's, such
 as #{window_name} or #W, with conditions, comparisons and the usual modifiers.
 
-Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , & for windows,
+Keys follow tmux, with C-b as the prefix: c n p l w 0-9 , . & for windows,
 % \" o ; q z x { } ! m M Space E C-o M-o M-1..7 arrows for panes, [ ] # = - for copying and paste buffers, : for
 commands, ? to list the keys and d to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a

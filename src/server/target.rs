@@ -122,7 +122,7 @@ impl Session {
             .or_else(|| self.window())
     }
 
-    fn check_session(session: Option<&str>) -> Result<(), String> {
+    pub fn check_session(session: Option<&str>) -> Result<(), String> {
         match session {
             Some(name) if !(name == "$0" || SESSION_NAME.starts_with(name)) => {
                 Err(format!("can't find session: {name}"))
@@ -297,6 +297,16 @@ impl Session {
         }
     }
 
+    /// The window a source is about, which is that of the marked pane if there
+    /// is one, and the current one otherwise.
+    pub fn find_source_window(&self, source: Option<&str>) -> Result<u32, String> {
+        let marked = self.marked_pane().and_then(|id| self.window_of(id));
+        match (source, marked) {
+            (None, Some(window)) => Ok(window.index),
+            _ => self.find_window(source),
+        }
+    }
+
     /// The pane before or after a pane of its window, which wraps around.
     pub fn pane_next_to(&self, id: PaneId, forward: bool) -> Option<PaneId> {
         let panes = self.window_of(id)?.root.panes(self.area());
@@ -340,7 +350,8 @@ impl Session {
         let Some(spec) = parts.window else {
             return Ok(None);
         };
-        if let Ok(index) = spec.parse() {
+        // Parsing takes a plus sign too, which makes this an offset instead.
+        if let Some(index) = spec.parse().ok().filter(|_| !spec.starts_with('+')) {
             return Ok(Some(index));
         }
         let window = self.window_by_spec(spec, parts.exact_window);

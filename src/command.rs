@@ -130,6 +130,27 @@ pub enum PaneScope {
     All,
 }
 
+/// Which side of a window another one goes on, as `-a` and `-b` say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Beside {
+    After,
+    Before,
+}
+
+/// What `move-window` was asked to do.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MoveWindow {
+    pub source: Target,
+    pub target: Target,
+    pub next_to: Option<Beside>,
+    /// Stay in the window at hand.
+    pub detached: bool,
+    /// Replace a window that has the index already.
+    pub kill: bool,
+    /// Number all windows in order, rather than move one of them.
+    pub renumber: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Moves a pane to a window of its own.
@@ -213,6 +234,8 @@ pub enum Command {
     },
     NewWindow {
         target: Target,
+        /// Right after or before the target, moving others up to make room.
+        next_to: Option<Beside>,
         name: Option<String>,
         directory: Option<String>,
         /// Stay in the window at hand.
@@ -221,6 +244,8 @@ pub enum Command {
         print: Option<String>,
         program: Vec<String>,
     },
+    /// Moves a window to another index, or all of them to close the gaps.
+    MoveWindow(MoveWindow),
     /// Goes to the next or previous preset layout.
     NextLayout {
         target: Target,
@@ -299,6 +324,13 @@ pub enum Command {
         /// Leave the active pane where it is, rather than go with the target.
         detached: bool,
     },
+    /// Puts two windows at each other's index.
+    SwapWindow {
+        source: Target,
+        target: Target,
+        /// Go along with the source window, rather than stay at the same index.
+        detached: bool,
+    },
     ToggleZoom {
         target: Target,
     },
@@ -335,6 +367,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "list-panes" | "lsp" => parse_list_panes(args),
         "list-windows" | "lsw" => parse_list_windows(args),
         "load-buffer" | "loadb" => parse_load_buffer(args),
+        "move-window" | "movew" => parse_move_window(args),
         "new-window" | "neww" => parse_new_window(args),
         "next-layout" | "nextl" => parse_step_layout("next-layout", args, true),
         "next-window" | "next" => parse_next_window(args),
@@ -356,6 +389,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "show-buffer" | "showb" => parse_buffer_name("show-buffer", args, BufferCommand::Show),
         "split-window" | "splitw" => parse_split_window(args),
         "swap-pane" | "swapp" => parse_swap_pane(args),
+        "swap-window" | "swapw" => parse_swap_window(args),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -463,6 +497,15 @@ impl<'a> Flags<'a> {
             full: self.has('f'),
             size: size.as_deref().map(Size::parse).transpose()?,
         })
+    }
+
+    /// The side of `-a` or `-b`, of which `-b` wins as in tmux.
+    fn beside(&self) -> Option<Beside> {
+        if self.has('b') {
+            Some(Beside::Before)
+        } else {
+            self.has('a').then_some(Beside::After)
+        }
     }
 
     /// The direction of `-L`, `-R`, `-U` or `-D`.
@@ -635,6 +678,16 @@ fn parse_swap_pane(args: &[String]) -> Result<Command, String> {
     })
 }
 
+fn parse_swap_window(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("swap-window", args, "ds:t:")?;
+    flags.at_most(0)?;
+    Ok(Command::SwapWindow {
+        source: flags.value('s'),
+        target: flags.value('t'),
+        detached: flags.has('d'),
+    })
+}
+
 fn parse_kill_pane(args: &[String]) -> Result<Command, String> {
     let flags = Flags::parse("kill-pane", args, "at:")?;
     flags.at_most(0)?;
@@ -706,10 +759,24 @@ fn parse_copy_mode(args: &[String]) -> Result<Command, String> {
     })
 }
 
+fn parse_move_window(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("move-window", args, "abdkrs:t:")?;
+    flags.at_most(0)?;
+    Ok(Command::MoveWindow(MoveWindow {
+        source: flags.value('s'),
+        target: flags.value('t'),
+        next_to: flags.beside(),
+        detached: flags.has('d'),
+        kill: flags.has('k'),
+        renumber: flags.has('r'),
+    }))
+}
+
 fn parse_new_window(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse("new-window", args, "c:dF:n:Pt:")?;
+    let flags = Flags::parse("new-window", args, "abc:dF:n:Pt:")?;
     Ok(Command::NewWindow {
         target: flags.value('t'),
+        next_to: flags.beside(),
         name: flags.value('n'),
         directory: flags.value('c'),
         detached: flags.has('d'),
@@ -1131,6 +1198,7 @@ mod tests {
             command("new-window -n logs tail -f x"),
             Command::NewWindow {
                 target: None,
+                next_to: None,
                 name: Some("logs".to_owned()),
                 directory: None,
                 detached: false,
@@ -1142,6 +1210,50 @@ mod tests {
         assert!(matches!(
             command("neww -P"),
             Command::NewWindow { print: Some(format), .. } if format.starts_with("#{session_name}")
+        ));
+    }
+
+    #[test]
+    fn parses_moving_windows() {
+        assert_eq!(
+            command("move-window -d -s 1 -t 3"),
+            Command::MoveWindow(MoveWindow {
+                source: Some("1".to_owned()),
+                target: Some("3".to_owned()),
+                detached: true,
+                ..MoveWindow::default()
+            })
+        );
+        assert_eq!(
+            command("movew -abkr"),
+            Command::MoveWindow(MoveWindow {
+                next_to: Some(Beside::Before),
+                kill: true,
+                renumber: true,
+                ..MoveWindow::default()
+            })
+        );
+        assert_eq!(
+            command("swapw -d -s 1 -t 2"),
+            Command::SwapWindow {
+                source: Some("1".to_owned()),
+                target: Some("2".to_owned()),
+                detached: true,
+            }
+        );
+        assert!(matches!(
+            command("neww -a"),
+            Command::NewWindow {
+                next_to: Some(Beside::After),
+                ..
+            }
+        ));
+        assert!(matches!(
+            command("neww -b"),
+            Command::NewWindow {
+                next_to: Some(Beside::Before),
+                ..
+            }
         ));
     }
 

@@ -686,8 +686,10 @@ impl Server {
                 self.session.marked = (!clear && !marked).then_some(id);
                 self.session.repaint = true;
             }
+            Command::MoveWindow(moving) => self.session.run_move_window(moving)?,
             Command::NewWindow {
                 target,
+                next_to,
                 name,
                 directory,
                 detached,
@@ -696,10 +698,7 @@ impl Server {
             } => {
                 let index = target.map(|target| self.session.find_index(&target));
                 let index = index.transpose()?.flatten();
-                if let Some(index) = index.filter(|index| self.session.window_at(*index).is_some())
-                {
-                    return Err(format!("create window failed: index {index} in use"));
-                }
+                let index = self.session.new_window_index(index, next_to)?;
                 let directory = self.expand_directory(directory);
                 let id = self.session.new_window(
                     name,
@@ -831,6 +830,15 @@ impl Server {
                     None => self.session.find_source(source.as_deref())?,
                 };
                 self.session.swap_panes(source, target, detached);
+            }
+            Command::SwapWindow {
+                source,
+                target,
+                detached,
+            } => {
+                let target = self.session.find_window(target.as_deref())?;
+                let source = self.session.find_source_window(source.as_deref())?;
+                self.session.swap_windows(source, target, detached);
             }
             Command::ToggleZoom { target } => {
                 let id = self.session.find_pane(target.as_deref())?;

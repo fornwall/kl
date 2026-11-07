@@ -49,6 +49,11 @@ pub const PREFIX_TABLE: &[Binding] = &[
         "Rename current window",
     ),
     bind("-", "delete-buffer", "Delete the most recent paste buffer"),
+    bind(
+        ".",
+        "command-prompt \"move-window -t \\\"%%\\\"\"",
+        "Move the current window",
+    ),
     bind("0", "select-window -t :=0", "Select window 0"),
     bind("1", "select-window -t :=1", "Select window 1"),
     bind("2", "select-window -t :=2", "Select window 2"),

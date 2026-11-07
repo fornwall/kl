@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::layout::{self, Layout, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
-use crate::command::{Direction, Place};
+use crate::command::{Beside, Direction, MoveWindow, Place};
 use crate::ghostty::{DEFAULT_POINTER_SHAPE, Link, MODE_SGR_PIXELS, OuterColors, Progress};
 use crate::sys::WinSize;
 
@@ -382,6 +382,31 @@ impl Session {
             .unwrap_or(0)
     }
 
+    /// Makes room at `index` by moving up the windows in a row from there.
+    /// Returns false if there is no end to them.
+    fn shuffle_up(&mut self, index: u32) -> bool {
+        let Some(free) = (index..=u32::MAX).find(|at| self.window_at(*at).is_none()) else {
+            return false;
+        };
+        let moved = |at: u32| at + u32::from((index..free).contains(&at));
+        for window in &mut self.windows {
+            window.index = moved(window.index);
+        }
+        self.current = moved(self.current);
+        self.last = self.last.map(moved);
+        true
+    }
+
+    /// Makes room right after or before a window, and returns the index that
+    /// leaves free.
+    fn index_beside(&mut self, window: u32, side: Beside) -> Option<u32> {
+        let index = match side {
+            Beside::After => window.checked_add(1)?,
+            Beside::Before => window,
+        };
+        self.shuffle_up(index).then_some(index)
+    }
+
     /// Opens a window at `index`, or else at the first one free, and returns
     /// its pane.
     pub fn new_window(
@@ -513,6 +538,138 @@ impl Session {
             self.panes.remove(&id);
         }
         self.after_window_removed(window.index);
+    }
+
+    /// Moves a window to `index`, or else to the first one free, replacing what
+    /// is there if `kill`. Unless `detached`, it becomes the current window.
+    fn move_window(
+        &mut self,
+        source: u32,
+        index: Option<u32>,
+        kill: bool,
+        detached: bool,
+    ) -> Result<(), String> {
+        let index = index.unwrap_or_else(|| self.free_index());
+        let mut detached = detached;
+        if index == source {
+            return Err(format!("same index: {index}"));
+        }
+        if self.window_at(index).is_some() {
+            if !kill {
+                return Err(format!("index in use: {index}"));
+            }
+            // A window that was on display leaves something to replace it.
+            detached &= self.current != index;
+            self.kill_window(index);
+        }
+        let current = self.current == source;
+        if current && detached {
+            self.report_focus(false);
+        }
+        if let Some(window) = self.window_at_mut(source) {
+            window.index = index;
+        }
+        self.windows.sort_by_key(|window| window.index);
+        if current && !detached {
+            self.current = index;
+        } else {
+            self.after_window_removed(source);
+            if !detached {
+                self.select_window(index);
+            }
+        }
+        self.repaint = true;
+        Ok(())
+    }
+
+    /// Where a new window goes, given the index a target came down to, if any.
+    /// Next to a window, that leaves the other windows moved up to make room.
+    pub fn new_window_index(
+        &mut self,
+        index: Option<u32>,
+        next_to: Option<Beside>,
+    ) -> Result<Option<u32>, String> {
+        let taken = index.filter(|index| self.window_at(*index).is_some());
+        match (
+            next_to.filter(|_| index.is_none() || taken.is_some()),
+            taken,
+        ) {
+            (Some(side), _) => {
+                let window = taken.map_or_else(|| self.find_window(None), Ok)?;
+                let index = self.index_beside(window, side);
+                index
+                    .map(Some)
+                    .ok_or_else(|| format!("create window failed: index {window} in use"))
+            }
+            (None, Some(index)) => Err(format!("create window failed: index {index} in use")),
+            (None, None) => Ok(index),
+        }
+    }
+
+    /// Runs `move-window`. A target with `-r` is about the session, and one that
+    /// is not the session is quietly nothing to do.
+    pub fn run_move_window(&mut self, moving: MoveWindow) -> Result<(), String> {
+        let mut source = self.find_window(moving.source.as_deref())?;
+        if moving.renumber {
+            let target = moving.target.as_deref();
+            if Self::check_session(target.map(|target| target.trim_end_matches(':'))).is_ok() {
+                self.renumber_windows();
+            }
+            return Ok(());
+        }
+        let index = moving.target.map(|target| self.find_index(&target));
+        let mut index = index.transpose()?.flatten();
+        if let Some(side) = moving.next_to {
+            let taken = index.filter(|index| self.window_at(*index).is_some());
+            let next_to = taken.map_or_else(|| self.find_window(None), Ok)?;
+            // Making room can move the window itself.
+            let id = self.window_at(source).map(|window| window.id);
+            index = self.index_beside(next_to, side);
+            let window = self.windows.iter().find(|window| Some(window.id) == id);
+            source = window.map_or(source, |window| window.index);
+            if index.is_none() {
+                return Err(format!("index in use: {next_to}"));
+            }
+        }
+        self.move_window(source, index, moving.kill, moving.detached)
+    }
+
+    /// Numbers the windows from zero, in the order they are in.
+    fn renumber_windows(&mut self) {
+        let (current, last) = (self.current, self.last);
+        for (index, window) in (0..).zip(&mut self.windows) {
+            if window.index == current {
+                self.current = index;
+            }
+            if Some(window.index) == last {
+                self.last = Some(index);
+            }
+            window.index = index;
+        }
+        self.repaint = true;
+    }
+
+    /// Puts two windows at each other's index. What is on display stays at its
+    /// index, while with `detached` the source window stays on display.
+    pub fn swap_windows(&mut self, source: u32, target: u32, detached: bool) {
+        if source == target {
+            return;
+        }
+        let before = self.active_id();
+        for window in &mut self.windows {
+            if window.index == source {
+                window.index = target;
+            } else if window.index == target {
+                window.index = source;
+            }
+        }
+        self.windows.sort_by_key(|window| window.index);
+        if detached && self.current != target {
+            self.last = Some(self.current);
+            self.current = target;
+        }
+        self.report_focus_change(before);
+        self.select_window(self.current);
     }
 
     /// Tells the active pane that it gained or lost the keyboard.
@@ -843,6 +1000,254 @@ mod tests {
             layout: None,
             next_name: None,
         }
+    }
+
+    /// A session with windows at these indexes, named after them, without any
+    /// programs running: the window at `current` shows, and `last` came before.
+    fn session(indexes: &[u32], current: u32, last: Option<u32>) -> Session {
+        let mut session = Session::new(String::new());
+        session.windows = (0..)
+            .zip(indexes)
+            .map(|(id, index)| Window {
+                id,
+                index: *index,
+                name: index.to_string(),
+                root: Node::Leaf(id),
+                active: id,
+                ..window()
+            })
+            .collect();
+        session.current = current;
+        session.last = last;
+        session
+    }
+
+    /// The windows as `#{window_index}:#{window_name}#{window_flags}` has them.
+    fn listed(session: &Session) -> String {
+        let line = |window: &Window| {
+            let flags = session.window_flags(window);
+            format!("{}:{}{flags}", window.index, window.name)
+        };
+        let lines: Vec<String> = session.windows.iter().map(line).collect();
+        lines.join(" ")
+    }
+
+    /// Windows 0, 1, 2 and 5, in window 1 after window 0: what the cases below,
+    /// which come from running tmux, start from.
+    fn four_windows() -> Session {
+        session(&[0, 1, 2, 5], 1, Some(0))
+    }
+
+    fn moved(moving: MoveWindow) -> String {
+        let mut session = four_windows();
+        session.run_move_window(moving).unwrap();
+        listed(&session)
+    }
+
+    #[test]
+    fn moves_windows_like_tmux() {
+        let moving = MoveWindow::default;
+        assert_eq!(moved(moving()), "0:0- 2:2 3:1* 5:5");
+        let target = Some("3".to_owned());
+        assert_eq!(
+            moved(MoveWindow { target, ..moving() }),
+            "0:0- 2:2 3:1* 5:5"
+        );
+        assert_eq!(
+            moved(MoveWindow {
+                source: Some("0".to_owned()),
+                target: Some("3".to_owned()),
+                ..moving()
+            }),
+            "1:1- 2:2 3:0* 5:5"
+        );
+        assert_eq!(
+            moved(MoveWindow {
+                target: Some("5".to_owned()),
+                kill: true,
+                ..moving()
+            }),
+            "0:0- 2:2 5:1*"
+        );
+    }
+
+    #[test]
+    fn staying_behind_goes_to_the_last_window_if_the_current_one_moves() {
+        let mut session = four_windows();
+        let moving = MoveWindow {
+            target: Some("3".to_owned()),
+            detached: true,
+            ..MoveWindow::default()
+        };
+        session.run_move_window(moving).unwrap();
+        assert_eq!(listed(&session), "0:0* 2:2 3:1 5:5");
+    }
+
+    #[test]
+    fn staying_behind_keeps_the_current_window() {
+        let mut session = four_windows();
+        let moving = MoveWindow {
+            source: Some("0".to_owned()),
+            target: Some("3".to_owned()),
+            detached: true,
+            ..MoveWindow::default()
+        };
+        session.run_move_window(moving).unwrap();
+        assert_eq!(listed(&session), "1:1* 2:2 3:0 5:5");
+    }
+
+    #[test]
+    fn a_window_on_its_own_stays_current_wherever_it_goes() {
+        let mut session = session(&[0], 0, None);
+        let moving = MoveWindow {
+            target: Some("3".to_owned()),
+            detached: true,
+            ..MoveWindow::default()
+        };
+        session.run_move_window(moving).unwrap();
+        assert_eq!(listed(&session), "3:0*");
+    }
+
+    #[test]
+    fn replacing_what_is_on_display_selects_what_replaces_it() {
+        let mut session = four_windows();
+        let moving = MoveWindow {
+            source: Some("0".to_owned()),
+            target: Some("1".to_owned()),
+            kill: true,
+            detached: true,
+            ..MoveWindow::default()
+        };
+        session.run_move_window(moving).unwrap();
+        assert_eq!(listed(&session), "1:0* 2:2 5:5");
+    }
+
+    #[test]
+    fn moving_says_what_is_in_the_way() {
+        let mut session = four_windows();
+        let moving = |target: &str| MoveWindow {
+            target: Some(target.to_owned()),
+            ..MoveWindow::default()
+        };
+        let error = session.run_move_window(moving("5")).unwrap_err();
+        assert_eq!(error, "index in use: 5");
+        let error = session.run_move_window(moving("1")).unwrap_err();
+        assert_eq!(error, "same index: 1");
+        let error = session.run_move_window(moving("99x")).unwrap_err();
+        assert_eq!(error, "can't find window: 99x");
+        let error = session.run_move_window(moving("+1")).unwrap_err();
+        assert_eq!(error, "index in use: 2");
+        let same = MoveWindow {
+            kill: true,
+            ..moving("1")
+        };
+        assert_eq!(session.run_move_window(same).unwrap_err(), "same index: 1");
+        assert_eq!(listed(&session), "0:0- 1:1* 2:2 5:5");
+    }
+
+    #[test]
+    fn moves_windows_next_to_others_like_tmux() {
+        let moving = |source: Option<&str>, target: Option<&str>, side| MoveWindow {
+            source: source.map(str::to_owned),
+            target: target.map(str::to_owned),
+            next_to: Some(side),
+            ..MoveWindow::default()
+        };
+        let (after, before) = (Beside::After, Beside::Before);
+        assert_eq!(moved(moving(None, Some("0"), after)), "0:0- 1:1* 3:2 5:5");
+        assert_eq!(
+            moved(moving(Some("5"), Some("0"), after)),
+            "0:0 1:5* 2:1- 3:2"
+        );
+        assert_eq!(
+            moved(moving(Some("5"), Some("1"), before)),
+            "0:0 1:5* 2:1- 3:2"
+        );
+        assert_eq!(moved(moving(None, None, after)), "0:0- 2:1* 3:2 5:5");
+        assert_eq!(moved(moving(None, None, before)), "0:0- 1:1* 3:2 5:5");
+        // An index without a window comes down to the current window.
+        assert_eq!(moved(moving(None, Some("3"), after)), "0:0- 2:1* 3:2 5:5");
+        assert_eq!(
+            moved(moving(Some("5"), Some("3"), before)),
+            "0:0 1:5* 2:1- 3:2"
+        );
+    }
+
+    #[test]
+    fn numbers_windows_again_without_the_gaps() {
+        let renumber = |target: Option<&str>| {
+            let mut session = session(&[1, 2, 5, 7], 5, Some(7));
+            let moving = MoveWindow {
+                target: target.map(str::to_owned),
+                renumber: true,
+                ..MoveWindow::default()
+            };
+            session.run_move_window(moving).unwrap();
+            listed(&session)
+        };
+        assert_eq!(renumber(None), "0:1 1:2 2:5* 3:7-");
+        assert_eq!(renumber(Some("kl")), "0:1 1:2 2:5* 3:7-");
+        assert_eq!(renumber(Some("kl:")), "0:1 1:2 2:5* 3:7-");
+        assert_eq!(renumber(Some("nosuch")), "1:1 2:2 5:5* 7:7-");
+    }
+
+    #[test]
+    fn swaps_windows_like_tmux() {
+        let swapped = |source, target, detached| {
+            let mut session = four_windows();
+            session.swap_windows(source, target, detached);
+            listed(&session)
+        };
+        assert_eq!(swapped(1, 2, false), "0:0- 1:2* 2:1 5:5");
+        assert_eq!(swapped(1, 2, true), "0:0 1:2- 2:1* 5:5");
+        assert_eq!(swapped(2, 0, false), "0:2- 1:1* 2:0 5:5");
+        assert_eq!(swapped(2, 0, true), "0:2* 1:1- 2:0 5:5");
+        assert_eq!(swapped(1, 1, true), "0:0- 1:1* 2:2 5:5");
+    }
+
+    #[test]
+    fn finds_room_for_new_windows_like_tmux() {
+        let index = |target, side| {
+            let mut session = four_windows();
+            let index = session.new_window_index(target, side).unwrap();
+            (index, listed(&session))
+        };
+        let before = Some(Beside::Before);
+        let after = Some(Beside::After);
+        assert_eq!(index(None, None), (None, "0:0- 1:1* 2:2 5:5".to_owned()));
+        assert_eq!(index(Some(3), None).0, Some(3));
+        assert_eq!(
+            index(None, after),
+            (Some(2), "0:0- 1:1* 3:2 5:5".to_owned())
+        );
+        assert_eq!(index(Some(5), after).0, Some(6));
+        assert_eq!(
+            index(Some(1), before),
+            (Some(1), "0:0- 2:1* 3:2 5:5".to_owned())
+        );
+        assert_eq!(index(Some(3), after).0, Some(3));
+        assert_eq!(index(Some(3), before).0, Some(3));
+
+        let mut session = four_windows();
+        let error = session.new_window_index(Some(1), None).unwrap_err();
+        assert_eq!(error, "create window failed: index 1 in use");
+    }
+
+    #[test]
+    fn there_is_no_room_past_the_highest_index() {
+        let mut session = session(&[u32::MAX], u32::MAX, None);
+        let side = Some(Beside::After);
+        let error = session.new_window_index(Some(u32::MAX), side).unwrap_err();
+        assert_eq!(
+            error,
+            format!("create window failed: index {} in use", u32::MAX)
+        );
+        let moving = MoveWindow {
+            target: Some(u32::MAX.to_string()),
+            next_to: Some(Beside::Before),
+            ..MoveWindow::default()
+        };
+        assert!(session.run_move_window(moving).is_err());
     }
 
     #[test]

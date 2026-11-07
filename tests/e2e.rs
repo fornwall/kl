@@ -891,6 +891,63 @@ fn three_windows() -> Screen {
     screen
 }
 
+/// The windows with their flags, on a line.
+fn windows_of(screen: &Screen) -> String {
+    let format = "#{window_index}:#{window_name}#{window_flags}";
+    let lines = output_of(screen, &["list-windows", "-F", format]);
+    lines.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn moves_windows_around() {
+    let mut screen = three_windows();
+    assert_eq!(output_of(&screen, &["move-window", "-t", "5"]), "");
+    screen.wait_for_text("5:c*");
+    assert_eq!(windows_of(&screen), "0:a 1:b- 5:c*");
+
+    assert_eq!(output_of(&screen, &["swapw", "-s", "0", "-t", "1"]), "");
+    screen.wait_for_text("0:b 1:a-");
+    assert_eq!(windows_of(&screen), "0:b 1:a- 5:c*");
+
+    let args = ["new-window", "-a", "-d", "-t", "0", "-n", "d"];
+    assert_eq!(output_of(&screen, &args), "");
+    assert_eq!(windows_of(&screen), "0:b 1:d 2:a- 5:c*");
+
+    assert_eq!(output_of(&screen, &["move-window", "-r"]), "");
+    screen.wait_for_text("3:c*");
+    assert_eq!(windows_of(&screen), "0:b 1:d 2:a- 3:c*");
+
+    assert_eq!(
+        error_of(&screen, &["move-window", "-t", "1"]),
+        "kl: index in use: 1\n"
+    );
+}
+
+#[test]
+fn swapping_shows_the_other_window_unless_it_goes_along() {
+    let mut screen = three_windows();
+    screen.run("echo here");
+    screen.wait_for_text("here");
+
+    assert_eq!(output_of(&screen, &["swap-window", "-t", "0"]), "");
+    screen.wait_for_no_text("here");
+    assert_eq!(windows_of(&screen), "0:c 1:b- 2:a*");
+
+    assert_eq!(output_of(&screen, &["swap-window", "-d", "-t", "0"]), "");
+    screen.wait_for_text("0:a*");
+    assert_eq!(windows_of(&screen), "0:a* 1:b 2:c-");
+}
+
+#[test]
+fn moves_the_window_from_the_prompt() {
+    let mut screen = three_windows();
+    screen.prefix(".");
+    screen.wait_for_text("(move-window)");
+    screen.type_text("7");
+    screen.enter();
+    screen.wait_for_text("7:c*");
+}
+
 #[test]
 fn chooses_a_window_from_a_list() {
     let mut screen = three_windows();
