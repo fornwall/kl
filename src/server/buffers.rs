@@ -293,7 +293,6 @@ impl Server {
         let rows: Vec<ListRow> = self.buffers.list.iter().enumerate().map(row).collect();
         if rows.is_empty() {
             self.client().ui.list = None;
-            self.session.repaint = true;
         } else {
             let selected = selected.min(rows.len() - 1);
             self.client().ui.list = Some(List::new(rows, selected));

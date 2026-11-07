@@ -1,5 +1,6 @@
-//! Composes the panes, borders and status line into one grid, then sends the
-//! outer terminal only what changed since the last frame.
+//! Composes the panes and borders into one grid that all clients share. For each
+//! client that then gets what is its own on top, such as the status line, and the
+//! outer terminal hears only what changed since its last frame.
 
 use super::images::Images;
 use super::layout::{Divider, Rect};
@@ -207,6 +208,93 @@ pub struct StatusEntry {
 /// Where the cursor belongs and its DECSCUSR style, if it is to be seen at all.
 type CursorTarget = Option<(u16, u16, u8)>;
 
+/// The panes and the lines between them. Reading a terminal takes note of what
+/// has been drawn, so this happens once however many clients there are, and a
+/// client that falls behind just gets what stands here by the time it can draw.
+#[derive(Default)]
+pub struct Canvas {
+    grid: Grid,
+}
+
+impl Canvas {
+    /// Brings it up to date with the session.
+    pub fn update(&mut self, session: &mut Session) {
+        let area = session.area();
+        if self.grid.cols != area.width || self.grid.rows != area.height {
+            self.grid = Grid::new(area.width, area.height);
+            session.repaint = true;
+        }
+        let repaint = std::mem::take(&mut session.repaint);
+        if repaint {
+            self.grid.clear();
+        }
+        let visible = session.visible_panes();
+        for (id, rect) in &visible {
+            if let Some(pane) = session.panes.get_mut(id) {
+                let all = repaint || std::mem::take(&mut pane.redraw);
+                pane.terminal.refresh();
+                let grid = &mut self.grid;
+                pane.terminal
+                    .draw_rows(all, |y, cells| draw_row(grid, *rect, y, cells));
+                if let Some(mode) = pane.copy_mode {
+                    pane.redraw = true;
+                    let position = pane.terminal.scrollbar();
+                    let matches = pane.terminal.visible_matches();
+                    let top = position.map_or(0, |bar| bar.offset);
+                    let top = u32::try_from(top).unwrap_or(u32::MAX);
+                    draw_matches(grid, *rect, top, (mode.x, mode.y), &matches);
+                    draw_position(grid, *rect, position, pane.terminal.match_count());
+                }
+            }
+        }
+        if let Some(window) = session.window()
+            && !window.zoomed
+        {
+            let active = visible.iter().find(|(id, _)| *id == window.active);
+            let active = active.map(|(_, rect)| *rect).unwrap_or_default();
+            let marked = visible
+                .iter()
+                .find(|(id, _)| session.marked_pane() == Some(*id))
+                .map(|(_, rect)| *rect);
+            self.draw_borders(&window.root.dividers(area), active, marked);
+        }
+    }
+
+    fn draw_borders(&mut self, dividers: &[Divider], active: Rect, marked: Option<Rect>) {
+        let on_line = |x: Option<u16>, y: Option<u16>| match (x, y) {
+            (Some(x), Some(y)) => dividers.iter().any(|d| d.line.contains(x, y)),
+            _ => false,
+        };
+        for divider in dividers {
+            let line = divider.line;
+            for y in line.y..line.y.saturating_add(line.height) {
+                for x in line.x..line.x.saturating_add(line.width) {
+                    let c = border_char([
+                        on_line(Some(x), y.checked_sub(1)),
+                        on_line(Some(x), y.checked_add(1)),
+                        on_line(x.checked_sub(1), Some(y)),
+                        on_line(x.checked_add(1), Some(y)),
+                    ]);
+                    let mut style = border_style(touches(active, x, y));
+                    if marked.is_some_and(|marked| touches(marked, x, y)) {
+                        style.flags |= STYLE_INVERSE;
+                    }
+                    let mut encoded = [0; 4];
+                    self.grid.set(
+                        x,
+                        y,
+                        Cell {
+                            text: Text::new(c.encode_utf8(&mut encoded)),
+                            style,
+                            ..Cell::default()
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Renderer {
     shown: Grid,
@@ -229,28 +317,33 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    fn resize(&mut self, cols: u16, rows: u16) -> bool {
-        if self.next.cols == cols && self.next.rows == rows {
-            return false;
+    fn resize(&mut self, cols: u16, rows: u16) {
+        if self.next.cols != cols || self.next.rows != rows {
+            self.next = Grid::new(cols, rows);
+            self.shown = Grid::new(cols, rows);
+            self.reset = true;
         }
-        self.next = Grid::new(cols, rows);
-        self.shown = Grid::new(cols, rows);
-        self.reset = true;
-        true
+    }
+
+    /// Starts the next frame from the panes, which leaves nothing of what was on
+    /// top of them in the last one.
+    fn copy_canvas(&mut self, canvas: &Canvas) {
+        for (cell, canvas) in self.next.cells.iter_mut().zip(&canvas.grid.cells) {
+            cell.clone_from(canvas);
+        }
     }
 
     /// Produces the bytes that bring the terminal up to date.
     pub fn frame(
         &mut self,
+        canvas: &Canvas,
         session: &mut Session,
         ui: &Ui,
         pointer: Option<(u16, u16)>,
     ) -> Vec<u8> {
         let (cols, rows) = (session.size.cols, session.size.rows);
-        if self.resize(cols, rows) || self.reset {
-            session.repaint = true;
-        }
-        self.compose(session);
+        self.resize(cols, rows);
+        self.copy_canvas(canvas);
         if ui.pane_numbers.is_some() {
             self.draw_pane_numbers(session);
         }
@@ -288,44 +381,7 @@ impl Renderer {
         frame
     }
 
-    fn compose(&mut self, session: &mut Session) {
-        let repaint = std::mem::take(&mut session.repaint);
-        if repaint {
-            self.next.clear();
-        }
-        let visible = session.visible_panes();
-        for (id, rect) in &visible {
-            if let Some(pane) = session.panes.get_mut(id) {
-                let all = repaint || std::mem::take(&mut pane.redraw);
-                pane.terminal.refresh();
-                let next = &mut self.next;
-                pane.terminal
-                    .draw_rows(all, |y, cells| draw_row(next, *rect, y, cells));
-                if let Some(mode) = pane.copy_mode {
-                    pane.redraw = true;
-                    let position = pane.terminal.scrollbar();
-                    let matches = pane.terminal.visible_matches();
-                    let top = position.map_or(0, |bar| bar.offset);
-                    let top = u32::try_from(top).unwrap_or(u32::MAX);
-                    draw_matches(next, *rect, top, (mode.x, mode.y), &matches);
-                    draw_position(next, *rect, position, pane.terminal.match_count());
-                }
-            }
-        }
-        if let Some(window) = session.window()
-            && !window.zoomed
-        {
-            let active = visible.iter().find(|(id, _)| *id == window.active);
-            let active = active.map(|(_, rect)| *rect).unwrap_or_default();
-            let marked = visible
-                .iter()
-                .find(|(id, _)| session.marked_pane() == Some(*id))
-                .map(|(_, rect)| *rect);
-            self.draw_borders(&window.root.dividers(session.area()), active, marked);
-        }
-    }
-
-    /// tmux's `display-panes`. The rows come back by repainting when it ends.
+    /// tmux's `display-panes`.
     fn draw_pane_numbers(&mut self, session: &Session) {
         let Some(window) = session.window() else {
             return;
@@ -339,7 +395,7 @@ impl Renderer {
         }
     }
 
-    /// Covers the panes, whose rows come back by repainting when the list goes.
+    /// Covers the panes.
     fn draw_list(&mut self, list: &List, area: Rect) {
         let height = usize::from(area.height);
         let top = list.top(height);
@@ -366,40 +422,6 @@ impl Renderer {
             self.next.split_wide(x, area.y);
             self.next
                 .put_str(x, area.y, &text, mode_style(), area.width);
-        }
-    }
-
-    fn draw_borders(&mut self, dividers: &[Divider], active: Rect, marked: Option<Rect>) {
-        let on_line = |x: Option<u16>, y: Option<u16>| match (x, y) {
-            (Some(x), Some(y)) => dividers.iter().any(|d| d.line.contains(x, y)),
-            _ => false,
-        };
-        for divider in dividers {
-            let line = divider.line;
-            for y in line.y..line.y.saturating_add(line.height) {
-                for x in line.x..line.x.saturating_add(line.width) {
-                    let c = border_char([
-                        on_line(Some(x), y.checked_sub(1)),
-                        on_line(Some(x), y.checked_add(1)),
-                        on_line(x.checked_sub(1), Some(y)),
-                        on_line(x.checked_add(1), Some(y)),
-                    ]);
-                    let mut style = border_style(touches(active, x, y));
-                    if marked.is_some_and(|marked| touches(marked, x, y)) {
-                        style.flags |= STYLE_INVERSE;
-                    }
-                    let mut encoded = [0; 4];
-                    self.next.set(
-                        x,
-                        y,
-                        Cell {
-                            text: Text::new(c.encode_utf8(&mut encoded)),
-                            style,
-                            ..Cell::default()
-                        },
-                    );
-                }
-            }
         }
     }
 

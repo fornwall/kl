@@ -313,7 +313,6 @@ impl Server {
 
     pub fn hide_pane_numbers(&mut self) {
         self.client().ui.pane_numbers = None;
-        self.session.repaint = true;
         self.dirty = true;
     }
 
@@ -366,7 +365,6 @@ impl Server {
 
     fn close_list(&mut self) {
         self.client().ui.list = None;
-        self.session.repaint = true;
         self.dirty = true;
     }
 

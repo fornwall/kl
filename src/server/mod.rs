@@ -33,7 +33,7 @@ use buffers::Buffers;
 use client::Client;
 use layout::PaneId;
 use pane::Activity;
-use render::osc_text;
+use render::{Canvas, osc_text};
 pub use restart::STATE_VERSION;
 use session::{Monitor, NameCheck, Session};
 
@@ -138,6 +138,7 @@ pub struct Server {
     /// What [`Server::client`] gives without a client, which nobody gets to see.
     nobody: Client,
     session: Session,
+    canvas: Canvas,
     buffers: Buffers,
     /// Something changed that may need a new frame.
     dirty: bool,
@@ -231,6 +232,7 @@ pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
         acting: None,
         nobody: Client::default(),
         session,
+        canvas: Canvas::default(),
         buffers,
         dirty: false,
         last_frame: now,
@@ -666,11 +668,15 @@ impl Server {
         }
         self.dirty = false;
         self.last_frame = Instant::now();
+        self.canvas.update(&mut self.session);
         for connection in &mut self.connections {
             if let Some(client) = &mut connection.client {
-                let frame = client
-                    .renderer
-                    .frame(&mut self.session, &client.ui, client.pointer);
+                let frame = client.renderer.frame(
+                    &self.canvas,
+                    &mut self.session,
+                    &client.ui,
+                    client.pointer,
+                );
                 for part in frame.chunks(OUTPUT_PIECE) {
                     connection.send(&ServerMessage::Output(part.to_vec()));
                 }
