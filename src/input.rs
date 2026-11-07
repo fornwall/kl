@@ -15,6 +15,10 @@ use crate::ghostty::{KeyAction, KeyInput, MouseAction, MouseButton, Rgb};
 /// A pasted text is capped so a broken terminal cannot grow the buffer forever.
 const MAX_PASTE: usize = 64 * 1024 * 1024;
 
+/// Nothing a terminal reports comes close to this, so a longer sequence is not
+/// going to end, and must not grow the buffer forever either.
+const MAX_SEQUENCE: usize = 1024 * 1024;
+
 const PASTE_END: &[u8] = b"\x1b[201~";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -226,9 +230,8 @@ impl Parser {
         let Some(paste) = self.paste.as_mut() else {
             return (0, None);
         };
-        if paste.len() + text.len() <= MAX_PASTE {
-            paste.extend_from_slice(&text);
-        }
+        let room = MAX_PASTE.saturating_sub(paste.len());
+        paste.extend_from_slice(text.get(..room).unwrap_or(&text));
         if end.is_none() {
             return (safe, None);
         }
@@ -325,36 +328,58 @@ fn parse_text(input: &[u8]) -> Step {
         0xf0..=0xf7 => 4,
         _ => return Step::Consumed(1, None),
     };
-    let Some(character) = input.get(..len) else {
-        return Step::Incomplete;
-    };
-    std::str::from_utf8(character).map_or(Step::Consumed(1, None), |text| {
-        Step::Consumed(len, Some(Event::Key(KeyEvent::text(text.to_owned()))))
-    })
+    match std::str::from_utf8(input.get(..len).unwrap_or(input)) {
+        Ok(text) => Step::Consumed(len, Some(Event::Key(KeyEvent::text(text.to_owned())))),
+        Err(error) if error.error_len().is_none() => Step::Incomplete,
+        Err(_) => Step::Consumed(1, None),
+    }
 }
 
 fn parse_ss3(rest: &[u8]) -> Step {
-    let Some(&letter) = rest.first() else {
-        return Step::Incomplete;
-    };
-    Step::Consumed(
-        3,
-        key::from_final_letter(letter).map(|key| key_event(key, 0)),
-    )
+    match rest {
+        [] => Step::Incomplete,
+        // As with CSI, an escape cancels the sequence and starts a new one.
+        [0x1b, ..] => Step::Consumed(2, None),
+        [letter, ..] => Step::Consumed(
+            3,
+            key::from_final_letter(*letter).map(|key| key_event(key, 0)),
+        ),
+    }
 }
 
-/// Consumes a string sequence, which ends with BEL or ST.
+/// Consumes a string sequence, which ends with BEL or ST. Any other escape
+/// cancels it and starts a new sequence, as it does for the terminal itself.
+/// Without that, a string that never ends would swallow every key from then on,
+/// since keys are escape sequences too.
 fn parse_string(rest: &[u8], prefix: usize, handle: impl Fn(&[u8]) -> Option<Event>) -> Step {
-    let bel = rest.iter().position(|byte| *byte == 0x07);
-    let st = find(rest, b"\x1b\\");
-    let (end, terminator) = match (bel, st) {
-        (Some(bel), Some(st)) if st < bel => (st, 2),
-        (Some(bel), _) => (bel, 1),
-        (None, Some(st)) => (st, 2),
-        (None, None) => return Step::Incomplete,
+    let Some(end) = find_within_limit(rest, |byte| matches!(byte, 0x07 | 0x1b)) else {
+        return give_up_at_limit(rest, prefix);
     };
-    let body = rest.get(..end).unwrap_or(&[]);
-    Step::Consumed(prefix + end + terminator, handle(body))
+    let (body, tail) = rest.split_at(end);
+    match tail {
+        [0x07, ..] => Step::Consumed(prefix + end + 1, handle(body)),
+        [0x1b, b'\\', ..] => Step::Consumed(prefix + end + 2, handle(body)),
+        [0x1b] => Step::Incomplete,
+        _ => Step::Consumed(prefix + end, None),
+    }
+}
+
+/// Where the sequence in `rest` ends, if it does so within [`MAX_SEQUENCE`].
+fn find_within_limit(rest: &[u8], is_end: impl Fn(u8) -> bool) -> Option<usize> {
+    rest.iter()
+        .take(MAX_SEQUENCE)
+        .position(|byte| is_end(*byte))
+}
+
+/// What to do with a sequence without an end in sight. Consuming exactly up to
+/// the limit, rather than whatever is there, keeps this independent of how the
+/// input happened to arrive.
+const fn give_up_at_limit(rest: &[u8], prefix: usize) -> Step {
+    if rest.len() < MAX_SEQUENCE {
+        Step::Incomplete
+    } else {
+        Step::Consumed(prefix + MAX_SEQUENCE, None)
+    }
 }
 
 /// Replies to the color queries the client sends on attaching.
@@ -386,9 +411,9 @@ fn parse_color(color: &str) -> Option<Rgb> {
 }
 
 fn parse_csi(rest: &[u8]) -> Step {
-    let is_end = |byte: &u8| (0x40..=0x7e).contains(byte) || *byte == 0x1b;
-    let Some(end) = rest.iter().position(is_end) else {
-        return Step::Incomplete;
+    let is_end = |byte| (0x40..=0x7e).contains(&byte) || byte == 0x1b;
+    let Some(end) = find_within_limit(rest, is_end) else {
+        return give_up_at_limit(rest, 2);
     };
     let Some((&last, params)) = rest.get(..=end).and_then(<[u8]>::split_last) else {
         return Step::Incomplete;
@@ -557,6 +582,7 @@ fn parse_mouse(params: &str, pressed: bool) -> Option<MouseEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ghostty::Terminal;
 
     fn events(bytes: &[u8]) -> Vec<Event> {
         Parser::default().feed(bytes)
@@ -597,6 +623,12 @@ mod tests {
     fn skips_invalid_utf8() {
         assert_eq!(events(b"\xff"), []);
         assert_eq!(only_key(b"\xffa").text, "a");
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_hold_back_what_follows() {
+        assert_eq!(only_key(b"\xf0a").text, "a");
+        assert_eq!(only_key(b"\xe4\xb8a").text, "a");
     }
 
     #[test]
@@ -887,6 +919,144 @@ mod tests {
     #[test]
     fn an_escape_cancels_an_unfinished_sequence() {
         assert_eq!(only_key(b"\x1b[1;\x1b[A").key, key::ARROW_UP);
+    }
+
+    #[test]
+    fn an_escape_cancels_an_unfinished_ss3_sequence() {
+        assert_eq!(only_key(b"\x1bO\x1b[A").key, key::ARROW_UP);
+    }
+
+    #[test]
+    fn an_escape_cancels_an_unfinished_string() {
+        assert_eq!(only_key(b"\x1b]11;rgb:\x1b[A").key, key::ARROW_UP);
+        assert_eq!(only_key(b"\x1bPabc\x1b[97u").text, "");
+        // Whether it is the start of the terminator is yet to be seen.
+        let mut parser = Parser::default();
+        assert_eq!(parser.feed(b"\x1b]11;rgb:1/2/3\x1b"), []);
+        assert_eq!(
+            parser.feed(b"\\"),
+            [Event::Background(Rgb {
+                r: 17,
+                g: 34,
+                b: 51
+            })]
+        );
+    }
+
+    #[test]
+    fn a_sequence_that_never_ends_does_not_grow_the_buffer() {
+        for start in [&b"\x1b["[..], b"\x1b]", b"\x1bP"] {
+            let mut parser = Parser::default();
+            parser.feed(start);
+            let half = vec![b'0'; MAX_SEQUENCE / 2];
+            for _ in 0..3 {
+                parser.feed(&half);
+                assert!(parser.pending.len() <= MAX_SEQUENCE + start.len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_paste_over_the_limit_keeps_its_start() {
+        let mut parser = Parser::default();
+        parser.feed(b"\x1b[200~");
+        parser.feed(&vec![b'a'; MAX_PASTE - 1]);
+        parser.feed(b"bcd");
+        parser.feed(b"e");
+        assert!(matches!(
+            parser.feed(b"\x1b[201~").as_slice(),
+            [Event::Paste(text)] if text.len() == MAX_PASTE && text.last() == Some(&b'b')
+        ));
+    }
+
+    fn kitty_terminal() -> Terminal {
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        terminal.write(b"\x1b[>31u");
+        terminal
+    }
+
+    /// Every key with a code of its own, as Ghostty sends it to kl.
+    #[test]
+    fn reads_every_key_the_terminal_encodes() {
+        let mut terminal = kitty_terminal();
+        let mut encoded = 0;
+        for key in 1..=175 {
+            for mods in [
+                0,
+                MOD_SHIFT,
+                MOD_CTRL,
+                MOD_ALT,
+                MOD_SUPER,
+                MOD_CTRL | MOD_SHIFT,
+                MOD_CAPS_LOCK,
+                MOD_NUM_LOCK,
+            ] {
+                for action in [KeyAction::Press, KeyAction::Repeat, KeyAction::Release] {
+                    let bytes = terminal.encode_key(&KeyInput {
+                        action,
+                        key,
+                        mods,
+                        consumed_mods: 0,
+                        text: "",
+                        unshifted: 0,
+                    });
+                    // Keys for text need their character, which is the next test.
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    encoded += 1;
+                    let event = only_key(&bytes);
+                    assert_eq!(
+                        (event.key, event.mods, event.action),
+                        (key, mods, action),
+                        "{}",
+                        bytes.escape_ascii()
+                    );
+                }
+            }
+        }
+        assert!(encoded > 1500, "{encoded}");
+    }
+
+    /// Every key of a US layout with a character on it, typed in the ways
+    /// that matter for bindings and programs.
+    #[test]
+    fn reads_every_character_the_terminal_encodes() {
+        let mut terminal = kitty_terminal();
+        for unshifted in (' '..='~').filter(|c| !c.is_ascii_uppercase()) {
+            let key = key::from_codepoint(u32::from(unshifted));
+            if key == key::UNIDENTIFIED {
+                continue;
+            }
+            let shifted = key::shifted(unshifted);
+            let plain = unshifted.to_string();
+            let upper = shifted.to_string();
+            for (mods, text, binding) in [
+                (0, plain.as_str(), unshifted),
+                (MOD_SHIFT, upper.as_str(), shifted),
+                (MOD_CTRL, "", unshifted),
+                (MOD_ALT, plain.as_str(), unshifted),
+            ] {
+                let bytes = terminal.encode_key(&KeyInput {
+                    action: KeyAction::Press,
+                    key,
+                    mods,
+                    consumed_mods: if text.is_empty() { 0 } else { mods & MOD_SHIFT },
+                    text,
+                    unshifted: u32::from(unshifted),
+                });
+                let event = only_key(&bytes);
+                let context = bytes.escape_ascii();
+                assert_eq!(event.key, key, "{context}");
+                assert_eq!(event.mods, mods, "{context}");
+                // Text that alt went into is not reported, just the key.
+                let reported = if mods == MOD_ALT { "" } else { text };
+                assert_eq!(event.text, reported, "{context}");
+                assert_eq!(event.unshifted, u32::from(unshifted), "{context}");
+                assert_eq!(event.char(), Some(binding), "{context}");
+                assert_eq!(event.is_ctrl(unshifted), mods == MOD_CTRL, "{context}");
+            }
+        }
     }
 
     #[test]
