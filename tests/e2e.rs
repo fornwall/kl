@@ -71,9 +71,10 @@ impl Scratch {
         let dir = std::env::temp_dir().join(format!("kl-e2e-{}-{id}", std::process::id()));
         fs::create_dir_all(dir.join("bin")).unwrap();
         // Panes run a login shell, which reads what the system has for those, and
-        // on macOS that sets a prompt of its own. This one is by the same name.
+        // on macOS that sets a prompt of its own. This one is by the same name. It
+        // sets the prompt itself, as bash forgets it when not interactive.
         let shell = dir.join("bin/sh");
-        fs::write(&shell, "#!/bin/sh\nexec /bin/sh -i\n").unwrap();
+        fs::write(&shell, "#!/bin/sh\nPS1='$ ' exec /bin/sh -i\n").unwrap();
         fs::set_permissions(&shell, Permissions::from_mode(0o755)).unwrap();
         Self(dir)
     }
