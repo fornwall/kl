@@ -31,7 +31,10 @@ fuzz_target!(|input: (&[u8], &[u8])| {
                 };
                 drop(terminal.encode_mouse(&input, COLS, ROWS));
             }
-            Event::Paste(text) => drop(terminal.encode_paste(&text)),
+            Event::Paste(text) => {
+                drop(terminal.encode_paste(&text, false));
+                drop(terminal.encode_paste(&text, true));
+            }
             Event::Focus(focused) => drop(terminal.encode_focus(focused)),
             _ => {}
         }
