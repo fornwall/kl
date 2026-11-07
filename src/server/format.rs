@@ -6,6 +6,7 @@ use std::path::Path;
 
 use super::client::Client;
 use super::layout::PaneId;
+use super::notation;
 use super::pane::Pane;
 use super::session::{SESSION_NAME, Session, Window};
 use crate::{ghostty, sys};
@@ -407,12 +408,16 @@ impl<'a> Context<'a> {
             "window_id" => format!("@{}", window.id),
             "window_index" => window.index.to_string(),
             "window_last_flag" => flag(session.last == Some(window.index)),
+            "window_layout" => notation::dump(window, &window.layout_order(area), area, false),
             "window_marked_flag" => {
                 let marked = session.marked_pane();
                 flag(marked.is_some_and(|id| window.root.contains(id)))
             }
             "window_name" => window.name.clone(),
             "window_panes" => window.root.panes(area).len().to_string(),
+            "window_visible_layout" => {
+                notation::dump(window, &window.layout_order(area), area, window.zoomed)
+            }
             "window_width" => area.width.to_string(),
             "window_zoomed_flag" => flag(window.zoomed),
             _ => return None,

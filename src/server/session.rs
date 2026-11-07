@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::layout::{self, Layout, Node, PaneId, Rect};
+use super::notation;
 use super::pane::{self, Pane, Spawn};
 use crate::command::{Beside, Direction, MoveWindow, Place, Resize, SplitKind};
 use crate::ghostty::{
@@ -43,6 +44,8 @@ pub struct Window {
     pub monitor: Monitor,
     /// The preset layout applied last.
     pub layout: Option<Layout>,
+    /// The layout from before the last `select-layout`, for `select-layout -o`.
+    pub old_layout: Option<String>,
     /// What looks like it is taking over the foreground, for [`Window::follow`].
     pub next_name: Option<String>,
 }
@@ -88,7 +91,7 @@ impl Window {
 
     /// The panes in the order that layouts place them. A mirrored layout has the
     /// main pane at the end, where tmux keeps it in front wherever it is drawn.
-    fn layout_order(&self, area: Rect) -> Vec<PaneId> {
+    pub fn layout_order(&self, area: Rect) -> Vec<PaneId> {
         let mut panes: Vec<PaneId> = self.root.panes(area).iter().map(|pane| pane.0).collect();
         if self.layout.is_some_and(Layout::is_mirrored)
             && let Node::Split { children, .. } = &self.root
@@ -489,6 +492,7 @@ impl Session {
             bell: false,
             monitor: Monitor::Off,
             layout: None,
+            old_layout: None,
             next_name: None,
         };
         self.next_window += 1;
@@ -888,6 +892,7 @@ impl Session {
                 bell: false,
                 monitor: Monitor::Off,
                 layout: None,
+                old_layout: None,
                 next_name: None,
             };
             self.next_window += 1;
@@ -954,6 +959,68 @@ impl Session {
                 self.relayout();
             }
         }
+    }
+
+    /// Takes note of how a window looks, for `select-layout -o` to go back to.
+    /// Returns what it could go back to until now.
+    pub fn remember_layout(&mut self, index: u32) -> Option<String> {
+        let area = self.area();
+        let window = self.window_at_mut(index)?;
+        let order = window.layout_order(area);
+        let now = notation::dump(window, &order, area, false);
+        window.old_layout.replace(now)
+    }
+
+    /// Applies a layout written down, or the one to go back to with `undo`.
+    fn apply_layout(&mut self, index: u32, text: &str) -> Result<(), String> {
+        let area = self.area();
+        let before = self.active_id();
+        let Some(window) = self.window_at_mut(index) else {
+            return Ok(());
+        };
+        let arranged = notation::arrange(text, &window.layout_order(area))?;
+        window.root = arranged.root;
+        // What is mirrored is about the panes being where that layout put them.
+        window.layout = window.layout.filter(|layout| !layout.is_mirrored());
+        if let Some(focus) = arranged.focus {
+            window.active = focus.active.unwrap_or(window.active);
+            window.last_active = focus.last.filter(|id| *id != window.active);
+        }
+        self.report_focus_change(before);
+        self.relayout();
+        Ok(())
+    }
+
+    /// Runs `select-layout`: a preset by name, or the last one without a name,
+    /// or else a layout written down. With `undo`, that is the layout from before
+    /// the last time, and each time this keeps the one it replaced for that.
+    pub fn select_layout_named(
+        &mut self,
+        id: PaneId,
+        name: Option<&str>,
+        undo: bool,
+    ) -> Result<(), String> {
+        let Some(window) = self.window_of(id) else {
+            return Ok(());
+        };
+        let index = window.index;
+        let last = window.layout;
+        self.unzoom(index);
+        let old = self.remember_layout(index);
+        let preset = name.map_or(last, Layout::find).filter(|_| !undo);
+        if let Some(layout) = preset {
+            self.select_layout(index, layout);
+            return Ok(());
+        }
+        let Some(text) = name.or_else(|| old.as_deref().filter(|_| undo)) else {
+            return Ok(());
+        };
+        self.apply_layout(index, text).map_err(|cause| {
+            if let Some(window) = self.window_at_mut(index) {
+                window.old_layout.clone_from(&old);
+            }
+            format!("{cause}: {text}")
+        })
     }
 
     /// Moves every pane on to the next place in its window, where the active
@@ -1076,6 +1143,7 @@ mod tests {
             bell: false,
             monitor: Monitor::Off,
             layout: None,
+            old_layout: None,
             next_name: None,
         }
     }

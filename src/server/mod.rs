@@ -11,6 +11,7 @@ mod images;
 mod keys;
 mod layout;
 mod motion;
+mod notation;
 mod pane;
 mod render;
 mod restart;

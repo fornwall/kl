@@ -32,10 +32,10 @@ const REPEAT_TIME: Duration = Duration::from_millis(500);
 const DISPLAY_MESSAGE: &str = "[#{session_name}] #{window_index}:#{window_name}, \
      current pane #{pane_index} - (%H:%M %d-%b-%y)";
 
-/// What `list-windows` shows by default, except for tmux's window layout.
+/// What `list-windows` shows by default.
 const LIST_WINDOWS: &str = "#{window_index}: #{window_name}#{window_flags} \
      (#{window_panes} panes) [#{window_width}x#{window_height}] \
-     #{window_id}#{?window_active, (active),}";
+     [layout #{window_layout}] #{window_id}#{?window_active, (active),}";
 
 /// What `list-panes` shows by default, except for tmux's history figures.
 const LIST_PANES: &str = "#{pane_index}: [#{pane_width}x#{pane_height}] \
@@ -752,9 +752,10 @@ impl Server {
                 let index = self.session.find_window(target.as_deref())?;
                 self.session.rotate_window(index, down);
             }
-            Command::SelectLayout { target, name } => {
+            Command::SelectLayout { target, name, undo } => {
                 let id = self.session.find_pane(target.as_deref())?;
-                self.select_layout(id, name.as_deref())?;
+                self.session
+                    .select_layout_named(id, name.as_deref(), undo)?;
             }
             Command::SelectPane { target, direction } => {
                 let id = self.session.find_pane(target.as_deref())?;
@@ -825,6 +826,9 @@ impl Server {
             Command::SpreadLayout { target } => {
                 let id = self.session.find_pane(target.as_deref())?;
                 let area = self.session.area();
+                if let Some(index) = self.session.window_of(id).map(|window| window.index) {
+                    self.session.remember_layout(index);
+                }
                 if let Some(window) = self.session.window_of_mut(id) {
                     window.zoomed = false;
                     window.root.spread(id, area);
@@ -874,27 +878,10 @@ impl Server {
             let from_nothing = if forward { first } else { last };
             let layout = window.layout.map(|layout| layout.step(forward));
             if let Some(layout) = layout.or(from_nothing) {
+                self.session.remember_layout(index);
                 self.session.select_layout(index, layout);
             }
         }
-    }
-
-    /// Applies the layout of a name, or else the one applied last.
-    fn select_layout(&mut self, id: PaneId, name: Option<&str>) -> Result<(), String> {
-        let Some(window) = self.session.window_of(id) else {
-            return Ok(());
-        };
-        let index = window.index;
-        let layout = match name {
-            Some(name) => {
-                Some(Layout::find(name).ok_or_else(|| format!("malformed layout header: {name}"))?)
-            }
-            None => window.layout,
-        };
-        if let Some(layout) = layout {
-            self.session.select_layout(index, layout);
-        }
-        Ok(())
     }
 
     /// What `-c` says, which is a format.

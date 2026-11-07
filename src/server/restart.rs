@@ -28,7 +28,7 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 9;
+pub const STATE_VERSION: u32 = 10;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
@@ -212,6 +212,8 @@ fn put_window(out: &mut Vec<u8>, window: &Window) {
         .layout
         .and_then(|layout| Layout::ALL.iter().position(|other| *other == layout));
     put_optional_u32(out, layout.and_then(|index| u32::try_from(index).ok()));
+    put_bool(out, window.old_layout.is_some());
+    proto::put_bytes(out, window.old_layout.as_deref().unwrap_or("").as_bytes());
 }
 
 fn take_window(reader: &mut Reader<'_>) -> Result<Window, Malformed> {
@@ -229,6 +231,11 @@ fn take_window(reader: &mut Reader<'_>) -> Result<Window, Malformed> {
         layout: take_optional_u32(reader)?
             .and_then(|index| usize::try_from(index).ok())
             .and_then(|index| Layout::ALL.get(index).copied()),
+        old_layout: {
+            let saved = reader.take_bool()?;
+            let text = reader.take_text()?;
+            saved.then_some(text)
+        },
         next_name: None,
     })
 }

@@ -309,7 +309,7 @@ fn divide(length: u16, shares: &[u32]) -> Vec<u16> {
 }
 
 /// The areas of the children of a split, leaving out the lines between them.
-fn child_areas(area: Rect, kind: SplitKind, shares: &[u32]) -> Vec<Rect> {
+pub fn child_areas(area: Rect, kind: SplitKind, shares: &[u32]) -> Vec<Rect> {
     let (mut x, mut y) = (area.x, area.y);
     divide(area.extent(kind), shares)
         .into_iter()

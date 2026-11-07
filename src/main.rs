@@ -59,10 +59,10 @@ Panes:
   swap-pane (swapp) [-dDU] [-s pane] [-t pane]  swap two panes
   break-pane (breakp) [-d] [-n name] [-P [-F format]] [-s pane] [-t index]
   join-pane (joinp, move-pane, movep) [-bdfhv] [-l size] [-s pane] [-t pane]
-  select-layout (selectl) [-Enp] [-t pane] [layout]  even-horizontal,
+  select-layout (selectl) [-Enop] [-t pane] [layout]  even-horizontal,
                                               even-vertical, main-horizontal,
-                                              main-vertical, tiled and the
-                                              -mirrored main ones
+                                              main-vertical, tiled, the -mirrored
+                                              main ones, or #{window_layout}
   next-layout (nextl), previous-layout (prevl) [-t pane]
   rotate-window (rotatew) [-D] [-t window]    move every pane on one place
   kill-pane (killp) [-a] [-t pane]

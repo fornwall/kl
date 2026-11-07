@@ -1914,6 +1914,178 @@ fn resizing_ends_a_zoom_even_if_nothing_changes_size() {
     assert_eq!(output_of(&screen, &zoomed), "0\n");
 }
 
+/// A window of 80x24 with a pane on the left of two stacked ones, in both of the
+/// notations of tmux, the second as it told a control client.
+const TWO_NOTATIONS: [&str; 2] = [
+    concat!(
+        r#"{"V":2,"L":{"t":"h","w":80,"h":24,"x":0,"y":0,"c":["#,
+        r#"{"t":"p","w":30,"h":24,"x":0,"y":0,"i":0,"I":"%0"},"#,
+        r#"{"t":"v","w":49,"h":24,"x":31,"y":0,"c":["#,
+        r#"{"t":"p","w":49,"h":5,"x":31,"y":0,"i":1,"I":"%1"},"#,
+        r#"{"t":"p","w":49,"h":18,"x":31,"y":6,"i":2,"I":"%2"}]}]}}"#,
+    ),
+    "275e,80x24,0,0{30x24,0,0,0,49x24,31,0[49x5,31,0,1,49x18,31,6,2]}",
+];
+
+#[test]
+fn takes_a_layout_written_down_in_either_notation() {
+    let screen = three_panes();
+    for layout in TWO_NOTATIONS {
+        assert_eq!(output_of(&screen, &["select-layout", "tiled"]), "");
+        assert_ne!(
+            pane_rects(&screen),
+            "%0 0,0 30x24 %1 31,0 49x5 %2 31,6 49x18 "
+        );
+        assert_eq!(output_of(&screen, &["select-layout", layout]), "");
+        assert_eq!(
+            pane_rects(&screen),
+            "%0 0,0 30x24 %1 31,0 49x5 %2 31,6 49x18 "
+        );
+    }
+}
+
+#[test]
+fn window_layout_can_go_back_into_select_layout() {
+    let screen = three_panes();
+    let args = ["resize-pane", "-t", "%0", "-x", "20"];
+    assert_eq!(output_of(&screen, &args), "");
+    let before = pane_rects(&screen);
+    let layout = output_of(&screen, &["display", "-p", "#{window_layout}"]);
+    assert!(layout.starts_with(r#"{"V":2,"L":{"t":""#), "{layout}");
+    assert_eq!(output_of(&screen, &["select-layout", "even-vertical"]), "");
+    assert_ne!(pane_rects(&screen), before);
+    assert_eq!(output_of(&screen, &["select-layout", layout.trim()]), "");
+    assert_eq!(pane_rects(&screen), before);
+}
+
+#[test]
+fn a_zoomed_window_has_a_layout_and_a_visible_layout() {
+    let screen = three_panes();
+    let before = output_of(&screen, &["display", "-p", "#{window_layout}"]);
+    assert_eq!(output_of(&screen, &["resize-pane", "-Z"]), "");
+    let format = "#{window_layout}";
+    assert_eq!(output_of(&screen, &["display", "-p", format]), before);
+    let visible = output_of(&screen, &["display", "-p", "#{window_visible_layout}"]);
+    assert!(
+        visible.contains(r#"{"V":2,"L":{"t":"p","w":80,"h":24,"#),
+        "{visible}"
+    );
+}
+
+#[test]
+fn list_windows_shows_the_layout() {
+    let screen = Screen::new(80, 24);
+    let lines = output_of(&screen, &["list-windows"]);
+    assert!(
+        lines.contains(r#"[80x23] [layout {"V":2,"L":{"t":"p","w":80,"#),
+        "{lines}"
+    );
+}
+
+#[test]
+fn a_layout_that_does_not_fit_is_refused() {
+    let screen = three_panes();
+    let before = pane_rects(&screen);
+    let layout = r#"{"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"i":0}}"#;
+    assert_eq!(
+        error_of(&screen, &["select-layout", layout]),
+        format!("kl: have 3 panes but need 1: {layout}\n")
+    );
+    assert_eq!(
+        error_of(&screen, &["select-layout", "abcd,80x23,0,0,0"]),
+        "kl: invalid layout checksum: abcd,80x23,0,0,0\n"
+    );
+    assert_eq!(pane_rects(&screen), before);
+}
+
+#[test]
+fn going_back_to_the_layout_before_goes_both_ways() {
+    let screen = three_panes();
+    let start = pane_rects(&screen);
+    assert_eq!(
+        output_of(&screen, &["select-layout", "-o"]),
+        "",
+        "nothing yet"
+    );
+    assert_eq!(pane_rects(&screen), start);
+
+    assert_eq!(
+        output_of(&screen, &["select-layout", "even-horizontal"]),
+        ""
+    );
+    let even = pane_rects(&screen);
+    assert_ne!(even, start);
+    assert_eq!(output_of(&screen, &["select-layout", "-o"]), "");
+    assert_eq!(pane_rects(&screen), start);
+    assert_eq!(output_of(&screen, &["select-layout", "-o"]), "");
+    assert_eq!(pane_rects(&screen), even);
+}
+
+#[test]
+fn every_way_of_changing_the_layout_can_be_undone() {
+    let screen = three_panes();
+    let start = pane_rects(&screen);
+    assert_eq!(output_of(&screen, &["next-layout"]), "");
+    assert_ne!(pane_rects(&screen), start);
+    assert_eq!(output_of(&screen, &["select-layout", "-o"]), "");
+    assert_eq!(pane_rects(&screen), start);
+
+    assert_eq!(
+        output_of(&screen, &["resize-pane", "-t", "%0", "-x", "10"]),
+        ""
+    );
+    let narrow = pane_rects(&screen);
+    assert_eq!(output_of(&screen, &["select-layout", "-E"]), "");
+    assert_ne!(pane_rects(&screen), narrow);
+    assert_eq!(output_of(&screen, &["select-layout", "-o"]), "");
+    assert_eq!(pane_rects(&screen), narrow);
+}
+
+#[test]
+fn the_layout_before_needs_room_for_all_panes() {
+    let mut screen = three_panes();
+    let window = "#{window_layout}";
+    let start = output_of(&screen, &["display", "-p", window]);
+    assert_eq!(output_of(&screen, &["select-layout", "tiled"]), "");
+    screen.prefix("%");
+    screen.wait_for_text("\u{2502}");
+    let error = error_of(&screen, &["select-layout", "-o"]);
+    let expected = format!("kl: have 4 panes but need 3: {start}");
+    assert_eq!(error, expected);
+
+    // A failure leaves the layout to go back to as it was.
+    assert_eq!(error_of(&screen, &["select-layout", "-o"]), expected);
+}
+
+#[test]
+fn fewer_panes_than_the_layout_before_had_take_what_is_left() {
+    let screen = three_panes();
+    assert_eq!(output_of(&screen, &["select-layout", "tiled"]), "");
+    assert_eq!(output_of(&screen, &["kill-pane", "-t", "%2"]), "");
+    assert_eq!(output_of(&screen, &["select-layout", "-o"]), "");
+    let count = output_of(&screen, &["display", "-p", "#{window_panes}"]);
+    assert_eq!(count, "2\n");
+}
+
+#[test]
+fn a_named_layout_is_not_what_o_goes_by() {
+    let screen = three_panes();
+    assert_eq!(
+        error_of(&screen, &["select-layout", "-o", "tiled"]),
+        "kl: malformed layout header: tiled\n"
+    );
+}
+
+#[test]
+fn the_layout_before_survives_a_restart() {
+    let mut screen = three_panes();
+    let start = pane_rects(&screen);
+    assert_eq!(output_of(&screen, &["select-layout", "even-vertical"]), "");
+    screen.restart_server();
+    assert_eq!(output_of(&screen, &["select-layout", "-o"]), "");
+    assert_eq!(pane_rects(&screen), start);
+}
+
 #[test]
 fn a_layout_keeps_its_proportions_when_the_window_changes_size() {
     let mut screen = three_panes();
@@ -2104,8 +2276,11 @@ fn runs_commands_from_the_command_line() {
 
     let output = screen.command(&["list-windows"]);
     let windows = String::from_utf8_lossy(&output.stdout);
+    let layout = r#"{"V":2,"L":{"t":"p","w":80,"h":23,"x":0,"y":0,"a":true,"i":0,"I":"%1"}}"#;
     assert!(
-        windows.contains("1: cli* (1 panes) [80x23] @1 (active)"),
+        windows.contains(&format!(
+            "1: cli* (1 panes) [80x23] [layout {layout}] @1 (active)"
+        )),
         "{windows}"
     );
 

@@ -383,10 +383,12 @@ pub enum Command {
     },
     /// Replaces the server with this binary, or the one it is running from.
     RestartServer(Option<PathBuf>),
-    /// Applies a layout, or again the one applied last.
+    /// Applies a layout, by name or written down, or again the one applied last.
     SelectLayout {
         target: Target,
         name: Option<String>,
+        /// Go back to the layout from before the last time, as `-o` says.
+        undo: bool,
     },
     SelectPane {
         target: Target,
@@ -1006,7 +1008,7 @@ fn parse_rotate_window(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_select_layout(args: &[String]) -> Result<Command, String> {
-    let flags = Flags::parse("select-layout", args, "Enpt:")?;
+    let flags = Flags::parse("select-layout", args, "Enopt:")?;
     flags.at_most(1)?;
     let target = flags.value('t');
     Ok(if flags.has('E') {
@@ -1020,6 +1022,7 @@ fn parse_select_layout(args: &[String]) -> Result<Command, String> {
         Command::SelectLayout {
             target,
             name: flags.rest.first().cloned(),
+            undo: flags.has('o'),
         }
     })
 }
@@ -1342,6 +1345,7 @@ mod tests {
             Command::SelectLayout {
                 target: Some("1".to_owned()),
                 name: Some("tiled".to_owned()),
+                undo: false,
             }
         );
         assert_eq!(
@@ -1349,6 +1353,15 @@ mod tests {
             Command::SelectLayout {
                 target: None,
                 name: None,
+                undo: false,
+            }
+        );
+        assert_eq!(
+            command("select-layout -o"),
+            Command::SelectLayout {
+                target: None,
+                name: None,
+                undo: true,
             }
         );
         assert_eq!(
