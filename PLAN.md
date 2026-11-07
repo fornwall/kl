@@ -72,8 +72,25 @@ framebuffer held:
   true colors, wide characters, emoji sequences, keycaps, combining marks, right
   to left text and box drawing is the same pixel for pixel, apart from the mouse
   pointer, in a full window and in half of a split. So are palette, default color
-  and cursor color changes, reverse video, kitty images and double width lines,
-  apart from the window's padding, since a program's colors stay in its pane.
+  and cursor color changes, reverse video and double width lines, apart from the
+  window's padding, since a program's colors stay in its pane.
+- **Images.** Raw RGB and RGBA and PNG images sent inline, scaled, cropped, offset
+  in a cell, above and below text, deleted and replaced are the same pixel for
+  pixel. A placeholder image that is not the shape of its cells is one row of
+  pixels off. An image cut off at each edge of a pane is the same, and so is one
+  scrolling out of view and back from the history, but for the cursor of copy mode,
+  and one in a window being resized. A scaled image cut off at the edge of a pane
+  has colors one step off from resampling. After switching windows, a list on top
+  of it and detaching and attaching, an image looks as it did before. Replies to
+  programs match, but for refusing files. A raw image of 48 MB and a PNG of 6000 by
+  4000 pixels show after 0.7 and 2.3 seconds, against 1.7 and 1.6 directly. Next to
+  them, a pane updating ten times a second missed 0.13 and 0.31 seconds at most, and
+  commands were answered within 0.1 seconds. Leaving a window, detaching or closing
+  the pane while such an image is on its way breaks nothing.
+- **Pointer shapes.** Read through XFixes, 9 shapes by name, an unknown name, the
+  default and a program taking the mouse and letting go of it give the cursor they
+  give directly, and the shape goes with the pane under the pointer. An animated
+  cursor differs from one look to the next, so that one was only compared by size.
 - **Programs.** nvim with true colors, splits and the mouse is the same pixel for
   pixel at each of 11 steps, including the bar cursor in insert mode, and across
   resizing the window. htop and less were only looked at. 3 million lines through
@@ -89,9 +106,10 @@ framebuffer held:
   and rapidly, closing the window and attaching from a new one, synchronized
   output, focus reports, key repeat and copy mode from the keyboard.
 
-Not covered: Wayland, the macOS app, a GPU, a real input method such as ibus, and
-what is hard to see from outside, such as notifications, the bell and following a
-live color scheme change.
+Not covered: Wayland, the macOS app, a GPU, a real input method such as ibus,
+images with several clients attached or across `restart-server`, and what is hard
+to see from outside, such as notifications, the bell and following a live color
+scheme change.
 
 The input parser, the protocol decoders, the command language and the way from
 parsed events and program output through libghostty-vt have been fuzzed on Linux
@@ -144,8 +162,6 @@ What is left of tmux's `copy-mode-vi` table, and the differences that remain:
 
 Things panes can ask for that stop at kl today.
 
-- Trying images in the Ghostty app. Everything so far ran against libghostty-vt
-  as the outer terminal, and palette queries have shown that the two can differ.
 - Playing animations, which stay on their current frame. It takes calling
   `ghostty_kitty_graphics_animation_tick` from the event loop, and each frame
   means sending all its pixels again, so measure that first.
@@ -153,8 +169,9 @@ Things panes can ask for that stop at kl today.
   refused for now. Programs that try fall back to sending them inline.
 - Asking the outer terminal whether it takes images at all. Programs are told yes
   either way, and pixels go out to a terminal that ignores them.
-- Going easy on slow links. Pixels go out uncompressed, 72 MB took 2.3 seconds
-  locally, and an image that left the screen is sent again when it comes back.
+- Going easy on slow links. Pixels go out uncompressed, between frames, 72 MB took
+  2.3 seconds locally, and an image that left the screen is sent again when it
+  comes back.
 
 ### 6. Clients
 
