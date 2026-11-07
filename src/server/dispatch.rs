@@ -170,6 +170,7 @@ impl Server {
             Event::Palette(index, rgb) => {
                 self.session.colors.palette.insert(index, rgb);
             }
+            Event::CursorStyle(style) => self.session.colors.cursor_style = Some(style),
             Event::ColorScheme { dark } => {
                 // A new scheme most likely brought new colors along.
                 let old = self.session.colors.dark.replace(dark);

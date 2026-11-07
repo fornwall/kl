@@ -12,6 +12,10 @@ pub type Handle = *mut c_void;
 pub const SUCCESS: c_int = 0;
 pub const OUT_OF_SPACE: c_int = -3;
 
+pub const CURSOR_STYLE_BAR: c_int = 0;
+pub const CURSOR_STYLE_BLOCK: c_int = 1;
+pub const CURSOR_STYLE_UNDERLINE: c_int = 2;
+
 pub const OPT_USERDATA: c_int = 1;
 pub const OPT_WRITE_PTY: c_int = 2;
 pub const OPT_BELL: c_int = 3;
@@ -24,6 +28,8 @@ pub const OPT_COLOR_FOREGROUND: c_int = 12;
 pub const OPT_COLOR_BACKGROUND: c_int = 13;
 pub const OPT_COLOR_PALETTE: c_int = 15;
 pub const OPT_SELECTION: c_int = 22;
+pub const OPT_DEFAULT_CURSOR_STYLE: c_int = 23;
+pub const OPT_DEFAULT_CURSOR_BLINK: c_int = 24;
 pub const OPT_CLIPBOARD_WRITE: c_int = 27;
 pub const OPT_SCROLLBACK_MAX_BYTES: c_int = 28;
 pub const OPT_DESKTOP_NOTIFICATION: c_int = 30;

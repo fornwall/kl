@@ -27,7 +27,7 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 3;
+pub const STATE_VERSION: u32 = 4;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
@@ -88,6 +88,8 @@ fn put_colors(out: &mut Vec<u8>, colors: &OuterColors) {
     put_color(out, colors.background);
     put_bool(out, colors.dark.is_some());
     put_bool(out, colors.dark.unwrap_or(false));
+    put_bool(out, colors.cursor_style.is_some());
+    out.push(colors.cursor_style.unwrap_or(0));
     put_u32(out, u32::try_from(colors.palette.len()).unwrap_or(0));
     for (index, Rgb { r, g, b }) in &colors.palette {
         out.extend_from_slice(&[*index, *r, *g, *b]);
@@ -99,6 +101,8 @@ fn take_colors(reader: &mut Reader<'_>) -> Result<OuterColors, Malformed> {
     let background = take_color(reader)?;
     let known = reader.take_bool()?;
     let dark = reader.take_bool()?;
+    let has_cursor_style = reader.take_bool()?;
+    let [cursor_style] = reader.take_array()?;
     let mut palette = BTreeMap::new();
     for _ in 0..reader.take_u32()? {
         let [index, r, g, b] = reader.take_array()?;
@@ -109,6 +113,7 @@ fn take_colors(reader: &mut Reader<'_>) -> Result<OuterColors, Malformed> {
         background,
         palette,
         dark: known.then_some(dark),
+        cursor_style: has_cursor_style.then_some(cursor_style),
     })
 }
 
@@ -390,6 +395,7 @@ mod tests {
             background: None,
             palette: BTreeMap::from([(0, rgb), (255, rgb)]),
             dark: Some(false),
+            cursor_style: Some(5),
         };
         let mut bytes = Vec::new();
         put_colors(&mut bytes, &colors);
@@ -398,6 +404,7 @@ mod tests {
         assert_eq!(restored.background, colors.background);
         assert_eq!(restored.palette, colors.palette);
         assert_eq!(restored.dark, colors.dark);
+        assert_eq!(restored.cursor_style, colors.cursor_style);
     }
 
     #[test]

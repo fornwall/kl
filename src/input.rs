@@ -148,6 +148,8 @@ pub enum Event {
     PixelMouse(bool),
     /// An entry of the terminal's palette, from OSC 4.
     Palette(u8, Rgb),
+    /// The terminal's cursor style as a DECSCUSR number, from DECRQSS.
+    CursorStyle(u8),
     /// The terminal's color scheme, as asked for or from mode 2031.
     ColorScheme {
         dark: bool,
@@ -161,6 +163,7 @@ impl Event {
             Self::Foreground(_)
                 | Self::Background(_)
                 | Self::Palette(..)
+                | Self::CursorStyle(_)
                 | Self::ColorScheme { .. }
         )
     }
@@ -273,7 +276,8 @@ fn parse(input: &[u8]) -> Step {
         [0x1b, b'[', rest @ ..] => parse_csi(rest),
         [0x1b, b'O', rest @ ..] => parse_ss3(rest),
         [0x1b, b']', rest @ ..] => parse_string(rest, 2, parse_osc),
-        [0x1b, b'P' | b'_' | b'^' | b'X', rest @ ..] => parse_string(rest, 2, |_| None),
+        [0x1b, b'P', rest @ ..] => parse_string(rest, 2, parse_dcs),
+        [0x1b, b'_' | b'^' | b'X', rest @ ..] => parse_string(rest, 2, |_| None),
         [0x1b, 0x1b, ..] => Step::Consumed(1, Some(key_event(key::ESCAPE, 0))),
         [0x1b, rest @ ..] => parse_alt(rest),
         [byte, ..] if *byte < 0x20 || *byte == 0x7f => {
@@ -393,6 +397,13 @@ const fn give_up_at_limit(rest: &[u8], prefix: usize) -> Step {
     } else {
         Step::Consumed(prefix + MAX_SEQUENCE, None)
     }
+}
+
+/// The reply to the client asking for the cursor style when attaching.
+fn parse_dcs(body: &[u8]) -> Option<Event> {
+    let style = body.strip_prefix(b"1$r")?.strip_suffix(b" q")?;
+    let style = std::str::from_utf8(style).ok()?;
+    style.parse().ok().map(Event::CursorStyle)
 }
 
 /// Replies to the color queries the client sends on attaching.
@@ -974,6 +985,14 @@ mod tests {
                 Event::ColorScheme { dark: false }
             ]
         );
+    }
+
+    #[test]
+    fn reads_cursor_style_replies() {
+        assert_eq!(events(b"\x1bP1$r5 q\x1b\\"), [Event::CursorStyle(5)]);
+        // That setting is not valid, or this is a reply about another one.
+        assert_eq!(events(b"\x1bP0$r\x1b\\"), []);
+        assert_eq!(events(b"\x1bP1$r0m\x1b\\"), []);
     }
 
     #[test]

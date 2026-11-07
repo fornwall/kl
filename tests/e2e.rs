@@ -33,7 +33,8 @@ use std::time::{Duration, Instant};
 
 use ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use ghostty::{
-    KeyAction, KeyInput, Notification, OuterColors, Progress, Rgb, Style, Terminal, Width,
+    CursorShape, KeyAction, KeyInput, Notification, OuterColors, Progress, Rgb, Style, Terminal,
+    Width,
 };
 use sys::WinSize;
 
@@ -50,6 +51,8 @@ const OUTER_BACKGROUND: Rgb = Rgb {
     g: 0x22,
     b: 0x33,
 };
+/// What the outer terminal has as its cursor when kl starts: a blinking bar.
+const OUTER_CURSOR: &str = "\x1b[5 q";
 const OUTER_RED: Rgb = Rgb {
     r: 0xaa,
     g: 0xbb,
@@ -127,7 +130,9 @@ impl Screen {
             background: Some(OUTER_BACKGROUND),
             palette: BTreeMap::from([(1, OUTER_RED)]),
             dark: Some(true),
+            cursor_style: None,
         });
+        terminal.write(OUTER_CURSOR.as_bytes());
         let mut screen = Self {
             terminal,
             pty,
@@ -514,6 +519,21 @@ impl Screen {
 
     fn raw_text(&self) -> String {
         String::from_utf8_lossy(&self.raw).into_owned()
+    }
+
+    /// Waits for the outer terminal to show this cursor.
+    fn wait_for_cursor(&mut self, shape: CursorShape, blinking: bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            self.pump();
+            self.terminal.refresh();
+            let cursor = self.terminal.cursor().unwrap();
+            if cursor.shape == shape && cursor.blinking == blinking {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the cursor is {cursor:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -1284,6 +1304,16 @@ fn leaves_the_terminal_as_it_found_it() {
         outer.write(&screen.raw);
         assert_eq!(outer.mode(2027), before, "after {setting:?}");
     }
+}
+
+#[test]
+fn panes_get_the_cursor_of_the_terminal_until_a_program_picks_one() {
+    let mut screen = Screen::new(80, 24);
+    screen.wait_for_cursor(CursorShape::Bar, true);
+    screen.run(r"printf '\033[2 q'");
+    screen.wait_for_cursor(CursorShape::Block, false);
+    screen.run(r"printf '\033[0 q'");
+    screen.wait_for_cursor(CursorShape::Bar, true);
 }
 
 #[test]

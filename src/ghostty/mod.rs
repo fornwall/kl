@@ -352,6 +352,9 @@ pub struct OuterColors {
     pub palette: BTreeMap<u8, Rgb>,
     /// Whether it is in a dark color scheme, if it says.
     pub dark: Option<bool>,
+    /// Its default cursor, as a DECSCUSR number. Not a color, but it is the
+    /// user's setting in just the same way.
+    pub cursor_style: Option<u8>,
 }
 
 impl OuterColors {
@@ -1017,6 +1020,16 @@ impl Terminal {
             best_effort(self.set(ffi::OPT_COLOR_BACKGROUND, (&raw const rgb).cast()));
         }
         self.set_default_palette(&colors.palette);
+        if let Some(style) = colors.cursor_style {
+            let shape = match style {
+                3 | 4 => ffi::CURSOR_STYLE_UNDERLINE,
+                5 | 6 => ffi::CURSOR_STYLE_BAR,
+                _ => ffi::CURSOR_STYLE_BLOCK,
+            };
+            let blink = style % 2 == 1;
+            best_effort(self.set(ffi::OPT_DEFAULT_CURSOR_STYLE, (&raw const shape).cast()));
+            best_effort(self.set(ffi::OPT_DEFAULT_CURSOR_BLINK, (&raw const blink).cast()));
+        }
         let scheme = colors.color_scheme();
         let changed = std::mem::replace(&mut self.effects().color_scheme, scheme) != scheme;
         if !changed || !self.mode(MODE_REPORT_COLOR_SCHEME) {

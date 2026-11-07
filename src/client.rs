@@ -26,7 +26,10 @@ const SERVER_START_TIME: Duration = Duration::from_secs(5);
 /// off afterwards, since it is on by default in Ghostty. Ghostty keeps shift with
 /// the mouse for itself unless told otherwise (XTSHIFTESCAPE), which would leave
 /// a pane's program holding on to the mouse. The title goes on xterm's stack.
-const ENTER_TERMINAL: &[u8] = b"\x1b[?1049h\
+/// Asking for the cursor style comes before the first frame sets one, as that
+/// is how the user wants a cursor that no program has a say about to look.
+const ENTER_TERMINAL: &[u8] = b"\x1bP$q q\x1b\\\
+    \x1b[?1049h\
     \x1b[>31u\
     \x1b[?2027s\x1b[?2027h\
     \x1b[?1003h\x1b[?1006h\x1b[>1s\
