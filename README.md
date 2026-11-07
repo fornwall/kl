@@ -88,8 +88,10 @@ each target has been verified.
   move such a view around by hand, with `refresh-client -L` and the like.
 - **Images have some limits.** Animations stay on their current frame, images
   have to be sent inline rather than from a file, and pixels go out uncompressed,
-  so they are slow over a slow link. An image scaled to a size that is not a whole
-  number of cells can come out up to half a cell off.
+  so they are slow over a slow link. An image stretched out of proportion, or
+  scaled to part of a cell in both directions, can come out up to half a cell off.
+  A large PNG holds up every pane while it is decoded, which took 0.3 seconds for
+  6000 by 4000 pixels.
 - **Hyperlinks only go by their URI.** libghostty-vt does not give out their
   `id`, so links in a pane with the same URI highlight together, even if the
   program kept them apart. A URI with anything but printable ASCII in it arrives

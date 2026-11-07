@@ -31,8 +31,9 @@ struct Placement {
     /// Where it starts within that cell, in pixels.
     offset: (u32, u32),
     source: ImageRect,
-    /// The cells to scale it to, or `None` to show it at its own size.
-    cells: Option<(u32, u32)>,
+    /// The columns and rows to scale it to. No rows or no columns means going by
+    /// the proportions of the image, and neither means its own size.
+    cells: (u32, u32),
     z: i32,
 }
 
@@ -289,6 +290,19 @@ struct Clipped {
     source: (u32, u32),
     /// How many cells it takes up, rounded, for when it has to be scaled.
     cells: u32,
+    /// Its size on the screen, in pixels.
+    size: u32,
+    /// Whether that is a whole number of cells.
+    whole: bool,
+}
+
+impl Clipped {
+    /// Whether scaling to this size makes the other direction come out at its
+    /// size too, by the proportions of what is shown of the image.
+    fn sets_size_of(&self, other: &Self) -> bool {
+        let follows = u64::from(other.source.1) * u64::from(self.size) / u64::from(self.source.1);
+        follows.abs_diff(u64::from(other.size)) <= 1
+    }
 }
 
 impl Span {
@@ -313,15 +327,32 @@ impl Span {
                 u32::try_from((to - from).max(1)).ok()?,
             ),
             cells: u32::try_from(((last - first + cell_size / 2) / cell_size).max(1)).ok()?,
+            size: u32::try_from(last - first).ok()?,
+            whole: (last - first) % cell_size == 0,
         })
     }
 }
 
+/// The cells to scale to. The protocol only knows whole cells, so a size that is
+/// not has to come from the other direction, by the proportions of the image.
+/// That leaves a scaled image a bit off in size only where neither is whole, or
+/// where it is not scaled the same in both directions.
+fn scale_to(horizontal: &Clipped, vertical: &Clipped) -> (u32, u32) {
+    if vertical.whole || horizontal.whole {
+        if !vertical.whole && horizontal.sets_size_of(vertical) {
+            return (horizontal.cells, 0);
+        }
+        if !horizontal.whole && vertical.sets_size_of(horizontal) {
+            return (0, vertical.cells);
+        }
+    }
+    (horizontal.cells, vertical.cells)
+}
+
 /// Clips an image to a pane. A pane starts and ends at the edge of a cell, so
-/// where it cuts the image, nothing else needs to change. The protocol can only
-/// scale to whole cells though, which can leave a scaled image a bit off in size.
-/// Without `same_cells`, pixels mean something else on the outer terminal, so what
-/// counts is the cells an image covers.
+/// where it cuts the image, nothing else needs to change. Without `same_cells`,
+/// pixels mean something else on the outer terminal, so what counts is the cells
+/// an image covers.
 fn clip(
     image: &ImagePlacement,
     rect: Rect,
@@ -360,7 +391,11 @@ fn clip(
             width: horizontal.source.1,
             height: vertical.source.1,
         },
-        cells: (!own_size).then_some((horizontal.cells, vertical.cells)),
+        cells: match (own_size, same_cells) {
+            (true, _) => (0, 0),
+            (false, true) => scale_to(&horizontal, &vertical),
+            (false, false) => (horizontal.cells, vertical.cells),
+        },
         z: image.z,
     })
 }
@@ -380,9 +415,12 @@ fn push_placement(out: &mut Vec<u8>, image: u32, id: u32, placement: &Placement)
     } = placement.source;
     let (offset_x, offset_y) = placement.offset;
     let z = placement.z;
-    let scale = placement
-        .cells
-        .map_or_else(String::new, |(cols, rows)| format!(",c={cols},r={rows}"));
+    let scale = match placement.cells {
+        (0, 0) => String::new(),
+        (cols, 0) => format!(",c={cols}"),
+        (0, rows) => format!(",r={rows}"),
+        (cols, rows) => format!(",c={cols},r={rows}"),
+    };
     push_command(
         out,
         &format!(
@@ -433,7 +471,7 @@ mod tests {
         assert_eq!((placement.x, placement.y), (6, 3));
         assert_eq!(placement.source, image(1, 1).source);
         assert_eq!(placement.offset, (0, 0));
-        assert_eq!(placement.cells, None);
+        assert_eq!(placement.cells, (0, 0));
     }
 
     #[test]
@@ -486,7 +524,7 @@ mod tests {
         let placement = clip(&scaled, PANE, CELL).unwrap();
         assert_eq!(placement.source.y, 10);
         assert_eq!(placement.source.height, 50);
-        assert_eq!(placement.cells, Some((8, 5)));
+        assert_eq!(placement.cells, (8, 5));
     }
 
     #[test]
@@ -495,7 +533,7 @@ mod tests {
         offset.cell_offset = (3, 7);
         let placement = super::clip(&offset, PANE, CELL, false).unwrap();
         assert_eq!((placement.x, placement.y), (6, 3));
-        assert_eq!(placement.cells, Some((4, 3)));
+        assert_eq!(placement.cells, (4, 3));
         assert_eq!(placement.offset, (0, 0));
     }
 
@@ -577,6 +615,58 @@ mod tests {
         assert!(!images.transferring());
     }
 
+    /// A strip of an image scaled down, as a placeholder cell gives it: all
+    /// columns of it, and part of the height of a row.
+    #[test]
+    fn a_size_of_part_of_a_cell_follows_from_the_other_direction() {
+        let strip = ImagePlacement {
+            col: 0,
+            row: 0,
+            cell_offset: (0, 12),
+            size: (60, 9),
+            source: ImageRect {
+                x: 0,
+                y: 0,
+                width: 90,
+                height: 14,
+            },
+            ..ImagePlacement::default()
+        };
+        let cell = (10, 21);
+        let placement = clip(&strip, PANE, cell).unwrap();
+        assert_eq!(placement.cells, (6, 0));
+
+        let sideways = ImagePlacement {
+            cell_offset: (3, 0),
+            size: (7, 21),
+            source: ImageRect {
+                x: 0,
+                y: 0,
+                width: 14,
+                height: 42,
+            },
+            ..strip
+        };
+        assert_eq!(clip(&sideways, PANE, cell).unwrap().cells, (0, 1));
+    }
+
+    #[test]
+    fn a_stretched_image_keeps_both_directions() {
+        // Twice as wide and three times as high, so they do not follow.
+        let stretched = ImagePlacement {
+            cell_offset: (0, 12),
+            size: (80, 9),
+            source: ImageRect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 3,
+            },
+            ..image(0, 0)
+        };
+        assert_eq!(clip(&stretched, PANE, (10, 21)).unwrap().cells, (8, 1));
+    }
+
     #[test]
     fn placements_only_ask_for_scaling_when_they_need_it() {
         let placement = clip(&image(1, 1), PANE, CELL).unwrap();
@@ -587,7 +677,7 @@ mod tests {
             ["a=p,i=3,p=4,x=0,y=0,w=40,h=60,X=0,Y=0,z=0,C=1,q=2"]
         );
         let scaled = Placement {
-            cells: Some((2, 3)),
+            cells: (2, 3),
             ..placement
         };
         let mut out = Vec::new();
