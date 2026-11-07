@@ -2,6 +2,7 @@
 
 kl is a small terminal multiplexer that follows tmux, with a single session,
 built on libghostty-vt. This file tracks where it stands and where it goes next.
+[README.md](README.md) has the decisions behind it and its current limitations.
 
 ## Where it stands
 
@@ -97,11 +98,6 @@ Things panes can ask for that stop at kl today.
 - Several clients at once. A new client currently takes over from the old one.
   This raises the question of which size wins, and tmux's answers are a good
   start.
-- Surviving a crash or a reboot. `restart-server` replaces a running server with
-  programs still running, by way of `exec`, but nothing can keep programs alive
-  through those two. Bringing back the layout and what panes showed, with new
-  shells, would mean regularly writing what is on screen to disk, which needs a
-  decision first.
 
 ### Later: settings
 
