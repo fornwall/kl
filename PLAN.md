@@ -38,6 +38,11 @@ the Ghostty application itself, which has not been tried yet. Real programs
 (nvim, less, htop) have been tried with tmux as the outer terminal, which also
 covers the legacy input path.
 
+The input parser, the protocol decoders, the command language and the way from
+parsed events and program output through libghostty-vt have been fuzzed on Linux
+x86-64, for 5 to 11 minutes on 4 cores each without a crash. See
+[fuzz/README.md](fuzz/README.md).
+
 `KL_TMPDIR` moves the socket directory, as `TMUX_TMPDIR` does in tmux. It exists
 for the tests, and is not meant as a setting.
 
@@ -51,7 +56,6 @@ Before adding much more, close the gaps in the table above.
   and macOS aarch64 with clippy and all tests, but this repository has no remote
   yet, so it has never run. The first run is what fills in the table above.
 - Try it for real in Ghostty, and fix what that finds.
-- Fuzz the input parser and the protocol decoder.
 
 ### 3. Getting around
 
