@@ -36,10 +36,13 @@ fuzz_target!(|input: (u16, u16, u16, u16, &[u8], &[u8])| {
     terminal.select_start(x, y);
     terminal.select_extend(y % COLS, x % ROWS);
     let _ = terminal.selected_text();
-    terminal.select_word(x, y);
-    let _ = terminal.selected_text();
-    terminal.select_line(x, y);
-    let _ = terminal.selected_text();
+    for _ in 0..3 {
+        // Once for a character, twice for a word and three times for a line.
+        terminal.press_selection(x, y);
+        terminal.drag_selection(y % COLS, x % ROWS, None);
+        terminal.release_selection();
+        let _ = terminal.selected_text();
+    }
 
     terminal.scroll_by(-1);
     draw(&mut terminal, false, ROWS);
