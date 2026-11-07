@@ -45,7 +45,7 @@ pub const PREFIX_TABLE: &[Binding] = &[
     ),
     bind(
         ",",
-        "command-prompt -I \"#W\" \"rename-window \\\"%%\\\"\"",
+        "command-prompt -I \"#W\" \"rename-window -- \\\"%%\\\"\"",
         "Rename current window",
     ),
     bind("-", "delete-buffer", "Delete the most recent paste buffer"),
@@ -151,14 +151,14 @@ pub const PREFIX_TABLE: &[Binding] = &[
         "Select the next window with an alert",
     ),
     bind(
-        "M-p",
-        "previous-window -a",
-        "Select the previous window with an alert",
-    ),
-    bind(
         "M-o",
         "rotate-window -D",
         "Rotate through the panes in reverse",
+    ),
+    bind(
+        "M-p",
+        "previous-window -a",
+        "Select the previous window with an alert",
     ),
     repeat("M-Up", "resize-pane -U 5", "Resize the pane up by 5"),
     repeat("M-Down", "resize-pane -D 5", "Resize the pane down by 5"),

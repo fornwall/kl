@@ -1686,6 +1686,18 @@ fn control_o_rotates() {
 }
 
 #[test]
+fn a_new_name_can_start_with_a_dash_and_hold_quotes() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix(",");
+    screen.wait_for_text("(rename-window)");
+    for _ in 0..2 {
+        screen.key(key::BACKSPACE, 0, "", 0);
+    }
+    screen.run(r#"-a"b\c"#);
+    screen.wait_for_text(r#"0:-a"b\c*"#);
+}
+
+#[test]
 fn renames_a_window() {
     let mut screen = Screen::new(80, 24);
     screen.prefix(",");
