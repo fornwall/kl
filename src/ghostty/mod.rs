@@ -35,6 +35,9 @@ const CONTINUATION_BYTES: usize = 64 * 1024;
 
 const VERSION_REPLY: &str = concat!("kl ", env!("CARGO_PKG_VERSION"));
 
+/// What programs in these terminals see as `TERM`.
+pub const TERM: &str = "xterm-ghostty";
+
 /// How close together clicks must be to count as a double or triple click.
 pub const MULTI_CLICK_TIME: Duration = Duration::from_millis(400);
 
@@ -937,6 +940,11 @@ impl Terminal {
             ffi::OPT_CONTINUATION_MAX_BYTES,
             (&raw const continuation).cast(),
         )?;
+        let name = ffi::Bytes {
+            ptr: TERM.as_ptr(),
+            len: TERM.len(),
+        };
+        terminal.set(ffi::OPT_TERMINFO_NAME, (&raw const name).cast())?;
         Ok(terminal)
     }
 
@@ -2415,6 +2423,16 @@ mod tests {
         assert_eq!(
             terminal.effects().replies.escape_ascii().to_string(),
             b"\x1b[?62;22;52c\x1b[>1;10;0c".escape_ascii().to_string()
+        );
+    }
+
+    #[test]
+    fn reports_the_terminfo_name_like_the_app() {
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        terminal.write(b"\x1bP+q544e\x1b\\");
+        assert_eq!(
+            String::from_utf8_lossy(&terminal.effects().replies),
+            "\x1bP1+r544E=787465726D2D67686F73747479\x1b\\"
         );
     }
 

@@ -38,6 +38,7 @@ pub const OPT_PROGRESS_REPORT: c_int = 31;
 pub const OPT_CONTINUATION_MAX_BYTES: c_int = 32;
 pub const OPT_MODE_DEFAULT: c_int = 34;
 pub const OPT_MODE: c_int = 35;
+pub const OPT_TERMINFO_NAME: c_int = 38;
 pub const OPT_RENDER_HOLD: c_int = 42;
 
 pub const DATA_COLS: c_int = 1;

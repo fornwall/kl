@@ -111,7 +111,7 @@ fn install_terminfo(socket: &Path) -> io::Result<PathBuf> {
     // Linux files entries by their first letter, and macOS by its hex code.
     for directory in ["x", "78"] {
         let directory = root.join(directory);
-        let entry = directory.join("xterm-ghostty");
+        let entry = directory.join(crate::ghostty::TERM);
         if !entry.exists() {
             fs::create_dir_all(&directory)?;
             fs::write(entry, TERMINFO_ENTRY)?;
@@ -139,7 +139,7 @@ fn build_command(spawn: &Spawn<'_>, id: PaneId) -> Command {
     }
     match install_terminfo(Path::new(spawn.socket)) {
         Ok(terminfo) => command
-            .env("TERM", "xterm-ghostty")
+            .env("TERM", crate::ghostty::TERM)
             .env("TERMINFO", terminfo),
         Err(error) => {
             sys::log(format_args!("installing the terminfo entry: {error}"));
