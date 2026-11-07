@@ -63,8 +63,9 @@ documentation of `grid-introspection` and the grid guide say about render loops:
 "use grid references" would be a fair reply. In kl, with every row dirty, copying
 the links takes reading a 200×50 screen with 9,000 linked cells from 200 µs to
 700 µs, and a 400×100 screen with all 40,000 linked from 800 µs to 3 ms, which is
-3% and 13% of a 60 Hz frame. Most frames have far fewer dirty rows, and a heavy
-stream with every cell linked costs the server 6% more CPU time.
+3% and 13% of a 60 Hz frame. Most frames have far fewer dirty rows. Playing back
+a heavy stream costs the server about 10% more CPU time with every cell linked,
+and nothing that stands out from the noise with part of each line linked.
 
 Today: kl copies URIs with grid references right after each render state update,
 while the two still agree, and that includes the update where a hold starts,
