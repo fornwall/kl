@@ -103,6 +103,9 @@ struct Screen {
     dir: Rc<Scratch>,
     /// Everything kl wrote, for checking sequences that leave no trace on screen.
     raw: Vec<u8>,
+    /// What is on its way to kl, for when the pty will not take any more. On
+    /// macOS that is soon, as its buffer is small.
+    unsent: Vec<u8>,
 }
 
 impl Screen {
@@ -139,6 +142,7 @@ impl Screen {
             child,
             dir,
             raw: Vec::new(),
+            unsent: Vec::new(),
         };
         screen.wait_for("the status line", |lines| {
             lines.last().is_some_and(|line| line.starts_with("[kl] "))
@@ -150,6 +154,7 @@ impl Screen {
     /// Feeds what kl wrote to the terminal, and sends its replies back.
     fn pump(&mut self) {
         let mut buf = [0; 16384];
+        self.flush();
         loop {
             match self.pty.read(&mut buf) {
                 Ok(0) => break,
@@ -157,7 +162,7 @@ impl Screen {
                     self.raw.extend_from_slice(&buf[..len]);
                     self.terminal.write(&buf[..len]);
                     let replies = std::mem::take(&mut self.terminal.effects().replies);
-                    self.pty.write_all(&replies).unwrap();
+                    self.send_bytes(&replies);
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 // The other side of the pty is gone: kl exited.
@@ -439,7 +444,15 @@ impl Screen {
     }
 
     fn send_bytes(&mut self, bytes: &[u8]) {
-        self.pty.write_all(bytes).unwrap();
+        self.unsent.extend_from_slice(bytes);
+        self.flush();
+    }
+
+    /// Sends what the pty takes. It failing means that kl exited.
+    fn flush(&mut self) {
+        if sys::flush_some(&self.pty, &mut self.unsent).is_err() {
+            self.unsent.clear();
+        }
     }
 
     /// Presses and releases a key, as the outer terminal would report it. Like
