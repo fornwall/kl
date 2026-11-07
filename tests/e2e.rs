@@ -2296,8 +2296,10 @@ fn n_goes_on_with_the_last_search_in_a_later_copy_mode() {
 #[test]
 fn copy_mode_jumps_between_shell_prompts() {
     let mut screen = Screen::new(80, 24);
-    screen.run("for i in 1 2 3; do printf '\\033]133;A\\007mark %s\\n' $i; seq 1 30; done");
-    screen.wait_for_line("30");
+    screen.run(
+        "for i in 1 2 3; do printf '\\033]133;A\\007mark %s\\n' $i; seq 1 30; done; echo fin''ished",
+    );
+    screen.wait_for_line("finished");
     let copy_line = |screen: &mut Screen| {
         screen.type_text(" ");
         screen.type_text("$");
