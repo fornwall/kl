@@ -3025,6 +3025,57 @@ fn images_go_to_every_client() {
 }
 
 #[test]
+fn links_reach_every_client() {
+    let (mut first, mut second) = two_clients();
+    first.run(&format!(
+        "clear; {}",
+        print_link("https://kl.example", "a-link")
+    ));
+    let wanted = [("a-link", "https://kl.example")];
+    first.wait_for_links(&wanted);
+    second.wait_for_links(&wanted);
+}
+
+#[test]
+fn a_smaller_client_shows_the_part_of_an_image_in_its_view() {
+    let mut big = Screen::new(60, 21);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 20, 6);
+    // 30 columns and 10 rows, with the prompt after it on the last row.
+    let (command, _) = big.image_command(300, 200, "");
+    big.run(&format!("clear; {command}"));
+    wait_for_output(&big, &WINDOW_SIZE, "60x20");
+    big.wait_for_images("an image", |images| !images.is_empty());
+    let images = small.wait_for_images("an image", |images| !images.is_empty());
+    // The cursor at column 32 of row 9 puts the view of 20 columns and 5 rows at
+    // column 22 of row 7, which sees the corner of the image.
+    assert_eq!((images[0].col, images[0].row), (0, 0), "{images:?}");
+    let source = images[0].source;
+    assert_eq!((source.x, source.y), (220, 140), "{images:?}");
+    assert_eq!((source.width, source.height), (80, 60), "{images:?}");
+    assert_eq!(images[0].size, (80, 60), "{images:?}");
+}
+
+#[test]
+fn getting_the_keyboard_takes_the_window_and_losing_it_does_not() {
+    let mut big = Screen::new(100, 30);
+    let mut small = Screen::attach(Rc::clone(&big.dir), 50, 12);
+    wait_for_output(&big, &WINDOW_SIZE, "50x11");
+    big.send_bytes(b"\x1b[I");
+    wait_for_output(&big, &WINDOW_SIZE, "100x29");
+    // Nothing shows that this got there but the flag it sets.
+    small.send_bytes(b"\x1b[O");
+    let flags = [
+        "list-clients",
+        "-F",
+        "#{client_flags}",
+        "-f",
+        "#{==:#{client_width},50}",
+    ];
+    wait_for_output(&big, &flags, "attached,UTF-8");
+    assert_eq!(output_of(&big, &WINDOW_SIZE), "100x29\n");
+}
+
+#[test]
 fn programs_hear_the_colors_of_the_client_active_last() {
     let light = OuterColors {
         foreground: Some(OUTER_BACKGROUND),
