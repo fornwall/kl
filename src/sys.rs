@@ -48,9 +48,6 @@ impl WinSize {
     }
 }
 
-/// # Errors
-///
-/// Fails if `fd` is not a terminal.
 pub fn winsize(fd: BorrowedFd<'_>) -> io::Result<WinSize> {
     let mut size = MaybeUninit::<libc::winsize>::zeroed();
     // SAFETY: TIOCGWINSZ writes a `winsize` to the valid pointer it gets.
@@ -65,18 +62,12 @@ pub fn winsize(fd: BorrowedFd<'_>) -> io::Result<WinSize> {
     })
 }
 
-/// # Errors
-///
-/// Fails if `fd` is not a terminal.
 pub fn set_winsize(fd: BorrowedFd<'_>, size: WinSize) -> io::Result<()> {
     let size = size.to_libc();
     // SAFETY: TIOCSWINSZ reads a `winsize` from the valid pointer it gets.
     check(unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, &raw const size) }).map(drop)
 }
 
-/// # Errors
-///
-/// Fails if `fd` is not open.
 pub fn set_nonblocking(fd: BorrowedFd<'_>) -> io::Result<()> {
     // SAFETY: F_GETFL takes no argument and does not touch memory.
     let flags = check(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) })?;
@@ -132,10 +123,6 @@ fn become_session_leader() -> io::Result<()> {
 }
 
 /// Spawns `command` on a new pty, returning the master side and the child.
-///
-/// # Errors
-///
-/// Fails if no pty is available or the command cannot be started.
 pub fn spawn_on_pty(mut command: Command, size: WinSize) -> io::Result<(File, Child)> {
     let (master, slave) = open_pty(size)?;
     command
@@ -152,10 +139,6 @@ pub fn spawn_on_pty(mut command: Command, size: WinSize) -> io::Result<(File, Ch
 }
 
 /// Starts a program detached from the terminal, in a session of its own.
-///
-/// # Errors
-///
-/// Fails if the command cannot be started.
 pub fn spawn_daemon(mut command: Command) -> io::Result<Child> {
     fn detach() -> io::Result<()> {
         // SAFETY: Takes no arguments and does not touch memory.
@@ -172,9 +155,6 @@ pub struct RawMode<'a> {
 }
 
 impl<'a> RawMode<'a> {
-    /// # Errors
-    ///
-    /// Fails if `fd` is not a terminal.
     pub fn enter(fd: BorrowedFd<'a>) -> io::Result<Self> {
         let mut termios = MaybeUninit::<libc::termios>::zeroed();
         // SAFETY: Writes a `termios` to the valid pointer it gets.
@@ -207,16 +187,11 @@ extern "C" fn on_signal(signal: c_int) {
     let byte = signal.to_ne_bytes()[0];
     // SAFETY: `write` is async-signal-safe and `byte` is a valid local. If the
     // pipe is full, a wakeup is already pending, so a failure can be ignored.
-    let result = unsafe { libc::write(fd, (&raw const byte).cast(), 1) };
-    std::hint::black_box(result);
+    unsafe { libc::write(fd, (&raw const byte).cast(), 1) };
 }
 
 /// Delivers the given signals as bytes on the returned pipe, so that the event
 /// loop can wait for them along with everything else.
-///
-/// # Errors
-///
-/// Fails if the pipe cannot be created or a handler cannot be installed.
 pub fn watch_signals(signals: &[c_int]) -> io::Result<File> {
     let (reader, writer) = io::pipe()?;
     let reader = OwnedFd::from(reader);
@@ -242,13 +217,11 @@ pub fn watch_signals(signals: &[c_int]) -> io::Result<File> {
 /// Reads all pending signal numbers from a pipe made by [`watch_signals`].
 pub fn pending_signals(mut pipe: &File) -> Vec<c_int> {
     let mut buf = [0_u8; 64];
-    pipe.read(&mut buf).map_or_else(
-        |_| Vec::new(),
-        |len| {
-            let signals = buf.get(..len).unwrap_or(&[]);
-            signals.iter().map(|byte| c_int::from(*byte)).collect()
-        },
-    )
+    let len = pipe.read(&mut buf).unwrap_or(0);
+    buf.iter()
+        .take(len)
+        .map(|byte| c_int::from(*byte))
+        .collect()
 }
 
 /// A set of file descriptors to wait on, using `select`.
@@ -271,13 +244,11 @@ fn empty_fd_set() -> libc::fd_set {
 }
 
 /// Whether `select` can handle this descriptor at all.
-#[must_use]
 pub fn selectable(fd: RawFd) -> bool {
     usize::try_from(fd).is_ok_and(|fd| fd < libc::FD_SETSIZE)
 }
 
 impl Selector {
-    #[must_use]
     pub fn new() -> Self {
         Self {
             read: empty_fd_set(),
@@ -304,10 +275,6 @@ impl Selector {
 
     /// Blocks until something is ready or the timeout passes. An interrupting
     /// signal counts as waking up, since its handler made the pipe readable.
-    ///
-    /// # Errors
-    ///
-    /// Fails if a descriptor in the set is invalid.
     #[cfg_attr(
         target_os = "linux",
         expect(
@@ -343,13 +310,11 @@ impl Selector {
         Err(error)
     }
 
-    #[must_use]
     pub fn readable(&self, fd: RawFd) -> bool {
         // SAFETY: The set is valid, and it is only read.
         selectable(fd) && unsafe { libc::FD_ISSET(fd, &raw const self.read) }
     }
 
-    #[must_use]
     pub fn writable(&self, fd: RawFd) -> bool {
         // SAFETY: The set is valid, and it is only read.
         selectable(fd) && unsafe { libc::FD_ISSET(fd, &raw const self.write) }
@@ -369,7 +334,6 @@ pub fn reap_children() -> Vec<u32> {
     }
 }
 
-#[must_use]
 pub fn user_id() -> u32 {
     // SAFETY: Takes no arguments, and it cannot fail.
     unsafe { libc::getuid() }
@@ -384,7 +348,6 @@ fn foreground_group(master: BorrowedFd<'_>) -> Option<libc::pid_t> {
 }
 
 /// The name of the program in the foreground of a pty.
-#[must_use]
 #[cfg(target_os = "linux")]
 pub fn foreground_name(master: BorrowedFd<'_>) -> Option<String> {
     let group = foreground_group(master)?;
@@ -393,7 +356,6 @@ pub fn foreground_name(master: BorrowedFd<'_>) -> Option<String> {
 }
 
 /// The name of the program in the foreground of a pty.
-#[must_use]
 #[cfg(target_os = "macos")]
 pub fn foreground_name(master: BorrowedFd<'_>) -> Option<String> {
     let group = foreground_group(master)?;
@@ -407,7 +369,6 @@ pub fn foreground_name(master: BorrowedFd<'_>) -> Option<String> {
 }
 
 /// The working directory of the program in the foreground of a pty.
-#[must_use]
 #[cfg(target_os = "linux")]
 pub fn foreground_cwd(master: BorrowedFd<'_>) -> Option<PathBuf> {
     let group = foreground_group(master)?;
@@ -416,14 +377,12 @@ pub fn foreground_cwd(master: BorrowedFd<'_>) -> Option<PathBuf> {
 
 /// macOS needs `proc_pidinfo` for this, so until then new panes there rely on
 /// the directory that shell integration reports.
-#[must_use]
 #[cfg(target_os = "macos")]
 pub const fn foreground_cwd(_master: BorrowedFd<'_>) -> Option<PathBuf> {
     None
 }
 
 /// The current local time, as `strftime` formats it.
-#[must_use]
 pub fn local_time(format: &CStr) -> String {
     // SAFETY: A null argument asks only for the return value.
     let now = unsafe { libc::time(ptr::null_mut()) };
@@ -449,10 +408,6 @@ pub fn local_time(format: &CStr) -> String {
 
 /// Writes as much as the descriptor takes without blocking, removing what was
 /// written from the front of `pending`.
-///
-/// # Errors
-///
-/// Fails if the other side is gone.
 pub fn flush_some(mut output: impl Write, pending: &mut Vec<u8>) -> io::Result<()> {
     let mut written = 0;
     let result = loop {

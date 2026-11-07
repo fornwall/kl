@@ -10,7 +10,7 @@ use std::ffi::c_int;
 use crate::ghostty::key::{
     self, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_NUM_LOCK, MOD_SHIFT, MOD_SUPER,
 };
-use crate::ghostty::{KeyAction, KeyInput, Rgb};
+use crate::ghostty::{KeyAction, KeyInput, MouseAction, MouseButton, Rgb};
 
 /// A pasted text is capped so a broken terminal cannot grow the buffer forever.
 const MAX_PASTE: usize = 64 * 1024 * 1024;
@@ -53,7 +53,6 @@ impl KeyEvent {
 
     /// The form the libghostty-vt encoder takes. Shift that went into producing
     /// the text must not also be reported as a modifier of it.
-    #[must_use]
     pub fn as_input(&self) -> KeyInput<'_> {
         KeyInput {
             action: self.action,
@@ -70,20 +69,17 @@ impl KeyEvent {
     }
 
     /// The modifiers a key binding cares about.
-    #[must_use]
     pub const fn binding_mods(&self) -> u16 {
         self.mods & !(MOD_CAPS_LOCK | MOD_NUM_LOCK)
     }
 
     /// Whether this is the given character with control held.
-    #[must_use]
     pub fn is_ctrl(&self, c: char) -> bool {
         self.binding_mods() == MOD_CTRL && self.unshifted == u32::from(c)
     }
 
     /// The character a binding should see: the produced text if there is any,
     /// otherwise the bare key, which makes control keys match their letter.
-    #[must_use]
     pub fn char(&self) -> Option<char> {
         single_char(&self.text).or_else(|| char::from_u32(self.unshifted))
     }
@@ -96,27 +92,9 @@ fn single_char(text: &str) -> Option<char> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MouseKind {
-    Press,
-    Release,
-    /// Moved, possibly dragging the given button.
-    Motion,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MouseButton {
-    Left,
-    Middle,
-    Right,
-    WheelUp,
-    WheelDown,
-    WheelLeft,
-    WheelRight,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MouseEvent {
-    pub kind: MouseKind,
+    pub action: MouseAction,
+    /// For motion, the button being dragged.
     pub button: Option<MouseButton>,
     pub mods: u16,
     /// Zero-based cell position.
@@ -155,7 +133,6 @@ enum Step {
 
 impl Parser {
     /// Whether a lone escape is waiting to see if a sequence follows it.
-    #[must_use]
     pub fn has_pending_escape(&self) -> bool {
         self.paste.is_none() && self.pending == [0x1b]
     }
@@ -524,13 +501,13 @@ fn parse_mouse(params: &str, pressed: bool) -> Option<MouseEvent> {
         67 => Some(MouseButton::WheelRight),
         _ => None,
     };
-    let kind = match (code & 32 != 0, pressed) {
-        (true, _) => MouseKind::Motion,
-        (false, true) => MouseKind::Press,
-        (false, false) => MouseKind::Release,
+    let action = match (code & 32 != 0, pressed) {
+        (true, _) => MouseAction::Motion,
+        (false, true) => MouseAction::Press,
+        (false, false) => MouseAction::Release,
     };
     Some(MouseEvent {
-        kind,
+        action,
         button,
         mods,
         x: x.saturating_sub(1),
@@ -699,7 +676,7 @@ mod tests {
     #[test]
     fn reads_mouse_events() {
         let press = MouseEvent {
-            kind: MouseKind::Press,
+            action: MouseAction::Press,
             button: Some(MouseButton::Left),
             mods: 0,
             x: 9,
@@ -709,21 +686,21 @@ mod tests {
         assert_eq!(
             events(b"\x1b[<0;10;20m"),
             [Event::Mouse(MouseEvent {
-                kind: MouseKind::Release,
+                action: MouseAction::Release,
                 ..press
             })]
         );
         assert_eq!(
             events(b"\x1b[<32;10;20M"),
             [Event::Mouse(MouseEvent {
-                kind: MouseKind::Motion,
+                action: MouseAction::Motion,
                 ..press
             })]
         );
         assert_eq!(
             events(b"\x1b[<35;10;20M"),
             [Event::Mouse(MouseEvent {
-                kind: MouseKind::Motion,
+                action: MouseAction::Motion,
                 button: None,
                 ..press
             })]
@@ -749,7 +726,7 @@ mod tests {
         assert_eq!(
             events(b"\x1b[<128;1;1M"),
             [Event::Mouse(MouseEvent {
-                kind: MouseKind::Press,
+                action: MouseAction::Press,
                 button: None,
                 mods: 0,
                 x: 0,

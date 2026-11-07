@@ -10,7 +10,7 @@ use crate::input::KeyEvent;
 const MESSAGE_TIME: Duration = Duration::from_secs(3);
 
 /// What to do with the text of a finished prompt.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum PromptAction {
     /// Run the text as a command.
     Command,
@@ -20,7 +20,7 @@ pub enum PromptAction {
 }
 
 pub struct Prompt {
-    pub label: String,
+    pub label: &'static str,
     pub action: PromptAction,
     text: Vec<char>,
     cursor: usize,
@@ -35,10 +35,10 @@ pub enum PromptOutcome {
 }
 
 impl Prompt {
-    pub fn new(label: &str, initial: &str, action: PromptAction) -> Self {
+    pub fn new(label: &'static str, initial: &str, action: PromptAction) -> Self {
         let text: Vec<char> = initial.chars().collect();
         Self {
-            label: label.to_owned(),
+            label,
             action,
             cursor: text.len(),
             text,
@@ -107,10 +107,8 @@ impl Ui {
         self.message = Some((text, Instant::now() + MESSAGE_TIME));
     }
 
-    /// The message on display, if it is still current.
     pub fn message(&self) -> Option<&str> {
-        let (text, expires) = self.message.as_ref()?;
-        (Instant::now() < *expires).then_some(text.as_str())
+        self.message.as_ref().map(|(text, _)| text.as_str())
     }
 
     /// When the message on display goes away.
@@ -205,11 +203,15 @@ mod tests {
     }
 
     #[test]
-    fn messages_can_expire() {
+    fn messages_expire() {
         let mut ui = Ui::default();
         assert_eq!(ui.message(), None);
         ui.show_message("hi".to_owned());
         assert_eq!(ui.message(), Some("hi"));
         assert!(!ui.expire_message());
+
+        ui.message = Some(("hi".to_owned(), Instant::now()));
+        assert!(ui.expire_message());
+        assert_eq!(ui.message(), None);
     }
 }

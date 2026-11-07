@@ -76,7 +76,6 @@ const SCROLL_LOCK: c_int = 149;
 const PAUSE: c_int = 150;
 
 /// The key whose unshifted character is `codepoint` on a US layout.
-#[must_use]
 pub fn from_codepoint(codepoint: u32) -> c_int {
     let Some(c) = char::from_u32(codepoint) else {
         return UNIDENTIFIED;
@@ -102,7 +101,6 @@ pub fn from_codepoint(codepoint: u32) -> c_int {
 
 /// The key that a `CSI code u` sequence names. `None` means the code stands for
 /// a character, which [`from_codepoint`] handles.
-#[must_use]
 pub const fn from_kitty_code(code: u32) -> Option<c_int> {
     Some(match code {
         9 => TAB,
@@ -153,7 +151,6 @@ pub const fn from_kitty_code(code: u32) -> Option<c_int> {
 }
 
 /// The key of a `CSI number ~` sequence.
-#[must_use]
 pub const fn from_tilde_code(code: u32) -> Option<c_int> {
     Some(match code {
         1 | 7 => HOME,
@@ -170,7 +167,6 @@ pub const fn from_tilde_code(code: u32) -> Option<c_int> {
 }
 
 /// The key of a `CSI 1 ; mods letter` or `SS3 letter` sequence.
-#[must_use]
 pub const fn from_final_letter(letter: u8) -> Option<c_int> {
     Some(match letter {
         b'A' => ARROW_UP,
@@ -189,7 +185,6 @@ pub const fn from_final_letter(letter: u8) -> Option<c_int> {
 
 /// Whether this is a modifier key on its own, which the kitty protocol reports
 /// when asked to report all keys.
-#[must_use]
 pub const fn is_modifier(key: c_int) -> bool {
     matches!(
         key,

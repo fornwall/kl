@@ -692,6 +692,24 @@ fn refuses_to_nest() {
 }
 
 #[test]
+fn moving_the_mouse_over_nothing_draws_nothing() {
+    let mut screen = Screen::new(80, 24);
+    screen.pump();
+    let start = screen.raw.len();
+    for x in 0..20 {
+        screen.mouse(35, x, 5, true);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    screen.pump();
+    let frames = screen.raw[start..]
+        .windows(8)
+        .filter(|window| *window == b"\x1b[?2026h")
+        .count();
+    // One is allowed for, in case the clock on the status line moved on.
+    assert!(frames <= 1, "{frames} frames");
+}
+
+#[test]
 fn follows_the_outer_terminal_size() {
     let mut screen = Screen::new(80, 24);
     screen.prefix("%");

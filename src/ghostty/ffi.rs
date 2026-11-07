@@ -47,7 +47,6 @@ pub const RENDER_DATA_DIRTY: c_int = 3;
 pub const RENDER_DATA_ROW_ITERATOR: c_int = 4;
 pub const RENDER_DATA_CURSOR: c_int = 18;
 
-pub const RENDER_DIRTY_FALSE: c_int = 0;
 pub const RENDER_DIRTY_FULL: c_int = 2;
 
 pub const ROW_DATA_DIRTY: c_int = 1;
@@ -125,6 +124,8 @@ pub struct Style {
     pub reserved: u16,
 }
 
+/// Position of the viewport in the scrollback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct Scrollbar {
     pub total: u64,

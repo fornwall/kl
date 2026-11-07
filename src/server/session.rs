@@ -1,7 +1,6 @@
 //! The single session: its windows and panes.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use super::layout::{self, Node, PaneId, Rect};
 use super::pane::{Pane, Spawn};
@@ -20,6 +19,17 @@ pub struct Window {
     pub zoomed: bool,
     /// A pane rang the bell while this window was not being looked at.
     pub bell: bool,
+}
+
+impl Window {
+    /// The panes on display in the given area.
+    fn visible(&self, area: Rect) -> Vec<(PaneId, Rect)> {
+        if self.zoomed {
+            vec![(self.active, area)]
+        } else {
+            self.root.panes(area)
+        }
+    }
 }
 
 pub struct Session {
@@ -100,14 +110,8 @@ impl Session {
 
     /// The panes of the current window that can be seen, with their areas.
     pub fn visible_panes(&self) -> Vec<(PaneId, Rect)> {
-        let Some(window) = self.window() else {
-            return Vec::new();
-        };
-        if window.zoomed {
-            vec![(window.active, self.area())]
-        } else {
-            window.root.panes(self.area())
-        }
+        self.window()
+            .map_or_else(Vec::new, |window| window.visible(self.area()))
     }
 
     /// Whether this pane is on the screen right now.
@@ -120,12 +124,7 @@ impl Session {
         let area = self.area();
         let cell_size = self.cell_size();
         for window in &self.windows {
-            let placements = if window.zoomed {
-                vec![(window.active, area)]
-            } else {
-                window.root.panes(area)
-            };
-            for (id, rect) in placements {
+            for (id, rect) in window.visible(area) {
                 if let Some(pane) = self.panes.get_mut(&id) {
                     pane.place(rect, cell_size);
                 }
@@ -141,14 +140,9 @@ impl Session {
         }
     }
 
-    /// The directory for a new pane, which follows the active pane.
-    fn new_pane_cwd(&self) -> Option<PathBuf> {
-        self.active_pane()?.working_directory()
-    }
-
     fn spawn_pane(&mut self, program: &[String], size: Rect) -> Result<PaneId, String> {
         let id = self.next_pane;
-        let cwd = self.new_pane_cwd();
+        let cwd = self.active_pane().and_then(Pane::working_directory);
         let spawn = Spawn {
             program,
             cwd: cwd.as_deref(),
@@ -242,13 +236,8 @@ impl Session {
             window.last_active = None;
         }
         if window.active == id {
-            let fallback = window
-                .root
-                .panes(Rect::default())
-                .first()
-                .map(|(id, _)| *id);
-            let next = window.last_active.take().or(fallback);
-            window.active = next.unwrap_or(id);
+            let next = window.last_active.take();
+            window.active = next.unwrap_or_else(|| window.root.first_pane());
             if window.index == self.current {
                 self.report_focus(true);
             }

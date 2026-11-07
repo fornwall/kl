@@ -12,18 +12,16 @@ use super::{Lifecycle, Server};
 use crate::command::{self, Command, Direction, SplitKind};
 use crate::ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{
-    KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE,
-    MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_WHEEL_DOWN, MOUSE_BUTTON_WHEEL_LEFT, MOUSE_BUTTON_WHEEL_RIGHT,
-    MOUSE_BUTTON_WHEEL_UP, MouseAction, MouseInput, Rgb,
+    KeyAction, KeyInput, MODE_ALTERNATE_SCROLL, MouseAction, MouseButton, MouseInput, Rgb,
 };
-use crate::input::{Event, KeyEvent, MouseButton, MouseEvent, MouseKind};
+use crate::input::{Event, KeyEvent, MouseEvent};
 use crate::proto::ServerMessage;
 
 /// How close together clicks must be to count as a double or triple click.
 const MULTI_CLICK_TIME: Duration = Duration::from_millis(400);
 
 /// Rows moved for each step of the wheel.
-const WHEEL_ROWS: isize = 3;
+const WHEEL_ROWS: i32 = 3;
 
 /// What dragging the mouse is doing right now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -52,7 +50,7 @@ pub struct Click {
 /// What a key does after the prefix.
 enum Binding {
     Run(Command),
-    Confirm(String, Command),
+    Confirm(&'static str, Command),
     CommandPrompt,
     RenamePrompt,
     SendPrefix,
@@ -120,28 +118,10 @@ fn prefix_binding(event: &KeyEvent) -> Option<Binding> {
         '"' => split(SplitKind::Vertical),
         ':' => Some(Binding::CommandPrompt),
         ',' => Some(Binding::RenamePrompt),
-        'x' => Some(Binding::Confirm(
-            "kill-pane? (y/n) ".to_owned(),
-            Command::KillPane,
-        )),
-        '&' => Some(Binding::Confirm(
-            "kill-window? (y/n) ".to_owned(),
-            Command::KillWindow,
-        )),
+        'x' => Some(Binding::Confirm("kill-pane? (y/n) ", Command::KillPane)),
+        '&' => Some(Binding::Confirm("kill-window? (y/n) ", Command::KillWindow)),
         digit @ '0'..='9' => run(Command::SelectWindow(digit.to_digit(10)?)),
         _ => None,
-    }
-}
-
-const fn button_code(button: MouseButton) -> c_int {
-    match button {
-        MouseButton::Left => MOUSE_BUTTON_LEFT,
-        MouseButton::Middle => MOUSE_BUTTON_MIDDLE,
-        MouseButton::Right => MOUSE_BUTTON_RIGHT,
-        MouseButton::WheelUp => MOUSE_BUTTON_WHEEL_UP,
-        MouseButton::WheelDown => MOUSE_BUTTON_WHEEL_DOWN,
-        MouseButton::WheelLeft => MOUSE_BUTTON_WHEEL_LEFT,
-        MouseButton::WheelRight => MOUSE_BUTTON_WHEEL_RIGHT,
     }
 }
 
@@ -263,22 +243,20 @@ impl Server {
     }
 
     fn run_binding(&mut self, event: &KeyEvent) {
+        self.dirty = true;
         match prefix_binding(event) {
             Some(Binding::Run(command)) => self.run_interactive(command),
             Some(Binding::Confirm(label, command)) => {
                 let action = PromptAction::Confirm(command);
-                self.ui.prompt = Some(Prompt::new(&label, "", action));
-                self.dirty = true;
+                self.ui.prompt = Some(Prompt::new(label, "", action));
             }
             Some(Binding::CommandPrompt) => {
                 self.ui.prompt = Some(Prompt::new(":", "", PromptAction::Command));
-                self.dirty = true;
             }
             Some(Binding::RenamePrompt) => {
                 let name = self.session.window().map_or("", |window| &window.name);
                 let prompt = Prompt::new("(rename-window) ", name, PromptAction::RenameWindow);
                 self.ui.prompt = Some(prompt);
-                self.dirty = true;
             }
             Some(Binding::SendPrefix) => self.forward_key(event),
             None => {}
@@ -291,41 +269,31 @@ impl Server {
             Ok(text) if text.is_empty() => {}
             Ok(text) | Err(text) => self.ui.show_message(text),
         }
-        self.dirty = true;
     }
 
     fn prompt_key(&mut self, event: &KeyEvent) {
-        let Some(prompt) = &mut self.ui.prompt else {
+        let Some(mut prompt) = self.ui.prompt.take() else {
             return;
         };
         self.dirty = true;
         match prompt.handle_key(event) {
-            PromptOutcome::Editing => {}
-            PromptOutcome::Cancelled => self.ui.prompt = None,
-            PromptOutcome::Done(text) => {
-                let action = prompt.action.clone();
-                self.ui.prompt = None;
-                match action {
-                    PromptAction::Command => self.run_prompt_line(&text),
-                    PromptAction::RenameWindow => {
-                        self.run_interactive(Command::RenameWindow(text));
-                    }
-                    PromptAction::Confirm(command) => self.run_interactive(command),
-                }
-            }
+            PromptOutcome::Editing => self.ui.prompt = Some(prompt),
+            PromptOutcome::Cancelled => {}
+            PromptOutcome::Done(text) => match prompt.action {
+                PromptAction::Command => self.run_prompt_line(&text),
+                PromptAction::RenameWindow => self.run_interactive(Command::RenameWindow(text)),
+                PromptAction::Confirm(command) => self.run_interactive(command),
+            },
         }
     }
 
     fn run_prompt_line(&mut self, line: &str) {
-        let parsed = command::split_words(line).and_then(|words| {
-            if words.is_empty() {
-                return Ok(None);
-            }
-            command::parse(&words).map(Some)
-        });
-        match parsed {
-            Ok(Some(command)) => self.run_interactive(command),
-            Ok(None) => {}
+        let words = command::split_words(line);
+        if words.as_ref().is_ok_and(Vec::is_empty) {
+            return;
+        }
+        match words.and_then(|words| command::parse(&words)) {
+            Ok(command) => self.run_interactive(command),
             Err(error) => self.ui.show_message(error),
         }
     }
@@ -408,7 +376,7 @@ impl Server {
 
     fn detach(&mut self) {
         if let Some(id) = self.attached.take()
-            && let Some(connection) = self.connection(id)
+            && let Some(connection) = self.connection_mut(id)
         {
             connection.finish(&ServerMessage::Exit("[detached]".to_owned()));
         }
@@ -418,14 +386,13 @@ impl Server {
         if let Some(pane) = self.session.active_pane_mut() {
             CopyMode::enter(pane, false);
             if page_up {
-                pane.terminal
-                    .scroll_by(-isize::from(pane.rect.height.cast_signed()));
+                pane.terminal.scroll_by(-i32::from(pane.rect.height));
             }
         }
     }
 
     fn paste_buffer(&mut self) {
-        let Some(text) = self.buffers.last() else {
+        let Some(text) = &self.buffer else {
             return;
         };
         if let Some(pane) = self.session.active_pane_mut() {
@@ -436,12 +403,12 @@ impl Server {
 
     fn list_windows(&self) -> String {
         let area = self.session.area();
+        let (width, height) = (area.width, area.height);
         let line = |window: &Window| {
             let panes = window.root.panes(area).len();
             let current = window.index == self.session.current;
             let marker = if current { " (active)" } else { "" };
-            let (index, name, width, height) =
-                (window.index, &window.name, area.width, area.height);
+            let (index, name) = (window.index, &window.name);
             format!("{index}: {name} ({panes} panes) [{width}x{height}]{marker}\n")
         };
         self.session.windows.iter().map(line).collect()
@@ -453,11 +420,8 @@ impl Server {
         };
         let panes = window.root.panes(self.session.area());
         let line = |(index, (id, rect)): (usize, &(PaneId, Rect))| {
-            let marker = if *id == window.active {
-                " (active)"
-            } else {
-                ""
-            };
+            let active = *id == window.active;
+            let marker = if active { " (active)" } else { "" };
             let (width, height) = (rect.width, rect.height);
             format!("{index}: [{width}x{height}] %{id}{marker}\n")
         };
@@ -468,9 +432,9 @@ impl Server {
         self.dirty = true;
         match self.drag.clone() {
             Drag::None => {
-                if event.kind == MouseKind::Press {
+                if event.action == MouseAction::Press {
                     self.mouse_press(event);
-                } else if event.kind == MouseKind::Motion {
+                } else if event.action == MouseAction::Motion {
                     self.mouse_hover(event);
                 }
             }
@@ -479,7 +443,7 @@ impl Server {
             Drag::Selecting(pane) => self.drag_selection(pane, event),
             Drag::Forwarding(pane) => {
                 self.forward_mouse(pane, event);
-                if event.kind == MouseKind::Release {
+                if event.action == MouseAction::Release {
                     self.drag = Drag::None;
                 }
             }
@@ -524,15 +488,11 @@ impl Server {
             return;
         };
         let (x, y) = in_pane(pane, event);
-        let held = event.kind == MouseKind::Press
-            || (event.kind == MouseKind::Motion && event.button.is_some());
+        let held = event.action == MouseAction::Press
+            || (event.action == MouseAction::Motion && event.button.is_some());
         let input = MouseInput {
-            action: match event.kind {
-                MouseKind::Press => MouseAction::Press,
-                MouseKind::Release => MouseAction::Release,
-                MouseKind::Motion => MouseAction::Motion,
-            },
-            button: event.button.map(button_code),
+            action: event.action,
+            button: event.button,
             mods: event.mods,
             x,
             y,
@@ -634,27 +594,27 @@ impl Server {
     }
 
     fn drag_divider(&mut self, divider: &Divider, event: MouseEvent) {
-        match event.kind {
-            MouseKind::Motion => {
+        match event.action {
+            MouseAction::Motion => {
                 if let Some(window) = self.session.window_mut() {
                     window.root.move_divider(divider, event.x, event.y);
                 }
                 self.session.relayout();
             }
-            MouseKind::Release | MouseKind::Press => self.drag = Drag::None,
+            MouseAction::Release | MouseAction::Press => self.drag = Drag::None,
         }
     }
 
     fn drag_from_press(&mut self, id: PaneId, start: (u16, u16), event: MouseEvent) {
-        match event.kind {
-            MouseKind::Motion => {
+        match event.action {
+            MouseAction::Motion => {
                 if let Some(pane) = self.session.panes.get_mut(&id) {
                     pane.terminal.select_start(start.0, start.1);
                 }
                 self.drag = Drag::Selecting(id);
                 self.drag_selection(id, event);
             }
-            MouseKind::Release | MouseKind::Press => self.drag = Drag::None,
+            MouseAction::Release | MouseAction::Press => self.drag = Drag::None,
         }
     }
 
@@ -663,7 +623,7 @@ impl Server {
             self.drag = Drag::None;
             return;
         };
-        if event.kind == MouseKind::Motion {
+        if event.action == MouseAction::Motion {
             let (x, y) = in_pane(pane, event);
             pane.terminal.select_extend(x, y);
             pane.redraw = true;
@@ -677,7 +637,7 @@ impl Server {
             pane.terminal.clear_selection();
             pane.redraw = true;
         }
-        if let Some(text) = text.filter(|text| !text.is_empty()) {
+        if let Some(text) = text {
             self.store_buffer(text);
         }
     }

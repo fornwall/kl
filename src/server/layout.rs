@@ -18,7 +18,6 @@ pub struct Rect {
 }
 
 impl Rect {
-    #[must_use]
     pub const fn contains(self, x: u16, y: u16) -> bool {
         x >= self.x && y >= self.y && (x - self.x) < self.width && (y - self.y) < self.height
     }
@@ -123,7 +122,6 @@ const fn divider_line(first: Rect, area: Rect, kind: SplitKind) -> Rect {
 
 impl Node {
     /// Each pane with its area, in order from top left.
-    #[must_use]
     pub fn panes(&self, area: Rect) -> Vec<(PaneId, Rect)> {
         let mut panes = Vec::new();
         self.collect_panes(area, &mut panes);
@@ -146,7 +144,6 @@ impl Node {
         }
     }
 
-    #[must_use]
     pub fn dividers(&self, area: Rect) -> Vec<Divider> {
         let mut dividers = Vec::new();
         self.collect_dividers(area, &mut Vec::new(), &mut dividers);
@@ -177,11 +174,18 @@ impl Node {
         }
     }
 
-    #[must_use]
     pub fn contains(&self, pane: PaneId) -> bool {
         match self {
             Self::Leaf(id) => *id == pane,
             Self::Split { first, second, .. } => first.contains(pane) || second.contains(pane),
+        }
+    }
+
+    /// The pane at the top left.
+    pub fn first_pane(&self) -> PaneId {
+        match self {
+            Self::Leaf(id) => *id,
+            Self::Split { first, .. } => first.first_pane(),
         }
     }
 
@@ -206,7 +210,6 @@ impl Node {
 
     /// Removes a pane, giving its space to its sibling. Returns `None` if this
     /// node was the pane itself, so nothing is left of it.
-    #[must_use]
     pub fn remove(self, pane: PaneId) -> Option<Self> {
         match self {
             Self::Leaf(id) if id == pane => None,
@@ -255,36 +258,28 @@ impl Node {
         }
     }
 
-    /// The nearest split above `pane` that runs in the direction of `kind`,
-    /// and whether the pane is on its far side.
-    fn enclosing_split(&self, pane: PaneId, kind: SplitKind) -> Option<(Vec<bool>, bool)> {
-        fn search(
-            node: &Node,
-            pane: PaneId,
-            kind: SplitKind,
-            path: &mut Vec<bool>,
-        ) -> Option<(Vec<bool>, bool)> {
-            let Node::Split {
-                kind: node_kind,
-                first,
-                second,
-                ..
-            } = node
-            else {
-                return None;
-            };
-            for (side, child) in [(false, first), (true, second)] {
-                if !child.contains(pane) {
-                    continue;
-                }
-                path.push(side);
-                let deeper = search(child, pane, kind, path);
-                path.pop();
-                return deeper.or_else(|| (*node_kind == kind).then(|| (path.clone(), side)));
-            }
-            None
+    /// The path to the nearest split above `pane` that runs in the direction
+    /// of `kind`.
+    fn enclosing_split(&self, pane: PaneId, kind: SplitKind) -> Option<Vec<bool>> {
+        let Self::Split {
+            kind: own_kind,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let side = second.contains(pane);
+        let child = if side { second } else { first };
+        if !child.contains(pane) {
+            return None;
         }
-        search(self, pane, kind, &mut Vec::new())
+        let deeper = child.enclosing_split(pane, kind).map(|mut path| {
+            path.insert(0, side);
+            path
+        });
+        deeper.or_else(|| (*own_kind == kind).then(Vec::new))
     }
 
     /// Moves the border of a pane by some cells, like `resize-pane`. The border
@@ -294,7 +289,7 @@ impl Node {
             Direction::Left | Direction::Right => SplitKind::Horizontal,
             Direction::Up | Direction::Down => SplitKind::Vertical,
         };
-        let Some((path, _)) = self.enclosing_split(pane, kind) else {
+        let Some(path) = self.enclosing_split(pane, kind) else {
             return;
         };
         let Some(divider) = self.dividers(area).into_iter().find(|d| d.path == path) else {
@@ -318,7 +313,6 @@ fn overlap(a_start: u16, a_end: u16, b_start: u16, b_end: u16) -> u16 {
 
 /// The pane next to `from` in a direction, wrapping around the window edge like
 /// tmux. Among several candidates, picks the one sharing the longest edge.
-#[must_use]
 pub fn neighbor(
     panes: &[(PaneId, Rect)],
     from: PaneId,

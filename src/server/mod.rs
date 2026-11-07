@@ -41,9 +41,6 @@ const TICK_TIME: Duration = Duration::from_secs(1);
 /// How long a server waits for its first client before giving up.
 const STARTUP_TIME: Duration = Duration::from_secs(10);
 
-/// How many copied texts to keep.
-const MAX_BUFFERS: usize = 50;
-
 /// How long a client gets to take in the goodbye, since one that stopped reading
 /// must not keep the server alive.
 const GOODBYE_TIME: Duration = Duration::from_secs(1);
@@ -127,8 +124,8 @@ pub struct Server {
     swallowed: Vec<c_int>,
     drag: Drag,
     last_click: Option<Click>,
-    /// Copied texts, newest last.
-    buffers: Vec<String>,
+    /// The text copied last.
+    buffer: Option<String>,
     /// Something changed that may need a new frame.
     dirty: bool,
     last_frame: Instant,
@@ -166,10 +163,6 @@ fn bind(path: &Path) -> io::Result<Option<UnixListener>> {
 }
 
 /// Runs a server on the given socket until the session ends.
-///
-/// # Errors
-///
-/// Fails if the socket or the event loop fails.
 pub fn run(socket: &Path) -> Result<(), Box<dyn Error>> {
     let Some(listener) = bind(socket)? else {
         return Ok(());
@@ -191,7 +184,7 @@ pub fn run(socket: &Path) -> Result<(), Box<dyn Error>> {
         swallowed: Vec::new(),
         drag: Drag::None,
         last_click: None,
-        buffers: Vec::new(),
+        buffer: None,
         dirty: false,
         last_frame: now,
         last_tick: now,
@@ -322,14 +315,20 @@ impl Server {
         for (id, message) in messages {
             self.handle_message(id, message);
         }
-        let attached = self.attached;
         self.connections.retain(|connection| !connection.closed);
-        if attached.is_some_and(|id| !self.connections.iter().any(|c| c.id == id)) {
+        if self
+            .attached
+            .is_some_and(|id| self.connection(id).is_none())
+        {
             self.attached = None;
         }
     }
 
-    fn connection(&mut self, id: u64) -> Option<&mut Connection> {
+    fn connection(&self, id: u64) -> Option<&Connection> {
+        self.connections.iter().find(|c| c.id == id)
+    }
+
+    fn connection_mut(&mut self, id: u64) -> Option<&mut Connection> {
         self.connections.iter_mut().find(|c| c.id == id)
     }
 
@@ -358,13 +357,13 @@ impl Server {
 
     fn attach(&mut self, id: u64, version: u32, size: WinSize) {
         if let Some(error) = Self::version_error(version) {
-            if let Some(connection) = self.connection(id) {
+            if let Some(connection) = self.connection_mut(id) {
                 connection.finish(&ServerMessage::Exit(error));
             }
             return;
         }
         if let Some(previous) = self.attached.replace(id)
-            && let Some(connection) = self.connection(previous)
+            && let Some(connection) = self.connection_mut(previous)
         {
             connection.finish(&ServerMessage::Exit(
                 "[detached (from another client)]".to_owned(),
@@ -378,7 +377,7 @@ impl Server {
         if self.lifecycle == Lifecycle::Starting {
             self.lifecycle = Lifecycle::Running;
             if let Err(error) = self.session.new_window(None, &[]) {
-                if let Some(connection) = self.connection(id) {
+                if let Some(connection) = self.connection_mut(id) {
                     connection.finish(&ServerMessage::Exit(error));
                 }
                 self.lifecycle = Lifecycle::Quitting;
@@ -398,7 +397,7 @@ impl Server {
             Ok(text) => (true, text),
             Err(text) => (false, text),
         };
-        if let Some(connection) = self.connection(id) {
+        if let Some(connection) = self.connection_mut(id) {
             connection.finish(&ServerMessage::Result { success, text });
         }
     }
@@ -442,7 +441,7 @@ impl Server {
 
     fn send_output(&mut self, bytes: &[u8]) {
         if let Some(id) = self.attached
-            && let Some(connection) = self.connection(id)
+            && let Some(connection) = self.connection_mut(id)
         {
             connection.send(&ServerMessage::Output(bytes.to_vec()));
         }
@@ -457,10 +456,9 @@ impl Server {
     }
 
     fn store_buffer(&mut self, text: String) {
-        self.send_clipboard(text.as_bytes());
-        self.buffers.push(text);
-        if self.buffers.len() > MAX_BUFFERS {
-            self.buffers.remove(0);
+        if !text.is_empty() {
+            self.send_clipboard(text.as_bytes());
+            self.buffer = Some(text);
         }
     }
 
@@ -511,11 +509,7 @@ impl Server {
     fn can_draw(&self) -> bool {
         // Holding off while the client catches up is the flow control: what it
         // misses never gets sent, since each frame is a diff of the latest state.
-        let connection = self.attached.and_then(|id| {
-            self.connections
-                .iter()
-                .find(|connection| connection.id == id)
-        });
+        let connection = self.attached.and_then(|id| self.connection(id));
         connection.is_some_and(|connection| connection.output.is_empty())
     }
 

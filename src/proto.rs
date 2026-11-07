@@ -87,18 +87,18 @@ impl<'a> Reader<'a> {
         Ok(head)
     }
 
+    fn take_array<const LEN: usize>(&mut self) -> Result<[u8; LEN], Malformed> {
+        let (head, tail) = self.0.split_first_chunk().ok_or(Malformed)?;
+        self.0 = tail;
+        Ok(*head)
+    }
+
     fn take_u16(&mut self) -> Result<u16, Malformed> {
-        let &[a, b] = self.take(2)? else {
-            return Err(Malformed);
-        };
-        Ok(u16::from_le_bytes([a, b]))
+        self.take_array().map(u16::from_le_bytes)
     }
 
     fn take_u32(&mut self) -> Result<u32, Malformed> {
-        let &[a, b, c, d] = self.take(4)? else {
-            return Err(Malformed);
-        };
-        Ok(u32::from_le_bytes([a, b, c, d]))
+        self.take_array().map(u32::from_le_bytes)
     }
 
     fn take_size(&mut self) -> Result<WinSize, Malformed> {
@@ -168,10 +168,6 @@ impl ClientMessage {
 
     /// Decodes the first message in `buffer`, returning how much of it was
     /// used, or `None` if more bytes are needed.
-    ///
-    /// # Errors
-    ///
-    /// Fails on anything that is not a valid message.
     pub fn decode(buffer: &[u8]) -> Result<Option<(Self, usize)>, Malformed> {
         let Some((tag, payload, used)) = split_frame(buffer)? else {
             return Ok(None);
@@ -213,10 +209,6 @@ impl ServerMessage {
 
     /// Decodes the first message in `buffer`, returning how much of it was
     /// used, or `None` if more bytes are needed.
-    ///
-    /// # Errors
-    ///
-    /// Fails on anything that is not a valid message.
     pub fn decode(buffer: &[u8]) -> Result<Option<(Self, usize)>, Malformed> {
         let Some((tag, payload, used)) = split_frame(buffer)? else {
             return Ok(None);

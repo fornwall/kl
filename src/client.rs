@@ -45,10 +45,6 @@ const LEAVE_TERMINAL: &[u8] = b"\x1b[?1004l\
     \x1b[?1049l";
 
 /// Where the server's socket lives, in a directory only this user can enter.
-///
-/// # Errors
-///
-/// Fails if the directory cannot be created or does not look safe to use.
 pub fn socket_path() -> io::Result<PathBuf> {
     let base = env::var_os("KL_TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
     let directory = base.join(format!("kl-{}", sys::user_id()));
@@ -120,13 +116,6 @@ fn send(mut stream: &UnixStream, message: &ClientMessage) -> io::Result<()> {
     stream.write_all(&bytes)
 }
 
-/// What the server sent, for the attach loop to act on.
-enum Incoming {
-    Message(ServerMessage),
-    Closed,
-    Nothing,
-}
-
 /// Buffers what the server sends, and splits it into messages.
 #[derive(Default)]
 struct Receiver {
@@ -143,37 +132,21 @@ impl Receiver {
         Ok(Some(message))
     }
 
-    fn read(&mut self, mut stream: &UnixStream) -> io::Result<Incoming> {
+    /// Reads what the server sent, returning whether it is still there.
+    fn read(&mut self, mut stream: &UnixStream) -> io::Result<bool> {
         let mut buf = [0; 16 * 1024];
         match stream.read(&mut buf) {
-            Ok(0) => Ok(Incoming::Closed),
             Ok(len) => {
                 self.buffer.extend_from_slice(buf.get(..len).unwrap_or(&[]));
-                Ok(Incoming::Nothing)
+                Ok(len > 0)
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(Incoming::Nothing),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(true),
             Err(error) => Err(error),
-        }
-    }
-
-    /// Reads until a message is complete.
-    fn wait(&mut self, stream: &UnixStream) -> Result<Incoming, Box<dyn Error>> {
-        loop {
-            if let Some(message) = self.next_message()? {
-                return Ok(Incoming::Message(message));
-            }
-            if matches!(self.read(stream)?, Incoming::Closed) {
-                return Ok(Incoming::Closed);
-            }
         }
     }
 }
 
 /// Attaches this terminal, returning what to tell the user afterwards.
-///
-/// # Errors
-///
-/// Fails if this is not a terminal or the server cannot be reached.
 pub fn attach(socket: &Path) -> Result<String, Box<dyn Error>> {
     if env::var_os("KL").is_some() {
         return Err("sessions should be nested with care, unset $KL to force".into());
@@ -236,7 +209,7 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn 
             }
         }
         if selector.readable(stream.as_raw_fd()) {
-            if matches!(receiver.read(stream)?, Incoming::Closed) {
+            if !receiver.read(stream)? {
                 return Ok("[lost server]".to_owned());
             }
             while let Some(message) = receiver.next_message()? {
@@ -255,10 +228,6 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn 
 
 /// Runs one command on the running server, returning whether it succeeded and
 /// what it printed.
-///
-/// # Errors
-///
-/// Fails if no server is running.
 pub fn run_command(socket: &Path, args: &[String]) -> Result<(bool, String), Box<dyn Error>> {
     let stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
@@ -274,12 +243,16 @@ pub fn run_command(socket: &Path, args: &[String]) -> Result<(bool, String), Box
         },
     )?;
     let mut receiver = Receiver::default();
-    match receiver.wait(&stream)? {
-        Incoming::Message(ServerMessage::Result { success, text }) => Ok((success, text)),
-        // kill-server can take the server down before it gets to answer.
-        Incoming::Message(ServerMessage::Exit(_)) | Incoming::Closed => Ok((true, String::new())),
-        Incoming::Message(ServerMessage::Output(_)) | Incoming::Nothing => {
-            Err("unexpected reply from the server".into())
+    loop {
+        match receiver.next_message()? {
+            Some(ServerMessage::Result { success, text }) => return Ok((success, text)),
+            Some(ServerMessage::Output(_)) => {
+                return Err("unexpected reply from the server".into());
+            }
+            // kill-server can take the server down before it gets to answer.
+            Some(ServerMessage::Exit(_)) => return Ok((true, String::new())),
+            None if !receiver.read(&stream)? => return Ok((true, String::new())),
+            None => {}
         }
     }
 }

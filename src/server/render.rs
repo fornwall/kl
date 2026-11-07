@@ -143,12 +143,8 @@ pub struct StatusEntry {
     pub window: u32,
 }
 
-/// What the terminal's cursor should look like, as last sent.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct CursorState {
-    visible: bool,
-    shape: u8,
-}
+/// Where the cursor belongs and its DECSCUSR style, if it is to be seen at all.
+type CursorTarget = Option<(u16, u16, u8)>;
 
 #[derive(Default)]
 pub struct Renderer {
@@ -156,7 +152,8 @@ pub struct Renderer {
     next: Grid,
     /// Nothing on the terminal can be trusted, as after attaching.
     reset: bool,
-    cursor: Option<CursorState>,
+    /// The cursor as last sent, if the terminal's can be trusted.
+    cursor: Option<CursorTarget>,
     title: String,
     pub status_entries: Vec<StatusEntry>,
 }
@@ -303,22 +300,22 @@ impl Renderer {
 
     fn emit_changes(&mut self, out: &mut Vec<u8>) {
         let mut pen = Pen::default();
-        for y in 0..self.next.rows {
-            let mut x = 0;
-            while x < self.next.cols {
-                let index = usize::from(y) * usize::from(self.next.cols) + usize::from(x);
-                let (Some(next), Some(shown)) =
-                    (self.next.cells.get(index), self.shown.cells.get(index))
-                else {
-                    break;
-                };
+        let cols = usize::from(self.next.cols).max(1);
+        let rows = self
+            .next
+            .cells
+            .chunks(cols)
+            .zip(self.shown.cells.chunks(cols));
+        for (y, (next, shown)) in (0..).zip(rows) {
+            let mut cells = (0..).zip(next.iter().zip(shown));
+            while let Some((x, (next, shown))) = cells.next() {
                 // The right half of a character is drawn along with its left.
-                if next == shown || next.width == Width::Tail {
-                    x += 1;
-                    continue;
+                if next != shown && next.width != Width::Tail {
+                    pen.draw(x, y, next, out);
+                    if next.width == Width::Wide {
+                        cells.next();
+                    }
                 }
-                pen.draw(x, y, next, out);
-                x += if next.width == Width::Wide { 2 } else { 1 };
             }
         }
         if pen.drew {
@@ -329,23 +326,21 @@ impl Renderer {
 
     fn emit_cursor(&mut self, session: &Session, ui: &Ui, out: &mut Vec<u8>) {
         let wanted = cursor_target(session, ui);
-        let state = CursorState {
-            visible: wanted.is_some(),
-            shape: wanted.map_or(0, |(_, _, shape)| shape),
-        };
-        if let Some((x, y, _)) = wanted {
-            // Always positioned, since drawing the frame moved the cursor.
+        let known = self.cursor.replace(wanted);
+        // Drawing moves the cursor, so if anything was drawn it has to go back.
+        if let Some((x, y, _)) = wanted
+            && (!out.is_empty() || known != Some(wanted))
+        {
             push_move(out, x, y);
         }
-        if self.cursor == Some(state) {
+        let shape = |target: CursorTarget| target.map(|(_, _, shape)| shape);
+        if known.map(shape) == Some(shape(wanted)) {
             return;
         }
-        if state.visible {
-            out.extend_from_slice(format!("\x1b[{} q\x1b[?25h", state.shape).as_bytes());
-        } else {
-            out.extend_from_slice(b"\x1b[?25l");
+        match shape(wanted) {
+            Some(shape) => out.extend_from_slice(format!("\x1b[{shape} q\x1b[?25h").as_bytes()),
+            None => out.extend_from_slice(b"\x1b[?25l"),
         }
-        self.cursor = Some(state);
     }
 
     fn emit_title(&mut self, session: &Session, out: &mut Vec<u8>) {
@@ -444,10 +439,9 @@ fn status_right(session: &Session) -> String {
     format!("\"{title}\" {time}")
 }
 
-/// Where the cursor belongs, and the DECSCUSR style to give it.
-fn cursor_target(session: &Session, ui: &Ui) -> Option<(u16, u16, u8)> {
+fn cursor_target(session: &Session, ui: &Ui) -> CursorTarget {
     if let Some(prompt) = &ui.prompt {
-        let x = text_width(&prompt.label) + text_width(&prompt.text_before_cursor());
+        let x = text_width(prompt.label) + text_width(&prompt.text_before_cursor());
         return Some((x, session.size.rows.saturating_sub(1), 2));
     }
     let pane = session.active_pane()?;

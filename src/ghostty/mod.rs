@@ -12,7 +12,7 @@ use std::ptr;
 use std::slice;
 use std::time::{Duration, Instant};
 
-pub use ffi::{Rgb, Style, StyleColor};
+pub use ffi::{Rgb, Scrollbar, Style, StyleColor};
 
 /// How long a program may freeze its pane with synchronized output.
 const RENDER_HOLD_LIMIT: Duration = Duration::from_secs(1);
@@ -39,14 +39,6 @@ pub const MODE_FOCUS_EVENT: u16 = 1004;
 pub const MODE_ALTERNATE_SCROLL: u16 = 1007;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
-
-pub const MOUSE_BUTTON_LEFT: c_int = 1;
-pub const MOUSE_BUTTON_RIGHT: c_int = 2;
-pub const MOUSE_BUTTON_MIDDLE: c_int = 3;
-pub const MOUSE_BUTTON_WHEEL_UP: c_int = 4;
-pub const MOUSE_BUTTON_WHEEL_DOWN: c_int = 5;
-pub const MOUSE_BUTTON_WHEEL_LEFT: c_int = 6;
-pub const MOUSE_BUTTON_WHEEL_RIGHT: c_int = 7;
 
 /// A `GhosttyResult` other than success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,7 +82,6 @@ pub enum Text {
 }
 
 impl Text {
-    #[must_use]
     pub fn new(text: &str) -> Self {
         let mut bytes = [0; 14];
         match (bytes.get_mut(..text.len()), u8::try_from(text.len())) {
@@ -103,7 +94,6 @@ impl Text {
         }
     }
 
-    #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
             Self::Blank => " ",
@@ -135,14 +125,6 @@ pub struct Cell {
     pub selected: bool,
 }
 
-/// How much of the render state changed since the last draw.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Dirty {
-    Clean,
-    Partial,
-    Full,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     /// Position in the viewport, if the cursor is inside of it.
@@ -159,23 +141,13 @@ pub enum CursorShape {
     Underline,
 }
 
-/// Position of the viewport in the scrollback.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Scrollbar {
-    pub total: u64,
-    pub offset: u64,
-    pub len: u64,
-}
-
 impl Scrollbar {
     /// Rows between the bottom of the viewport and the end of the screen.
-    #[must_use]
     pub const fn lines_below(self) -> u64 {
         self.total.saturating_sub(self.offset + self.len)
     }
 
     /// Rows of history above the active screen.
-    #[must_use]
     pub const fn history(self) -> u64 {
         self.total.saturating_sub(self.len)
     }
@@ -207,11 +179,22 @@ pub enum MouseAction {
     Motion = 2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left = 1,
+    Right = 2,
+    Middle = 3,
+    WheelUp = 4,
+    WheelDown = 5,
+    WheelLeft = 6,
+    WheelRight = 7,
+}
+
 /// A mouse event at a cell position of a terminal.
 #[derive(Clone, Copy, Debug)]
 pub struct MouseInput {
     pub action: MouseAction,
-    pub button: Option<c_int>,
+    pub button: Option<MouseButton>,
     pub mods: u16,
     pub x: u16,
     pub y: u16,
@@ -469,9 +452,6 @@ impl Drop for Terminal {
 }
 
 impl Terminal {
-    /// # Errors
-    ///
-    /// Fails if the library is out of memory.
     pub fn new(cols: u16, rows: u16) -> Result<Self, Error> {
         let mut handles = Handles::null();
         handles.allocate(cols, rows)?;
@@ -521,25 +501,24 @@ impl Terminal {
         check(unsafe { ffi::ghostty_terminal_set(handles.terminal, option, value) })
     }
 
-    /// Reads a plain value of the type that `data` documents.
-    fn get<T: Default>(&self, data: c_int) -> Option<T> {
-        let mut value = T::default();
-        let out = (&raw mut value).cast();
+    /// Fills in a value of the type that `data` documents.
+    fn read<T>(&self, data: c_int, value: &mut T) -> bool {
+        let out = ptr::from_mut(value).cast();
         // SAFETY: The terminal is live, and `out` is valid for the type `data`
         // documents, as each caller picks `T` to match.
-        let result = unsafe { ffi::ghostty_terminal_get(self.handles.terminal, data, out) };
-        (result == ffi::SUCCESS).then_some(value)
+        unsafe { ffi::ghostty_terminal_get(self.handles.terminal, data, out) == ffi::SUCCESS }
     }
 
-    const fn effects_ptr(&self) -> *mut Effects {
-        self.effects
+    fn get<T: Default>(&self, data: c_int) -> Option<T> {
+        let mut value = T::default();
+        self.read(data, &mut value).then_some(value)
     }
 
     /// What programs asked for since the caller last took it.
     pub const fn effects(&mut self) -> &mut Effects {
         // SAFETY: Owned by `self`. Callbacks only run during `write`, which
         // takes `&mut self`, so they cannot overlap with this borrow.
-        unsafe { &mut *self.effects_ptr() }
+        unsafe { &mut *self.effects }
     }
 
     /// Feeds output of the program into the terminal.
@@ -548,9 +527,6 @@ impl Terminal {
         unsafe { ffi::ghostty_terminal_vt_write(self.handles.terminal, data.as_ptr(), data.len()) };
     }
 
-    /// # Errors
-    ///
-    /// Fails if the library is out of memory.
     pub fn resize(
         &mut self,
         cols: u16,
@@ -583,10 +559,7 @@ impl Terminal {
             ptr: ptr::null(),
             len: 0,
         };
-        let out = (&raw mut value).cast();
-        // SAFETY: The terminal is live, and `out` is valid for a `GhosttyString`.
-        let result = unsafe { ffi::ghostty_terminal_get(self.handles.terminal, data, out) };
-        if result != ffi::SUCCESS {
+        if !self.read(data, &mut value) {
             return String::new();
         }
         // SAFETY: The borrowed string stays valid until the next mutating call,
@@ -595,60 +568,37 @@ impl Terminal {
         String::from_utf8_lossy(bytes).into_owned()
     }
 
-    #[must_use]
     pub fn title(&self) -> String {
         self.string(ffi::DATA_TITLE)
     }
 
     /// The working directory the shell reported with OSC 7, if any.
-    #[must_use]
     pub fn pwd(&self) -> String {
         self.string(ffi::DATA_PWD)
     }
 
-    #[must_use]
     pub fn mode(&self, mode: u16) -> bool {
         let mut config = ffi::ModeConfig { mode, value: false };
-        let out = (&raw mut config).cast();
-        // SAFETY: The terminal is live, and `out` is valid for a mode config.
-        let result =
-            unsafe { ffi::ghostty_terminal_get(self.handles.terminal, ffi::DATA_MODE, out) };
-        result == ffi::SUCCESS && config.value
+        self.read(ffi::DATA_MODE, &mut config) && config.value
     }
 
-    #[must_use]
     pub fn alternate_screen(&self) -> bool {
         self.get::<c_int>(ffi::DATA_ACTIVE_SCREEN) == Some(ffi::SCREEN_ALTERNATE)
     }
 
     /// Whether the program in this terminal wants mouse events.
-    #[must_use]
     pub fn mouse_tracking(&self) -> bool {
         self.get::<bool>(ffi::DATA_MOUSE_TRACKING).unwrap_or(false)
     }
 
-    #[must_use]
     pub fn scrollbar(&self) -> Option<Scrollbar> {
-        let mut value = ffi::Scrollbar {
-            total: 0,
-            offset: 0,
-            len: 0,
-        };
-        let out = (&raw mut value).cast();
-        // SAFETY: The terminal is live, and `out` is valid for a scrollbar.
-        let result =
-            unsafe { ffi::ghostty_terminal_get(self.handles.terminal, ffi::DATA_SCROLLBAR, out) };
-        (result == ffi::SUCCESS).then_some(Scrollbar {
-            total: value.total,
-            offset: value.offset,
-            len: value.len,
-        })
+        self.get(ffi::DATA_SCROLLBAR)
     }
 
-    fn scroll(&mut self, tag: c_int, delta: isize) {
+    fn scroll(&mut self, tag: c_int, delta: i32) {
         let behavior = ffi::ScrollViewport {
             tag,
-            value: [delta.cast_unsigned() as u64, 0],
+            value: [i64::from(delta).cast_unsigned(), 0],
         };
         let handles = &mut self.handles;
         // SAFETY: The terminal is live, and the behavior is passed by value.
@@ -657,7 +607,7 @@ impl Terminal {
     }
 
     /// Moves the viewport into the scrollback, up for negative values.
-    pub fn scroll_by(&mut self, delta: isize) {
+    pub fn scroll_by(&mut self, delta: i32) {
         self.scroll(ffi::SCROLL_DELTA, delta);
     }
 
@@ -672,7 +622,7 @@ impl Terminal {
     /// Brings the render state up to date, unless the program is holding the
     /// screen. Gives up on a hold that lasts too long, since the terminal has no
     /// clock and would otherwise keep a crashed program's pane frozen forever.
-    pub fn refresh(&mut self) -> Dirty {
+    pub fn refresh(&mut self) {
         let held = self.effects().hold_started;
         if held.is_some_and(|started| started.elapsed() >= RENDER_HOLD_LIMIT) {
             let config = ffi::ModeConfig {
@@ -689,35 +639,26 @@ impl Terminal {
                 ffi::ghostty_render_state_update(state, terminal)
             }));
         }
-        self.dirty()
     }
 
     /// When an active hold expires, if there is one.
-    #[must_use]
     pub fn hold_deadline(&self) -> Option<Instant> {
         // SAFETY: Owned by `self`, and callbacks cannot run during this read.
         let started = unsafe { (*self.effects).hold_started };
         started.map(|started| started + RENDER_HOLD_LIMIT)
     }
 
-    fn dirty(&self) -> Dirty {
-        let mut dirty: c_int = ffi::RENDER_DIRTY_FULL;
+    /// Whether every row needs drawing, whatever each row says about itself.
+    fn fully_dirty(&self) -> bool {
+        let mut dirty = ffi::RENDER_DIRTY_FULL;
         let out = (&raw mut dirty).cast();
         let state = self.handles.render_state;
         // SAFETY: The render state is live, and `out` is valid for an enum.
         let result = unsafe { ffi::ghostty_render_state_get(state, ffi::RENDER_DATA_DIRTY, out) };
-        match (result, dirty) {
-            (ffi::SUCCESS, ffi::RENDER_DIRTY_FALSE) => Dirty::Clean,
-            (ffi::SUCCESS, ffi::RENDER_DIRTY_FULL) | (_, _) if result != ffi::SUCCESS => {
-                Dirty::Full
-            }
-            (_, ffi::RENDER_DIRTY_FULL) => Dirty::Full,
-            _ => Dirty::Partial,
-        }
+        result != ffi::SUCCESS || dirty == ffi::RENDER_DIRTY_FULL
     }
 
     /// The cursor as of the last [`Terminal::refresh`].
-    #[must_use]
     pub fn cursor(&self) -> Option<Cursor> {
         let mut cursor = ffi::RenderCursor {
             size: size_of::<ffi::RenderCursor>(),
@@ -761,7 +702,7 @@ impl Terminal {
         if result != ffi::SUCCESS {
             return;
         }
-        let all = all || self.dirty() == Dirty::Full;
+        let all = all || self.fully_dirty();
         let mut y = 0;
         // SAFETY: The iterator was populated above and the state is unchanged.
         while unsafe { ffi::ghostty_render_state_row_iterator_next(rows) } {
@@ -823,7 +764,6 @@ impl Terminal {
 
     /// Bytes for the program in this terminal, in the encoding its modes ask
     /// for. Empty if the event means nothing to it.
-    #[must_use]
     pub fn encode_key(&mut self, input: &KeyInput<'_>) -> Vec<u8> {
         let handles = &mut self.handles;
         let (event, encoder) = (handles.key_event, handles.key_encoder);
@@ -844,7 +784,6 @@ impl Terminal {
 
     /// Bytes for the program in this terminal. Empty if the event means nothing
     /// to it, which depends on the mouse modes it enabled.
-    #[must_use]
     pub fn encode_mouse(&mut self, input: &MouseInput, cols: u16, rows: u16) -> Vec<u8> {
         let handles = &mut self.handles;
         let (encoder, event) = (handles.mouse_encoder, handles.mouse_event);
@@ -875,7 +814,6 @@ impl Terminal {
     }
 
     /// Bytes reporting a focus change, if this terminal's program wants them.
-    #[must_use]
     pub fn encode_focus(&self, focused: bool) -> Vec<u8> {
         if !self.mode(MODE_FOCUS_EVENT) {
             return Vec::new();
@@ -888,7 +826,6 @@ impl Terminal {
     }
 
     /// Bytes for pasting `text`, with control characters made harmless.
-    #[must_use]
     pub fn encode_paste(&self, text: &[u8]) -> Vec<u8> {
         let bracketed = self.mode(MODE_BRACKETED_PASTE);
         let mut data = text.to_vec();
@@ -908,11 +845,7 @@ impl Terminal {
                 padding: 0,
             },
         };
-        let mut grid_ref = ffi::GridRef {
-            node: ptr::null_mut(),
-            x: 0,
-            y: 0,
-        };
+        let mut grid_ref = NO_REF;
         let terminal = self.handles.terminal;
         // SAFETY: The terminal is live, and the out pointer is valid.
         let result = unsafe { ffi::ghostty_terminal_grid_ref(terminal, point, &raw mut grid_ref) };
@@ -924,31 +857,15 @@ impl Terminal {
     }
 
     fn selection(&self) -> Option<ffi::Selection> {
-        let grid_ref = ffi::GridRef {
-            node: ptr::null_mut(),
-            x: 0,
-            y: 0,
-        };
-        let mut selection = ffi::Selection {
-            start: grid_ref,
-            end: grid_ref,
-            rectangle: false,
-        };
-        let out = (&raw mut selection).cast();
-        let terminal = self.handles.terminal;
-        // SAFETY: The terminal is live, and `out` is valid for a selection.
-        let result = unsafe { ffi::ghostty_terminal_get(terminal, ffi::DATA_SELECTION, out) };
-        (result == ffi::SUCCESS).then_some(selection)
+        let mut selection = selection_at(NO_REF);
+        self.read(ffi::DATA_SELECTION, &mut selection)
+            .then_some(selection)
     }
 
     /// Starts a selection at a viewport position.
     pub fn select_start(&mut self, x: u16, y: u16) {
         if let Some(grid_ref) = self.grid_ref(x, y) {
-            self.set_selection(&ffi::Selection {
-                start: grid_ref,
-                end: grid_ref,
-                rectangle: false,
-            });
+            self.set_selection(&selection_at(grid_ref));
         }
     }
 
@@ -961,57 +878,51 @@ impl Terminal {
         }
     }
 
-    /// Selects the word at a viewport position.
-    pub fn select_word(&mut self, x: u16, y: u16) {
+    /// Selects what `find` comes up with for a viewport position.
+    fn select_around(
+        &mut self,
+        x: u16,
+        y: u16,
+        find: impl FnOnce(ffi::GridRef, *mut ffi::Selection) -> c_int,
+    ) {
         let Some(grid_ref) = self.grid_ref(x, y) else {
             return;
         };
-        let options = ffi::SelectWordOptions {
-            size: size_of::<ffi::SelectWordOptions>(),
-            grid_ref,
-            boundary_codepoints: ptr::null(),
-            boundary_codepoints_len: 0,
-        };
-        let mut selection = ffi::Selection {
-            start: grid_ref,
-            end: grid_ref,
-            rectangle: false,
-        };
-        let terminal = self.handles.terminal;
-        // SAFETY: The terminal is live, and both pointers are to valid locals.
-        let result = unsafe {
-            ffi::ghostty_terminal_select_word(terminal, &raw const options, &raw mut selection)
-        };
-        if result == ffi::SUCCESS {
+        let mut selection = selection_at(grid_ref);
+        if find(grid_ref, &raw mut selection) == ffi::SUCCESS {
             self.set_selection(&selection);
         }
     }
 
+    /// Selects the word at a viewport position.
+    pub fn select_word(&mut self, x: u16, y: u16) {
+        let terminal = self.handles.terminal;
+        self.select_around(x, y, |grid_ref, selection| {
+            let options = ffi::SelectWordOptions {
+                size: size_of::<ffi::SelectWordOptions>(),
+                grid_ref,
+                boundary_codepoints: ptr::null(),
+                boundary_codepoints_len: 0,
+            };
+            // SAFETY: The terminal is live, and both pointers are valid.
+            unsafe { ffi::ghostty_terminal_select_word(terminal, &raw const options, selection) }
+        });
+    }
+
     /// Selects the line at a viewport position.
     pub fn select_line(&mut self, x: u16, y: u16) {
-        let Some(grid_ref) = self.grid_ref(x, y) else {
-            return;
-        };
-        let options = ffi::SelectLineOptions {
-            size: size_of::<ffi::SelectLineOptions>(),
-            grid_ref,
-            whitespace: ptr::null(),
-            whitespace_len: 0,
-            semantic_prompt_boundary: false,
-        };
-        let mut selection = ffi::Selection {
-            start: grid_ref,
-            end: grid_ref,
-            rectangle: false,
-        };
         let terminal = self.handles.terminal;
-        // SAFETY: The terminal is live, and both pointers are to valid locals.
-        let result = unsafe {
-            ffi::ghostty_terminal_select_line(terminal, &raw const options, &raw mut selection)
-        };
-        if result == ffi::SUCCESS {
-            self.set_selection(&selection);
-        }
+        self.select_around(x, y, |grid_ref, selection| {
+            let options = ffi::SelectLineOptions {
+                size: size_of::<ffi::SelectLineOptions>(),
+                grid_ref,
+                whitespace: ptr::null(),
+                whitespace_len: 0,
+                semantic_prompt_boundary: false,
+            };
+            // SAFETY: The terminal is live, and both pointers are valid.
+            unsafe { ffi::ghostty_terminal_select_line(terminal, &raw const options, selection) }
+        });
     }
 
     pub fn clear_selection(&mut self) {
@@ -1019,7 +930,6 @@ impl Terminal {
     }
 
     /// The selected text, with soft-wrapped lines joined back together.
-    #[must_use]
     pub fn selected_text(&self) -> Option<String> {
         let selection = self.selection()?;
         let mut formatter: ffi::Handle = ptr::null_mut();
@@ -1033,6 +943,20 @@ impl Terminal {
         // SAFETY: Created above and not used again.
         unsafe { ffi::ghostty_formatter_free(formatter) };
         text
+    }
+}
+
+const NO_REF: ffi::GridRef = ffi::GridRef {
+    node: ptr::null_mut(),
+    x: 0,
+    y: 0,
+};
+
+const fn selection_at(grid_ref: ffi::GridRef) -> ffi::Selection {
+    ffi::Selection {
+        start: grid_ref,
+        end: grid_ref,
+        rectangle: false,
     }
 }
 
@@ -1084,7 +1008,7 @@ fn fill_mouse_event(event: ffi::Handle, input: &MouseInput) -> Result<(), Error>
         // SAFETY: As above.
         || unsafe { ffi::ghostty_mouse_event_clear_button(event) },
         // SAFETY: As above.
-        |button| unsafe { ffi::ghostty_mouse_event_set_button(event, button) },
+        |button| unsafe { ffi::ghostty_mouse_event_set_button(event, button as c_int) },
     ))?;
     // SAFETY: As above.
     check(unsafe { ffi::ghostty_mouse_event_set_mods(event, input.mods) })?;
@@ -1239,7 +1163,6 @@ fn encode_into(mut encode: impl FnMut(*mut u8, usize, *mut usize) -> c_int) -> V
 }
 
 impl StyleColor {
-    #[must_use]
     pub const fn palette(index: u8) -> Self {
         Self {
             tag: ffi::STYLE_COLOR_PALETTE,
@@ -1247,7 +1170,6 @@ impl StyleColor {
         }
     }
 
-    #[must_use]
     pub const fn rgb(rgb: Rgb) -> Self {
         Self {
             tag: ffi::STYLE_COLOR_RGB,
@@ -1256,7 +1178,6 @@ impl StyleColor {
     }
 
     /// The palette index of an indexed color.
-    #[must_use]
     pub const fn as_palette(self) -> Option<u8> {
         if self.tag == ffi::STYLE_COLOR_PALETTE {
             Some(self.value[0])
@@ -1266,7 +1187,6 @@ impl StyleColor {
     }
 
     /// The components of a direct color.
-    #[must_use]
     pub const fn as_rgb(self) -> Option<[u8; 3]> {
         if self.tag == ffi::STYLE_COLOR_RGB {
             Some(self.value)
@@ -1277,7 +1197,6 @@ impl StyleColor {
 }
 
 /// How many cells a character takes up.
-#[must_use]
 pub fn char_width(c: char) -> u16 {
     // SAFETY: A pure function of its argument.
     u16::from(unsafe { ffi::ghostty_unicode_codepoint_width(u32::from(c)) })
@@ -1301,7 +1220,16 @@ mod tests {
         lines
     }
 
-    /// A type's entry in the library's manifest, with whitespace removed.
+    /// The library's description of its types, with whitespace removed.
+    fn manifest() -> String {
+        // SAFETY: Returns a static NUL-terminated string.
+        let manifest = unsafe { ffi::ghostty_type_json() };
+        // SAFETY: The pointer is valid and static, as stated above.
+        let manifest = unsafe { std::ffi::CStr::from_ptr(manifest) }.to_string_lossy();
+        manifest.split_whitespace().collect()
+    }
+
+    /// A type's entry in the library's manifest.
     fn manifest_entry<'a>(manifest: &'a str, name: &str) -> &'a str {
         let key = format!("\"{name}\":{{\"kind\":");
         let (_, entry) = manifest.split_once(&key).expect(name);
@@ -1339,11 +1267,7 @@ mod tests {
 
     #[test]
     fn struct_layouts_match_the_library() {
-        // SAFETY: Returns a static NUL-terminated string.
-        let manifest = unsafe { ffi::ghostty_type_json() };
-        // SAFETY: The pointer is valid and static, as stated above.
-        let manifest = unsafe { std::ffi::CStr::from_ptr(manifest) }.to_string_lossy();
-        let manifest: String = manifest.split_whitespace().collect();
+        let manifest = manifest();
         let m = manifest.as_str();
 
         assert_layout!(m, "GhosttyString", ffi::Bytes, "ptr" => ptr, "len" => len);
@@ -1367,11 +1291,7 @@ mod tests {
 
     #[test]
     fn more_struct_layouts_match_the_library() {
-        // SAFETY: Returns a static NUL-terminated string.
-        let manifest = unsafe { ffi::ghostty_type_json() };
-        // SAFETY: The pointer is valid and static, as stated above.
-        let manifest = unsafe { std::ffi::CStr::from_ptr(manifest) }.to_string_lossy();
-        let manifest: String = manifest.split_whitespace().collect();
+        let manifest = manifest();
         let m = manifest.as_str();
 
         assert_layout!(m, "GhosttyGridRef", ffi::GridRef, "node" => node, "x" => x, "y" => y);
@@ -1509,7 +1429,7 @@ mod tests {
         let mut terminal = Terminal::new(10, 5).unwrap();
         let click = MouseInput {
             action: MouseAction::Press,
-            button: Some(MOUSE_BUTTON_LEFT),
+            button: Some(MouseButton::Left),
             mods: 0,
             x: 2,
             y: 3,

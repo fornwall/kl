@@ -57,10 +57,6 @@ pub enum Command {
 }
 
 /// Parses the words of a command, with tmux's names and aliases.
-///
-/// # Errors
-///
-/// Returns a message for the user if the command is not understood.
 pub fn parse(words: &[String]) -> Result<Command, String> {
     let Some((name, args)) = words.split_first() else {
         return Err("no command".to_owned());
@@ -193,10 +189,6 @@ fn parse_split_window(args: &[String]) -> Command {
 }
 
 /// Splits a line typed at the prompt into words, with shell-like quoting.
-///
-/// # Errors
-///
-/// Returns a message for the user if a quote is left open.
 pub fn split_words(line: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut word: Option<String> = None;
@@ -226,7 +218,6 @@ pub fn split_words(line: &str) -> Result<Vec<String>, String> {
 }
 
 /// The bytes a `send-keys` argument stands for.
-#[must_use]
 pub fn key_bytes(name: &str) -> Vec<u8> {
     let named: Option<&[u8]> = match name {
         "Enter" => Some(b"\r"),

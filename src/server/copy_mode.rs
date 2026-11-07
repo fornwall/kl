@@ -57,7 +57,7 @@ fn move_rows(pane: &mut Pane, mode: &mut CopyMode, rows: i32) {
     let clamped = target.clamp(0, height - 1);
     let overflow = target - clamped;
     if overflow != 0 {
-        pane.terminal.scroll_by(overflow as isize);
+        pane.terminal.scroll_by(overflow);
     }
     mode.y = u16::try_from(clamped).unwrap_or(0);
 }
@@ -68,35 +68,29 @@ fn move_cols(pane: &Pane, mode: &mut CopyMode, cols: i32) {
     mode.x = u16::try_from(target).unwrap_or(0);
 }
 
-/// Scrolls a number of rows while the cursor stays put on the screen.
-fn scroll(pane: &mut Pane, rows: i32) {
-    pane.terminal.scroll_by(rows as isize);
-}
-
-fn page(pane: &Pane) -> i32 {
-    i32::from(pane.rect.height.max(1))
-}
-
-/// A key from copy mode's vi-style table, by what it does.
-fn handle_movement(pane: &mut Pane, mode: &mut CopyMode, event: &KeyEvent) -> bool {
-    let half_page = page(pane) / 2;
+/// The keys of copy mode's vi-style table that do not end it.
+fn handle_movement(pane: &mut Pane, mode: &mut CopyMode, event: &KeyEvent) {
+    let height = i32::from(pane.rect.height.max(1));
     match (event.key, event.char()) {
-        _ if event.is_ctrl('f') => scroll(pane, page(pane)),
-        _ if event.is_ctrl('u') => scroll(pane, -half_page),
-        _ if event.is_ctrl('d') => scroll(pane, half_page),
+        _ if event.is_ctrl('f') => pane.terminal.scroll_by(height),
+        _ if event.is_ctrl('u') => pane.terminal.scroll_by(-height / 2),
+        _ if event.is_ctrl('d') => pane.terminal.scroll_by(height / 2),
         (key::ARROW_LEFT, _) | (_, Some('h')) => move_cols(pane, mode, -1),
         (key::ARROW_RIGHT, _) | (_, Some('l')) => move_cols(pane, mode, 1),
         (key::ARROW_UP, _) | (_, Some('k')) => move_rows(pane, mode, -1),
         (key::ARROW_DOWN, _) | (_, Some('j')) => move_rows(pane, mode, 1),
-        (key::PAGE_UP, _) => scroll(pane, -page(pane)),
-        (key::PAGE_DOWN, _) => scroll(pane, page(pane)),
+        (key::PAGE_UP, _) => pane.terminal.scroll_by(-height),
+        (key::PAGE_DOWN, _) => pane.terminal.scroll_by(height),
         (key::HOME, _) | (_, Some('0')) => mode.x = 0,
         (key::END, _) | (_, Some('$')) => mode.x = pane.rect.width.saturating_sub(1),
         (_, Some('g')) => pane.terminal.scroll_to_top(),
         (_, Some('G')) => pane.terminal.scroll_to_bottom(),
-        _ => return false,
+        (key::SPACE, _) | (_, Some('v')) => {
+            mode.selecting = true;
+            pane.terminal.select_start(mode.x, mode.y);
+        }
+        _ => {}
     }
-    true
 }
 
 /// Handles a key press in a pane in copy mode.
@@ -108,11 +102,6 @@ pub fn handle_key(pane: &mut Pane, event: &KeyEvent) -> Outcome {
         _ if event.is_ctrl('c') => Outcome::Cancel,
         (key::ESCAPE, _) | (_, Some('q')) => Outcome::Cancel,
         (key::ENTER, _) | (_, Some('y')) => Outcome::Copy,
-        (key::SPACE, _) | (_, Some('v')) => {
-            mode.selecting = true;
-            pane.terminal.select_start(mode.x, mode.y);
-            Outcome::Stay
-        }
         _ => {
             handle_movement(pane, &mut mode, event);
             Outcome::Stay
