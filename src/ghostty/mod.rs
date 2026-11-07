@@ -21,6 +21,9 @@ const RENDER_HOLD_LIMIT: Duration = Duration::from_secs(1);
 /// matches the default of the Ghostty app.
 const SCROLLBACK_BYTES: usize = 10_000_000;
 
+/// How long one round of compressing may keep the server from everything else.
+const COMPRESSION_BUDGET: Duration = Duration::from_millis(2);
+
 const VERSION_REPLY: &str = concat!("kl ", env!("CARGO_PKG_VERSION"));
 
 pub const STYLE_BOLD: u16 = 1 << 0;
@@ -432,6 +435,14 @@ impl Drop for Handles {
     }
 }
 
+/// Where compressing the scrollback of a terminal has got to.
+#[derive(Default)]
+struct Compression {
+    /// The library's token for what there is to compress.
+    activity: u64,
+    finished: bool,
+}
+
 pub struct Terminal {
     handles: Handles,
     /// Owned, and freed on drop. A raw pointer rather than a `Box` because
@@ -439,6 +450,7 @@ pub struct Terminal {
     effects: *mut Effects,
     /// Reused between rows to avoid allocating for each one.
     row: Vec<Cell>,
+    compression: Compression,
 }
 
 impl Drop for Terminal {
@@ -469,6 +481,7 @@ impl Terminal {
             handles,
             effects,
             row: Vec::new(),
+            compression: Compression::default(),
         };
         terminal.register_effects()?;
         let scrollback = SCROLLBACK_BYTES;
@@ -525,6 +538,46 @@ impl Terminal {
     pub fn write(&mut self, data: &[u8]) {
         // SAFETY: `data` is valid for reads of its length during the call.
         unsafe { ffi::ghostty_terminal_vt_write(self.handles.terminal, data.as_ptr(), data.len()) };
+    }
+
+    /// Compresses a little of the scrollback, if it did not change since the
+    /// last call. Meant to be called now and then. History stays as it was, and
+    /// compressed pages come back by themselves as they are needed.
+    pub fn compress_idle_scrollback(&mut self) {
+        let mut activity = 0;
+        let terminal = self.handles.terminal;
+        // SAFETY: The terminal is live, and the out pointer is valid.
+        let result =
+            unsafe { ffi::ghostty_terminal_compression_activity(terminal, &raw mut activity) };
+        if result != ffi::SUCCESS {
+            return;
+        }
+        let state = &mut self.compression;
+        if activity != state.activity {
+            *state = Compression {
+                activity,
+                finished: false,
+            };
+            return;
+        }
+        if state.finished {
+            return;
+        }
+        let started = Instant::now();
+        loop {
+            let mut outcome = 0;
+            let mode = ffi::COMPRESSION_MODE_INCREMENTAL;
+            // SAFETY: The terminal is live, and the out pointer is valid.
+            let result =
+                unsafe { ffi::ghostty_terminal_compress(terminal, mode, &raw mut outcome) };
+            if result != ffi::SUCCESS || outcome != ffi::COMPRESSION_RESULT_PENDING {
+                state.finished = true;
+                return;
+            }
+            if started.elapsed() >= COMPRESSION_BUDGET {
+                return;
+            }
+        }
     }
 
     pub fn resize(
@@ -1322,6 +1375,11 @@ mod tests {
             "padding_top" => padding_top, "padding_bottom" => padding_bottom,
             "padding_right" => padding_right, "padding_left" => padding_left);
         assert_layout!(m, "GhosttyMousePosition", ffi::MousePosition, "x" => x, "y" => y);
+        assert_layout!(m, "GhosttyTerminalMemoryUsage", ffi::MemoryUsage,
+            "size" => size, "compression_supported" => compression_supported,
+            "primary_pages" => primary_pages, "primary_virtual_bytes" => primary_virtual_bytes,
+            "primary_resident_bytes" => primary_resident_bytes,
+            "primary_compressed_pages" => primary_compressed_pages);
         assert_layout!(m, "GhosttyClipboardContent", ffi::ClipboardContent,
             "mime" => mime, "data" => data);
         assert_layout!(m, "GhosttyClipboardWrite", ffi::ClipboardWrite,
@@ -1387,6 +1445,45 @@ mod tests {
             terminal.write(format!("line {line}\r\n").as_bytes());
         }
         assert!(terminal.scrollbar().unwrap().history() > 4000);
+    }
+
+    #[test]
+    fn compresses_scrollback_once_it_has_been_left_alone() {
+        let mut terminal = Terminal::new(40, 5).unwrap();
+        for line in 0..20_000 {
+            terminal.write(format!("line {line}\r\n").as_bytes());
+        }
+        let usage = |terminal: &Terminal| {
+            let mut usage = ffi::MemoryUsage {
+                size: size_of::<ffi::MemoryUsage>(),
+                compression_supported: false,
+                primary_pages: 0,
+                primary_virtual_bytes: 0,
+                primary_resident_bytes: 0,
+                primary_compressed_pages: 0,
+                rest: [0; 8],
+            };
+            assert!(terminal.read(ffi::DATA_MEMORY_USAGE, &mut usage));
+            usage
+        };
+        let before = usage(&terminal);
+        if !before.compression_supported {
+            return;
+        }
+
+        // The first call only sees that the scrollback changed.
+        terminal.compress_idle_scrollback();
+        assert_eq!(usage(&terminal).primary_compressed_pages, 0);
+
+        while !terminal.compression.finished {
+            terminal.compress_idle_scrollback();
+        }
+        let after = usage(&terminal);
+        assert!(after.primary_compressed_pages > 0);
+        assert!(after.primary_resident_bytes < before.primary_resident_bytes / 2);
+
+        terminal.scroll_to_top();
+        assert_eq!(lines(&mut terminal)[0], "line 0");
     }
 
     #[test]

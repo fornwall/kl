@@ -483,6 +483,9 @@ impl Server {
         if now >= self.last_tick + TICK_TIME {
             self.last_tick = now;
             self.refresh_window_names();
+            for pane in self.session.panes.values_mut() {
+                pane.terminal.compress_idle_scrollback();
+            }
             self.dirty = true;
         }
     }

@@ -34,8 +34,13 @@ pub const DATA_TITLE: c_int = 12;
 pub const DATA_PWD: c_int = 13;
 pub const DATA_SELECTION: c_int = 31;
 pub const DATA_MODE: c_int = 37;
+#[cfg(test)]
+pub const DATA_MEMORY_USAGE: c_int = 42;
 
 pub const SCREEN_ALTERNATE: c_int = 1;
+
+pub const COMPRESSION_MODE_INCREMENTAL: c_int = 0;
+pub const COMPRESSION_RESULT_PENDING: c_int = 1;
 
 pub const SCROLL_BOTTOM: c_int = 1;
 pub const SCROLL_DELTA: c_int = 2;
@@ -226,6 +231,20 @@ pub struct SizeReport {
     pub cell_height: u32,
 }
 
+/// `GhosttyTerminalMemoryUsage`, with what the tests look at named and the rest
+/// as filler.
+#[cfg(test)]
+#[repr(C)]
+pub struct MemoryUsage {
+    pub size: usize,
+    pub compression_supported: bool,
+    pub primary_pages: u64,
+    pub primary_virtual_bytes: u64,
+    pub primary_resident_bytes: u64,
+    pub primary_compressed_pages: u64,
+    pub rest: [u64; 8],
+}
+
 #[repr(C)]
 pub struct MouseEncoderSize {
     pub size: usize,
@@ -289,6 +308,8 @@ unsafe extern "C" {
     pub fn ghostty_terminal_set(terminal: Handle, option: c_int, value: *const c_void) -> c_int;
     pub fn ghostty_terminal_get(terminal: Handle, data: c_int, out: *mut c_void) -> c_int;
     pub fn ghostty_terminal_vt_write(terminal: Handle, data: *const u8, len: usize);
+    pub fn ghostty_terminal_compression_activity(terminal: Handle, activity: *mut u64) -> c_int;
+    pub fn ghostty_terminal_compress(terminal: Handle, mode: c_int, result: *mut c_int) -> c_int;
     pub fn ghostty_terminal_scroll_viewport(terminal: Handle, behavior: ScrollViewport) -> c_int;
     pub fn ghostty_terminal_grid_ref(terminal: Handle, point: Point, out: *mut GridRef) -> c_int;
     pub fn ghostty_terminal_select_word(
