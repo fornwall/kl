@@ -305,6 +305,22 @@ impl Screen {
         kl_command(&self.dir.0).args(args).output().unwrap()
     }
 
+    /// Replaces the server, returning once this client is attached to the new
+    /// one, which draws everything. Keys sent before that would be lost.
+    fn restart_server(&mut self) {
+        self.pump();
+        let start = self.raw.len();
+        let output = self.command(&["restart-server"]);
+        assert!(output.status.success(), "{output:?}");
+        let cleared = |raw: &[u8]| raw.windows(4).any(|bytes| bytes == b"\x1b[2J");
+        let deadline = Instant::now() + TIMEOUT;
+        while !cleared(&self.raw[start..]) {
+            self.pump();
+            assert!(Instant::now() < deadline, "no new server");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn mouse(&mut self, code: u16, x: u16, y: u16, press: bool) {
         let end = if press { 'M' } else { 'm' };
         let sequence = format!("\x1b[<{code};{};{}{end}", x + 1, y + 1);
@@ -726,8 +742,7 @@ fn programs_keep_running_across_a_server_restart() {
     screen.enter();
     screen.wait_for_text("typed-before");
 
-    let output = screen.command(&["restart-server"]);
-    assert!(output.status.success(), "{output:?}");
+    screen.restart_server();
     screen.wait_for_text("from-the-first-server");
 
     // The same program is still there, with the same client attached.
@@ -750,20 +765,20 @@ fn a_restart_keeps_history_and_copied_text() {
     let mut screen = Screen::new(80, 24);
     screen.run("for i in $(seq 1 100); do echo history-$i; done");
     screen.wait_for_line("history-100");
+    // The line above the prompt, which only a paste can put after a prompt.
     screen.prefix("[");
-    screen.type_text("gv$");
+    screen.type_text("k0v$");
     screen.enter();
     screen.wait_for_clipboard();
 
-    let output = screen.command(&["restart-server"]);
-    assert!(output.status.success(), "{output:?}");
-    screen.wait_for_text("history-100");
+    screen.restart_server();
     screen.prefix("[");
     screen.type_text("g");
     screen.wait_for_text("for i in");
     screen.type_text("q");
+    screen.wait_for_no_text("for i in");
     screen.prefix("]");
-    screen.wait_for_text("$ for i in");
+    screen.wait_for_text("$ history-100");
 }
 
 #[test]
