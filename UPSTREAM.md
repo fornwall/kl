@@ -60,11 +60,11 @@ the link along with each linked cell it paints, that falls short:
 
 Speed is not the case to make, whatever `ghostty_terminal_grid_ref`, the
 documentation of `grid-introspection` and the grid guide say about render loops:
-"use grid references" would be a fair reply. Timed in C against kl's build of the
-library, with the median of 301 frames reading every row, the lookups for every
-linked cell add about 150 µs to the 125 µs it takes to read a 200×50 render state
-with 9,000 linked cells, and 870 µs to 480 µs at 400×100 with all 40,000 linked.
-That is 1% and 5% of a 60 Hz frame, and kl normally reads only dirty rows.
+"use grid references" would be a fair reply. In kl, with every row dirty, copying
+the links takes reading a 200×50 screen with 9,000 linked cells from 200 µs to
+700 µs, and a 400×100 screen with all 40,000 linked from 800 µs to 3 ms, which is
+3% and 13% of a 60 Hz frame. Most frames have far fewer dirty rows, and a heavy
+stream with every cell linked costs the server 6% more CPU time.
 
 Today: kl copies URIs with grid references right after each render state update,
 while the two still agree, and that includes the update where a hold starts,
