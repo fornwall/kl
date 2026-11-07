@@ -2886,6 +2886,19 @@ fn images_show_where_their_program_put_them() {
 }
 
 #[test]
+fn a_large_image_arrives_in_one_piece_while_panes_go_on() {
+    let mut screen = Screen::new(80, 24);
+    let (width, height) = (1000, 600);
+    let (command, pixels) = screen.image_command(width, height, "");
+    screen.run(&command);
+    screen.run("echo still-here");
+    screen.wait_for_text("still-here");
+    let images = screen.wait_for_images("an image", |images| !images.is_empty());
+    let outer = screen.terminal.image_pixels(images[0].image).unwrap();
+    assert_eq!(outer.data, pixels);
+}
+
+#[test]
 fn images_are_cut_off_at_the_edges_of_their_pane() {
     let mut screen = two_panes();
     let border = screen.lines()[0].chars().position(|c| c == '│').unwrap();

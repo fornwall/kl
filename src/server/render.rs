@@ -353,6 +353,7 @@ impl Renderer {
         session: &mut Session,
         ui: &Ui,
         pointer: Option<(u16, u16)>,
+        take_pixels: bool,
     ) -> Vec<u8> {
         let (cols, rows) = (session.size.cols, session.size.rows);
         self.resize(cols, rows);
@@ -378,7 +379,7 @@ impl Renderer {
         let mut transfers = Vec::new();
         let covered = ui.list.is_some() || ui.pane_numbers.is_some();
         self.images
-            .update(session, covered, &mut transfers, &mut out);
+            .update(session, covered, take_pixels, &mut transfers, &mut out);
         self.emit_cursor(session, ui, &mut out);
         self.emit_title(session, &mut out);
         self.emit_progress(session, &mut out);
@@ -392,6 +393,11 @@ impl Renderer {
             frame.extend_from_slice(b"\x1b[?2026l");
         }
         frame
+    }
+
+    /// Whether it takes more frames to get everything to the terminal.
+    pub fn transferring(&self) -> bool {
+        self.images.transferring()
     }
 
     /// tmux's `display-panes`.

@@ -3,7 +3,7 @@
 //! gives the outer terminal a copy of the pixels, under an id of kl's own since
 //! panes know nothing of each other, and places each image clipped to its pane.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use super::layout::{PaneId, Rect};
 use super::render::push_move;
@@ -14,6 +14,10 @@ use crate::ghostty::{ImagePixels, ImagePlacement, ImageRect};
 /// Pixels per escape sequence, making the 4096 bytes of base64 the protocol
 /// allows.
 const CHUNK: usize = 3072;
+
+/// Pixels to send with one frame. A large image takes the outer terminal seconds
+/// to take in, which would otherwise freeze every pane for as long.
+const FRAME_PIXELS: usize = 128 * CHUNK;
 
 /// An image as it stands. New pixels make it another image, which is simpler than
 /// updating one and just as much to send.
@@ -39,6 +43,54 @@ struct Shown {
     id: u32,
 }
 
+/// Pixels on their way to the outer terminal.
+struct Transfer {
+    id: u32,
+    format: u8,
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+    /// How much of `data` went out so far.
+    sent: usize,
+}
+
+impl Transfer {
+    fn new(id: u32, pixels: &ImagePixels<'_>) -> Self {
+        Self {
+            id,
+            format: pixels.format,
+            width: pixels.width,
+            height: pixels.height,
+            data: pixels.data.to_vec(),
+            sent: 0,
+        }
+    }
+
+    const fn finished(&self) -> bool {
+        self.sent >= self.data.len()
+    }
+
+    /// Sends up to `limit` more bytes of pixels, returning how many that was.
+    fn send(&mut self, limit: usize, out: &mut Vec<u8>) -> usize {
+        let end = self.data.len().min(self.sent + limit);
+        let part = self.data.get(self.sent..end).unwrap_or(&[]);
+        let used = part.len();
+        for chunk in part.chunks(CHUNK) {
+            let keys = if self.sent == 0 {
+                let (format, width, height) = (self.format, self.width, self.height);
+                format!("a=t,f={format},s={width},v={height},i={},q=2", self.id)
+            } else {
+                "q=2".to_owned()
+            };
+            self.sent += chunk.len();
+            let more = u8::from(!self.finished());
+            let data = base64::encode(chunk);
+            push_command(out, &format!("{keys},m={more};{data}"));
+        }
+        used
+    }
+}
+
 /// What the outer terminal holds and shows.
 #[derive(Default)]
 pub struct Images {
@@ -46,6 +98,9 @@ pub struct Images {
     /// Coming back to one costs sending it again.
     sent: BTreeMap<ImageKey, u32>,
     shown: Vec<Shown>,
+    /// What is still on its way, one image at a time: the terminal takes every
+    /// transfer for the rest of the one it has started on.
+    transfers: VecDeque<Transfer>,
     last_id: u32,
 }
 
@@ -68,21 +123,37 @@ impl Images {
         self.last_id
     }
 
-    /// Brings the outer terminal up to date. Pixels go in `transfers`, which can
-    /// be a lot to hold a frame back for, and the rest in `out`. Images stay out
-    /// of sight while `covered`, as something is being shown on top of the panes,
-    /// but the outer terminal gets to keep them.
+    /// Whether there are pixels left to send, which takes more frames.
+    pub fn transferring(&self) -> bool {
+        !self.transfers.is_empty()
+    }
+
+    /// Brings the outer terminal up to date. Pixels go in `transfers`, as far as
+    /// the client can `take_pixels` right now, and the rest in `out`. An image gets
+    /// placed once all of it is there. Images stay out of sight while `covered`,
+    /// as something is being shown on top of the panes, but the outer terminal
+    /// gets to keep them.
     pub fn update(
         &mut self,
         session: &Session,
         covered: bool,
+        take_pixels: bool,
         transfers: &mut Vec<u8>,
         out: &mut Vec<u8>,
     ) {
         let mut wanted = wanted(session);
-        self.sent.retain(|image, id| {
-            let keep = wanted.iter().any(|(wanted, _)| wanted == image);
+        let Self {
+            sent,
+            transfers: queue,
+            ..
+        } = self;
+        sent.retain(|image, id| {
+            // The terminal is waiting for the rest of this one by now, and
+            // deleting it can wait until it got that.
+            let started = queue.front().is_some_and(|t| t.id == *id && t.sent > 0);
+            let keep = started || wanted.iter().any(|(wanted, _)| wanted == image);
             if !keep {
+                queue.retain(|transfer| transfer.id != *id);
                 push_command(out, &format!("a=d,d=I,i={id},q=2"));
             }
             keep
@@ -99,14 +170,23 @@ impl Images {
             }
         }
         self.shown = kept;
+        for (image, _) in &wanted {
+            self.queue_pixels(session, *image);
+        }
+        if take_pixels {
+            self.send_pixels(transfers);
+        }
         for (image, placement) in wanted {
             let known = |shown: &Shown| shown.image == image && shown.placement == placement;
             if self.shown.iter().any(known) {
                 continue;
             }
-            let Some(outer) = self.outer_id(session, image, transfers) else {
+            let Some(outer) = self.sent.get(&image).copied() else {
                 continue;
             };
+            if self.transfers.iter().any(|transfer| transfer.id == outer) {
+                continue;
+            }
             let id = self.next_id();
             push_move(out, placement.x, placement.y);
             push_placement(out, outer, id, &placement);
@@ -118,24 +198,34 @@ impl Images {
         }
     }
 
-    /// The id of an image in the outer terminal, which gets it now if need be.
-    fn outer_id(
-        &mut self,
-        session: &Session,
-        image: ImageKey,
-        transfers: &mut Vec<u8>,
-    ) -> Option<u32> {
-        if let Some(id) = self.sent.get(&image) {
-            return Some(*id);
+    /// Gives an image an id in the outer terminal, and sets off its pixels.
+    fn queue_pixels(&mut self, session: &Session, image: ImageKey) {
+        if self.sent.contains_key(&image) {
+            return;
         }
         let (pane, number, _) = image;
-        let pane = session.panes.get(&pane)?;
+        let Some(pane) = session.panes.get(&pane) else {
+            return;
+        };
         // Gone if a program is holding the screen and deleted it since.
-        let pixels = pane.terminal.image_pixels(number)?;
+        let Some(pixels) = pane.terminal.image_pixels(number) else {
+            return;
+        };
         let id = self.next_id();
-        push_transfer(transfers, id, &pixels);
+        self.transfers.push_back(Transfer::new(id, &pixels));
         self.sent.insert(image, id);
-        Some(id)
+    }
+
+    fn send_pixels(&mut self, out: &mut Vec<u8>) {
+        let mut limit = FRAME_PIXELS;
+        while limit > 0
+            && let Some(transfer) = self.transfers.front_mut()
+        {
+            limit -= transfer.send(limit, out);
+            if transfer.finished() {
+                self.transfers.pop_front();
+            }
+        }
     }
 }
 
@@ -255,18 +345,6 @@ fn clip(image: &ImagePlacement, rect: Rect, cell_size: (u32, u32)) -> Option<Pla
 
 fn push_command(out: &mut Vec<u8>, keys: &str) {
     out.extend_from_slice(format!("\x1b_G{keys}\x1b\\").as_bytes());
-}
-
-fn push_transfer(out: &mut Vec<u8>, id: u32, pixels: &ImagePixels<'_>) {
-    let mut chunks = pixels.data.chunks(CHUNK).peekable();
-    let (format, width, height) = (pixels.format, pixels.width, pixels.height);
-    let mut keys = format!("a=t,f={format},s={width},v={height},i={id},q=2");
-    while let Some(chunk) = chunks.next() {
-        let more = u8::from(chunks.peek().is_some());
-        let data = base64::encode(chunk);
-        push_command(out, &format!("{keys},m={more};{data}"));
-        "q=2".clone_into(&mut keys);
-    }
 }
 
 /// `C=1` keeps the cursor where it is, or the terminal would scroll to fit an
@@ -410,7 +488,7 @@ mod tests {
             data: &data,
         };
         let mut out = Vec::new();
-        push_transfer(&mut out, 9, &pixels);
+        Transfer::new(9, &pixels).send(usize::MAX, &mut out);
         let sent = sequences(&out);
         assert_eq!(sent.len(), 2);
         assert!(sent[0].starts_with("a=t,f=24,s=1025,v=1,i=9,q=2,m=1;"));
@@ -428,8 +506,38 @@ mod tests {
             data: &[],
         };
         let mut out = Vec::new();
-        push_transfer(&mut out, 9, &pixels);
+        let mut transfer = Transfer::new(9, &pixels);
+        transfer.send(FRAME_PIXELS, &mut out);
         assert_eq!(out, b"");
+        assert!(transfer.finished());
+    }
+
+    #[test]
+    fn a_large_image_takes_several_frames() {
+        let data = vec![7; FRAME_PIXELS + CHUNK];
+        let pixels = ImagePixels {
+            width: u32::try_from(data.len() / 3).unwrap(),
+            height: 1,
+            format: 24,
+            data: &data,
+        };
+        let mut images = Images::default();
+        images.transfers.push_back(Transfer::new(9, &pixels));
+
+        let mut out = Vec::new();
+        images.send_pixels(&mut out);
+        let first = sequences(&out);
+        assert_eq!(first.len(), FRAME_PIXELS / CHUNK);
+        assert!(first[0].starts_with("a=t,"));
+        assert!(first.iter().all(|sequence| sequence.contains("m=1;")));
+        assert!(images.transferring());
+
+        let mut out = Vec::new();
+        images.send_pixels(&mut out);
+        let rest = sequences(&out);
+        assert_eq!(rest.len(), 1);
+        assert!(rest[0].starts_with("q=2,m=0;"));
+        assert!(!images.transferring());
     }
 
     #[test]

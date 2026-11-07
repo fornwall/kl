@@ -677,7 +677,9 @@ impl Server {
                     &mut self.session,
                     &client.ui,
                     client.pointer,
+                    connection.output.is_empty(),
                 );
+                self.dirty |= client.renderer.transferring();
                 for part in frame.chunks(OUTPUT_PIECE) {
                     connection.send(&ServerMessage::Output(part.to_vec()));
                 }

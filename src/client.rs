@@ -39,8 +39,10 @@ const ENTER_TERMINAL: &[u8] = b"\x1bP$q q\x1b\\\
 
 /// Undoes [`ENTER_TERMINAL`], in reverse, along with what frames leave behind.
 /// The client does this rather than the server, so that it happens even if the
-/// server dies. Ghostty ignores the title stack, but an empty title gives the
-/// title back to whatever it would have shown without one.
+/// server dies. An empty last chunk ends the transfer of an image that was still
+/// going, which would otherwise take the next image for more of the same. Ghostty
+/// ignores the title stack, but an empty title gives the title back to whatever
+/// it would have shown without one.
 const LEAVE_TERMINAL: &[u8] = b"\x1b[?2031l\
     \x1b[?1004l\
     \x1b[?2004l\
@@ -48,6 +50,7 @@ const LEAVE_TERMINAL: &[u8] = b"\x1b[?2031l\
     \x1b[?1006l\x1b[?1003l\
     \x1b[?2027r\
     \x1b[<u\
+    \x1b_Gm=0,q=2;\x1b\\\
     \x1b[0m\x1b[0 q\x1b]112\x1b\\\x1b[?25h\
     \x1b[?1049l";
 
