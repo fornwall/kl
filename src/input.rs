@@ -1158,6 +1158,44 @@ mod tests {
         }
     }
 
+    /// Sequences logged from the Ghostty app, in the forms it really has for
+    /// them, which leave out a good deal more than the encoder does for a test.
+    #[test]
+    fn reads_what_the_ghostty_app_sends() {
+        for (bytes, key, mods, action) in [
+            (
+                &b"\x1b[97;;97u"[..],
+                key::from_codepoint(97),
+                0,
+                KeyAction::Press,
+            ),
+            (
+                b"\x1b[97;1:3u",
+                key::from_codepoint(97),
+                0,
+                KeyAction::Release,
+            ),
+            (b"\x1b[13u", key::ENTER, 0, KeyAction::Press),
+            (b"\x1b[1;1:1A", key::ARROW_UP, 0, KeyAction::Press),
+            (b"\x1b[1;5:3A", key::ARROW_UP, MOD_CTRL, KeyAction::Release),
+            (b"\x1b[1;1:1H", key::HOME, 0, KeyAction::Press),
+            (b"\x1b[1;1:1P", key::F1, 0, KeyAction::Press),
+            (b"\x1b[5;1:3~", key::PAGE_UP, 0, KeyAction::Release),
+        ] {
+            let event = only_key(bytes);
+            let context = bytes.escape_ascii();
+            assert_eq!(
+                (event.key, event.mods, event.action),
+                (key, mods, action),
+                "{context}"
+            );
+        }
+        // The prefix, as the modifier, the key and their releases.
+        let events = events(b"\x1b[57442;5u\x1b[98;5u\x1b[98;5:3u\x1b[57442;1:3u");
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[1], Event::Key(event) if event.is_ctrl('b')));
+    }
+
     /// What programs got from the Ghostty app when running directly in it, for
     /// the same keys that reach kl as `outer` with every flag on.
     #[test]
