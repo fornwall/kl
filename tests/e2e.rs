@@ -3319,7 +3319,9 @@ fn a_large_image_arrives_in_one_piece_while_panes_go_on() {
     let mut screen = Screen::new(80, 24);
     let (width, height) = (1000, 600);
     let (command, pixels) = screen.image_command(width, height, "");
-    screen.run(&command);
+    // Typing before the program is done would echo into the middle of the image.
+    screen.run(&format!("{command}; echo sent"));
+    screen.wait_for_line("sent");
     screen.run("echo still-here");
     screen.wait_for_text("still-here");
     let images = screen.wait_for_images("an image", |images| !images.is_empty());
