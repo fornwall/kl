@@ -315,6 +315,11 @@ pub enum MouseButton {
     WheelDown = 5,
     WheelLeft = 6,
     WheelRight = 7,
+    /// The extra buttons on the side of a mouse.
+    Eight = 8,
+    Nine = 9,
+    Ten = 10,
+    Eleven = 11,
 }
 
 /// How far along a program says it is, from OSC 9;4.

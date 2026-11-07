@@ -2246,6 +2246,15 @@ fn shift_with_another_modifier_reaches_programs() {
 }
 
 #[test]
+fn the_extra_mouse_buttons_reach_programs_and_do_nothing_else() {
+    let mut screen = Screen::new(80, 24);
+    screen.run_setup_then_cat(r"printf '\033[?1000h\033[?1006h'");
+    screen.mouse(128, 2, 3, true);
+    screen.enter();
+    screen.wait_for_text("^[[<128;3;4M");
+}
+
+#[test]
 fn programs_get_their_cursor_key_mode() {
     let mut screen = Screen::new(80, 24);
     screen.run_setup_then_cat(r"printf '\033[?1h'");

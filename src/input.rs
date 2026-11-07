@@ -602,8 +602,7 @@ fn parse_mouse(params: &str, pressed: bool) -> Option<MouseEvent> {
             mods |= value;
         }
     }
-    // What is left without the modifiers and the motion bit. The buttons from
-    // 128 up are the extra ones on the side of a mouse.
+    // What is left without the modifiers and the motion bit.
     let button = match code & !0b11_1100 {
         0 => Some(MouseButton::Left),
         1 => Some(MouseButton::Middle),
@@ -612,6 +611,10 @@ fn parse_mouse(params: &str, pressed: bool) -> Option<MouseEvent> {
         65 => Some(MouseButton::WheelDown),
         66 => Some(MouseButton::WheelLeft),
         67 => Some(MouseButton::WheelRight),
+        128 => Some(MouseButton::Eight),
+        129 => Some(MouseButton::Nine),
+        130 => Some(MouseButton::Ten),
+        131 => Some(MouseButton::Eleven),
         _ => None,
     };
     let action = match (code & 32 != 0, pressed) {
@@ -863,12 +866,12 @@ mod tests {
     }
 
     #[test]
-    fn the_extra_mouse_buttons_are_not_clicks() {
+    fn reads_the_extra_mouse_buttons() {
         assert_eq!(
-            events(b"\x1b[<128;1;1M"),
+            events(b"\x1b[<129;1;1M"),
             [Event::Mouse(MouseEvent {
                 action: MouseAction::Press,
-                button: None,
+                button: Some(MouseButton::Nine),
                 mods: 0,
                 x: 0,
                 y: 0,
