@@ -19,7 +19,11 @@ fuzz_target!(|input: (u8, u32, [u16; 4], Vec<String>, Vec<u8>)| {
     };
 
     let client = match choice % 4 {
-        0 => ClientMessage::Attach { version, size },
+        0 => ClientMessage::Attach {
+            version,
+            size,
+            environment: words,
+        },
         1 => ClientMessage::Input(bytes.clone()),
         2 => ClientMessage::Resize(size),
         _ => ClientMessage::Command {
