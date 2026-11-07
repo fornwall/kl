@@ -343,7 +343,7 @@ pub fn user_id() -> u32 {
 
 /// The process group in the foreground of a pty, such as an editor that the
 /// shell started.
-fn foreground_group(master: BorrowedFd<'_>) -> Option<libc::pid_t> {
+pub fn foreground_group(master: BorrowedFd<'_>) -> Option<libc::pid_t> {
     // SAFETY: Takes a descriptor and does not touch memory.
     let group = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
     (group > 0).then_some(group)

@@ -650,6 +650,43 @@ fn a_new_window_has_a_name_from_the_start() {
 }
 
 #[test]
+fn a_window_started_from_a_line_is_not_named_after_the_shell_running_it() {
+    let screen = Screen::new(80, 24);
+    assert!(
+        screen
+            .command(&["new-window", "sleep 100"])
+            .status
+            .success()
+    );
+    // Past the time that names are looked at again.
+    std::thread::sleep(Duration::from_millis(1100));
+    let windows = screen.command(&["list-windows"]);
+    let windows = String::from_utf8_lossy(&windows.stdout);
+    assert!(windows.contains("1: sleep "), "{windows}");
+
+    assert!(screen.command(&["restart-server"]).status.success());
+    std::thread::sleep(Duration::from_millis(1100));
+    let windows = screen.command(&["list-windows"]);
+    let windows = String::from_utf8_lossy(&windows.stdout);
+    assert!(windows.contains("1: sleep "), "{windows}");
+}
+
+#[test]
+fn a_shell_started_from_a_line_shows_what_it_runs() {
+    let mut screen = Screen::new(80, 24);
+    assert!(screen.command(&["new-window", "sh -i"]).status.success());
+    screen.wait_for("the prompt of the new shell", |lines| {
+        lines[0].starts_with('$')
+    });
+    screen.run("sleep 100");
+    screen.wait_for("the name of the program", |lines| {
+        lines
+            .last()
+            .is_some_and(|status| status.contains("1:sleep*"))
+    });
+}
+
+#[test]
 fn window_names_follow_what_runs_in_the_foreground() {
     let mut screen = Screen::new(80, 24);
     screen.run("sleep 100");

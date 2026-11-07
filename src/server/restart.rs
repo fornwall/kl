@@ -26,7 +26,7 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
@@ -199,6 +199,8 @@ fn take_window(reader: &mut Reader<'_>) -> Result<Window, Malformed> {
 fn put_pane(out: &mut Vec<u8>, pane: &Pane) {
     put_u32(out, pane.id);
     put_u32(out, pane.pid);
+    put_bool(out, pane.start_command.is_some());
+    proto::put_bytes(out, pane.start_command.as_deref().unwrap_or("").as_bytes());
     put_fd(out, pane.pty());
     // A terminal that cannot be saved right now loses what it shows, but its
     // program keeps running, and full screen ones draw again when resized.
@@ -208,6 +210,8 @@ fn put_pane(out: &mut Vec<u8>, pane: &Pane) {
 fn take_pane(reader: &mut Reader<'_>, colors: &OuterColors) -> Result<Pane, Box<dyn Error>> {
     let id: PaneId = reader.take_u32()?;
     let pid = reader.take_u32()?;
+    let has_start_command = reader.take_bool()?;
+    let start_command = reader.take_text()?;
     let pty = File::from(take_fd(reader)?);
     let snapshot = reader.take_bytes()?;
     let mut terminal = Terminal::restore(snapshot).or_else(|error| {
@@ -215,7 +219,8 @@ fn take_pane(reader: &mut Reader<'_>, colors: &OuterColors) -> Result<Pane, Box<
         Terminal::new(1, 1)
     })?;
     terminal.set_outer_colors(colors);
-    Ok(Pane::adopt(id, pid, pty, terminal))
+    let start_command = has_start_command.then_some(start_command);
+    Ok(Pane::adopt(id, pid, start_command, pty, terminal))
 }
 
 /// Reads what [`Server::restart`] left behind, which is only good for one use.

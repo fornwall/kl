@@ -398,6 +398,7 @@ impl<'a> Context<'a> {
             "pane_left" => rect.x.to_string(),
             "pane_pid" => pane.pid.to_string(),
             "pane_right" => (rect.x + rect.width.saturating_sub(1)).to_string(),
+            "pane_start_command" => pane.start_command.clone()?,
             "pane_title" => pane.terminal.title(),
             "pane_top" => rect.y.to_string(),
             "pane_width" => rect.width.to_string(),

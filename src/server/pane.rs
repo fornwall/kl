@@ -55,6 +55,8 @@ pub struct Pane {
     pub redraw: bool,
     /// The program, which the server reaps along with any other child.
     pub pid: u32,
+    /// The line this pane was started with, if a shell had to run it.
+    pub start_command: Option<String>,
     /// The program ended or closed the pty. A background job can keep the pty
     /// open past the end of the program, so the end of output alone does not tell.
     pub exited: bool,
@@ -75,7 +77,11 @@ fn user_shell() -> String {
 /// it after, by the same rules as tmux.
 pub fn default_name(program: &[String]) -> String {
     let line = program.join(" ");
-    let line = if line.is_empty() { user_shell() } else { line };
+    name_from_line(if line.is_empty() { user_shell() } else { line }.as_str())
+}
+
+/// The name of the program a command line starts with.
+fn name_from_line(line: &str) -> String {
     let line = line.trim_start_matches('"');
     let line = line.split('"').next().unwrap_or(line);
     let line = line.strip_prefix("exec ").unwrap_or(line);
@@ -170,11 +176,21 @@ impl Pane {
         if !sys::selectable(pty.as_raw_fd()) {
             return Err(io::Error::other("too many panes"));
         }
-        Ok(Self::adopt(id, child.id(), pty, terminal))
+        let start_command = match spawn.program {
+            [line] => Some(line.clone()),
+            _ => None,
+        };
+        Ok(Self::adopt(id, child.id(), start_command, pty, terminal))
     }
 
     /// A pane around a program that is already running on `pty`.
-    pub fn adopt(id: PaneId, pid: u32, pty: File, terminal: Terminal) -> Self {
+    pub fn adopt(
+        id: PaneId,
+        pid: u32,
+        start_command: Option<String>,
+        pty: File,
+        terminal: Terminal,
+    ) -> Self {
         Self {
             id,
             terminal,
@@ -182,6 +198,7 @@ impl Pane {
             copy_mode: None,
             redraw: true,
             pid,
+            start_command,
             exited: false,
             pty,
             pending: Vec::new(),
@@ -305,7 +322,16 @@ impl Pane {
 
     /// The name of what is running in the foreground.
     pub fn foreground_name(&self) -> Option<String> {
-        sys::foreground_name(self.pty.as_fd())
+        let pty = self.pty.as_fd();
+        match &self.start_command {
+            // The shell running a line stays around while the line runs, and
+            // does not say what that is. A shell that the line itself started
+            // takes the foreground for itself, which is then worth showing.
+            Some(line) if sys::foreground_group(pty)?.cast_unsigned() == self.pid => {
+                Some(name_from_line(line))
+            }
+            _ => sys::foreground_name(pty),
+        }
     }
 
     /// The directory for a new pane opened from this one to start in. What the
