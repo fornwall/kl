@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use super::client::Client;
 use super::layout::PaneId;
 use super::pane::Pane;
 use super::session::{SESSION_NAME, Session, Window};
@@ -321,6 +322,7 @@ pub struct Context<'a> {
     pub session: &'a Session,
     pub window: Option<&'a Window>,
     pub pane: Option<&'a Pane>,
+    pub client: Option<&'a Client>,
 }
 
 fn flag(value: bool) -> String {
@@ -334,6 +336,7 @@ impl<'a> Context<'a> {
             session,
             window: session.window(),
             pane: session.active_pane(),
+            client: None,
         }
     }
 
@@ -342,6 +345,7 @@ impl<'a> Context<'a> {
             session,
             window: session.window_of(id),
             pane: session.panes.get(&id),
+            client: None,
         }
     }
 
@@ -351,6 +355,7 @@ impl<'a> Context<'a> {
             session,
             window: Some(window),
             pane: session.panes.get(&window.active),
+            client: None,
         }
     }
 
@@ -364,6 +369,9 @@ impl<'a> Context<'a> {
     }
 
     fn value(&self, name: &str) -> Option<String> {
+        if let Some(value) = self.client.and_then(|client| client.value(name)) {
+            return Some(value);
+        }
         let session = self.session;
         Some(match name {
             "client_height" => session.size.rows.to_string(),

@@ -73,6 +73,11 @@ pub const PREFIX_TABLE: &[Binding] = &[
     bind(";", "last-pane", "Move to the previously active pane"),
     bind("=", "choose-buffer -Z", "Choose a paste buffer from a list"),
     bind("?", "list-keys -N", "List key bindings"),
+    bind(
+        "D",
+        "choose-client -Z",
+        "Choose and detach a client from a list",
+    ),
     bind("E", "select-layout -E", "Spread panes out evenly"),
     bind("M", "select-pane -M", "Clear the marked pane"),
     bind("[", "copy-mode", "Enter copy mode"),

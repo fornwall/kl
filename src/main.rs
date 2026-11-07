@@ -16,14 +16,20 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
+use proto::AttachMode;
+
 const USAGE: &str = "\
 usage: kl [command [flags]]
 
 With no command, attaches to the session, starting it if needed.
 
 Session:
-  attach-session (attach, new-session, new)   attach to the session
-  detach-client (detach)                      detach the attached client
+  attach-session (attach, new-session, new) [-d]  attach to the session, with -d
+                                              detaching every other client
+  detach-client (detach) [-a] [-s session] [-t client]  detach a client, with -a
+                                              every other one, and with -s all
+  list-clients (lsc) [-F format] [-f filter]
+  choose-client                               pick a client to detach from a list
   kill-server                                 end the session
   restart-server [binary]                     replace the server, for example
                                               after an upgrade, with programs
@@ -89,7 +95,7 @@ as #{window_name} or #W, with conditions, comparisons and the usual modifiers.
 
 Keys follow tmux, with C-b as the prefix: c n p l w f ' 0-9 , . & for windows,
 % \" o ; q z x { } ! m M Space E C-o M-o M-1..7 arrows for panes, [ ] # = - for copying and paste buffers, : for
-commands, ? to list the keys and d to detach.
+commands, ? to list the keys, d to detach and D to pick a client to detach.
 Arrows with C- or M- resize a pane. Arrows repeat without the prefix for half a
 second, so that C-b C-Up C-Up resizes twice.
 Copy mode has the keys of tmux's copy-mode-vi table, with y to copy as well, and
@@ -102,8 +108,8 @@ fn print(text: &str) {
     drop(io::stdout().write_all(text.as_bytes()));
 }
 
-fn attach() -> Result<ExitCode, Box<dyn Error>> {
-    let message = client::attach(&client::socket_path()?)?;
+fn attach(mode: AttachMode) -> Result<ExitCode, Box<dyn Error>> {
+    let message = client::attach(&client::socket_path()?, mode)?;
     print(&format!("{message}\n"));
     Ok(ExitCode::SUCCESS)
 }
@@ -127,7 +133,8 @@ fn run(args: &[OsString]) -> Result<ExitCode, Box<dyn Error>> {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     match words.first().map(String::as_str) {
-        None | Some("attach-session" | "attach" | "a" | "new-session" | "new") => attach(),
+        Some("attach-session" | "attach" | "a") => attach(command::attach_mode(&words[1..])?),
+        None | Some("new-session" | "new") => attach(AttachMode::New),
         Some("--server") => {
             let socket = args.get(1).ok_or("--server needs a socket path")?;
             let state = match args.get(2..).unwrap_or(&[]) {

@@ -2187,7 +2187,7 @@ fn survives_detaching_and_shows_new_output_on_return() {
     screen.run("sleep 1; echo finished-while-away");
     screen.prefix("d");
     screen.wait_for_exit();
-    assert!(screen.raw_text().contains("[detached]"));
+    assert!(screen.raw_text().contains("[detached (from session kl)]"));
 
     let Screen { dir, .. } = screen;
     let mut screen = Screen::attach(dir, 80, 24);
@@ -2205,7 +2205,7 @@ fn typing_through_a_detach_does_not_lose_the_goodbye() {
     }
     screen.pump();
     let text = screen.raw_text();
-    assert!(text.contains("[detached]"), "{text}");
+    assert!(text.contains("[detached (from session kl)]"), "{text}");
 }
 
 #[test]
@@ -2495,6 +2495,234 @@ fn a_client_leaving_leaves_the_others_as_they_are() {
     assert!(first.raw_text().contains("[detached"));
     second.run("echo still-going");
     second.wait_for_line("still-going");
+}
+
+/// The name of a client, by its place among those attached.
+fn client_name(screen: &Screen, index: usize) -> String {
+    let names = output_of(screen, &["list-clients", "-F", "#{client_name}"]);
+    names.lines().nth(index).unwrap().to_owned()
+}
+
+#[test]
+fn attaching_with_d_detaches_the_others() {
+    let (mut first, mut second) = two_clients();
+    let mut command = kl_command(&first.dir.0);
+    command.args(["attach-session", "-d"]);
+    let mut third = Screen::attach_with(command, Rc::clone(&first.dir), 80, 24);
+    first.wait_for_exit();
+    second.wait_for_exit();
+    assert!(first.raw_text().contains("[detached (from session kl)]"));
+    assert!(second.raw_text().contains("[detached (from session kl)]"));
+    third.run("echo all-alone");
+    third.wait_for_line("all-alone");
+}
+
+#[test]
+fn attaching_says_what_it_does_not_take() {
+    let first = Screen::new(80, 24);
+    let output = first.command(&["attach-session", "-Q"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("attach-session"), "{error}");
+}
+
+#[test]
+fn detaches_a_client_by_its_name() {
+    let (mut first, mut second) = two_clients();
+    let name = client_name(&first, 0);
+    assert!(name.starts_with("/dev/"), "{name}");
+    let short = name.strip_prefix("/dev/").unwrap();
+    assert!(
+        first
+            .command(&["detach-client", "-t", short])
+            .status
+            .success()
+    );
+    first.wait_for_exit();
+    second.run("echo still-here");
+    second.wait_for_line("still-here");
+    let error = error_of(&second, &["detach-client", "-t", "/dev/no-such-terminal"]);
+    assert_eq!(error, "kl: can't find client: /dev/no-such-terminal\n");
+}
+
+#[test]
+fn detaches_every_other_client() {
+    let (mut first, mut second) = two_clients();
+    let mut third = Screen::attach(Rc::clone(&first.dir), 80, 24);
+    first.run("echo the-active-one");
+    first.wait_for_line("the-active-one");
+    // Without a target, the client active last is the one that stays.
+    assert!(first.command(&["detach-client", "-a"]).status.success());
+    second.wait_for_exit();
+    third.wait_for_exit();
+    first.run("echo still-attached");
+    first.wait_for_line("still-attached");
+
+    // With one, it is that one.
+    let mut second = Screen::attach(Rc::clone(&first.dir), 80, 24);
+    let name = client_name(&first, 0);
+    let output = first.command(&["detach-client", "-a", "-t", &name]);
+    assert!(output.status.success(), "{output:?}");
+    second.wait_for_exit();
+    first.run("echo and-again");
+    first.wait_for_line("and-again");
+}
+
+#[test]
+fn detaches_everyone_from_the_session() {
+    let (mut first, mut second) = two_clients();
+    assert!(
+        first
+            .command(&["detach-client", "-s", "kl"])
+            .status
+            .success()
+    );
+    first.wait_for_exit();
+    second.wait_for_exit();
+    assert_eq!(output_of(&first, &["list-clients"]), "");
+    let error = error_of(&first, &["detach-client", "-s", "nope"]);
+    assert_eq!(error, "kl: can't find session: nope\n");
+}
+
+#[test]
+fn lists_clients() {
+    let first = Screen::new(80, 24);
+    let second = Screen::attach(Rc::clone(&first.dir), 60, 20);
+    let names = [client_name(&first, 0), client_name(&first, 1)];
+    assert_eq!(
+        output_of(&second, &["list-clients"]),
+        format!(
+            "{}: kl [80x24 xterm-ghostty] (attached,focused,UTF-8)\n\
+             {}: kl [60x20 xterm-ghostty] (attached,focused,UTF-8)\n",
+            names[0], names[1]
+        )
+    );
+    let format = "#{client_tty} #{client_width}x#{client_height} #{client_session} \
+                  #{client_cell_width}x#{client_cell_height} #{client_pid}";
+    let wanted = format!("{} 60x20 kl 10x20 {}\n", names[1], second.child.id());
+    let filter = "#{==:#{client_width},60}";
+    assert_eq!(
+        output_of(&first, &["list-clients", "-F", format, "-f", filter]),
+        wanted
+    );
+    assert_eq!(
+        output_of(&first, &["lsc", "-f", "#{==:#{client_width},1}"]),
+        ""
+    );
+    let error = error_of(&first, &["list-clients", "-t", "nope"]);
+    assert_eq!(error, "kl: can't find session: nope\n");
+}
+
+#[test]
+fn says_when_each_client_was_last_active() {
+    let (mut first, second) = two_clients();
+    let times = "#{client_created} #{client_activity}";
+    let seconds = || {
+        let output = output_of(&second, &["list-clients", "-F", times]);
+        let lines: Vec<Vec<u64>> = output
+            .lines()
+            .map(|line| line.split(' ').map(|word| word.parse().unwrap()).collect())
+            .collect();
+        lines
+    };
+    let before = seconds();
+    assert!(before[0][0] > 1_000_000_000, "{before:?}");
+    std::thread::sleep(Duration::from_millis(1100));
+    first.run("echo busy");
+    first.wait_for_line("busy");
+    let after = seconds();
+    assert_eq!(after[0][0], before[0][0]);
+    assert!(after[0][1] > before[0][1], "{before:?} {after:?}");
+    assert_eq!(after[1][1], before[1][1]);
+}
+
+#[test]
+fn picks_a_client_to_detach_from_a_list() {
+    let (mut first, mut second) = two_clients();
+    let names = [client_name(&first, 0), client_name(&first, 1)];
+    first.prefix("D");
+    let lines = first.wait_for("the list", |lines| lines[1].starts_with("(1) "));
+    assert_eq!(lines[0], format!("(0) {}: 80x24: session kl", names[0]));
+    // Down to the other client, which is gone at the press of a key.
+    first.type_text("j");
+    first.enter();
+    second.wait_for_exit();
+    first.wait_for("the list to go", |lines| lines[0].starts_with('$'));
+}
+
+#[test]
+fn d_detaches_and_leaves_the_list_open() {
+    let (mut first, mut second) = two_clients();
+    let mut third = Screen::attach(Rc::clone(&first.dir), 80, 24);
+    first.prefix("D");
+    first.wait_for("the list", |lines| lines[2].starts_with("(2) "));
+    first.type_text("j");
+    first.type_text("d");
+    second.wait_for_exit();
+    let lines = first.wait_for("a shorter list", |lines| !lines[2].starts_with("(2) "));
+    assert!(lines[1].starts_with("(1) "), "{lines:?}");
+    first.type_text("q");
+    third.run("echo goes-on");
+    third.wait_for_line("goes-on");
+}
+
+#[test]
+fn a_key_acts_for_the_client_it_was_pressed_on() {
+    let (mut first, mut second) = two_clients();
+    first.run("echo active-last");
+    first.wait_for_line("active-last");
+    second.prefix("d");
+    second.wait_for_exit();
+    first.run("echo not-detached");
+    first.wait_for_line("not-detached");
+}
+
+#[test]
+fn the_command_line_acts_for_the_client_active_last() {
+    let (mut first, mut second) = two_clients();
+    first.run("echo active-last");
+    first.wait_for_line("active-last");
+    let name = client_name(&first, 0);
+    assert_eq!(
+        output_of(&second, &["display-message", "-p", "#{client_name}"]),
+        format!("{name}\n")
+    );
+    let output = second.command(&["display-message", "for-the-first"]);
+    assert!(output.status.success(), "{output:?}");
+    first.wait_for("the message", |lines| {
+        lines.last().unwrap() == "for-the-first"
+    });
+    assert!(second.lines().last().unwrap().starts_with("[kl] "));
+
+    assert!(second.command(&["detach-client"]).status.success());
+    first.wait_for_exit();
+    second.run("echo still-attached");
+    second.wait_for_line("still-attached");
+}
+
+#[test]
+fn what_takes_a_client_says_so_without_one() {
+    let mut screen = Screen::new(80, 24);
+    screen.prefix("d");
+    screen.wait_for_exit();
+    for command in [
+        &["detach-client"][..],
+        &["detach-client", "-a"],
+        &["command-prompt"],
+        &["confirm-before", "kill-server"],
+    ] {
+        assert_eq!(error_of(&screen, command), "kl: no current client\n");
+    }
+    // As in tmux, these have nobody to show anything to, which is no error.
+    for command in [
+        &["display-message", "nobody-sees-this"][..],
+        &["display-panes"],
+        &["choose-tree"],
+        &["choose-client"],
+    ] {
+        assert!(screen.command(command).status.success(), "{command:?}");
+    }
+    assert_eq!(output_of(&screen, &["list-clients"]), "");
 }
 
 #[test]

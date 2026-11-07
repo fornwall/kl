@@ -20,7 +20,7 @@ The first iteration has the core of tmux, with no configuration:
   binary, with programs still running and clients attached again.
 - Several clients at once, showing the same window at the size of the one active
   last, each with its own prompt, keys and mouse. One that stops reading holds up
-  nobody else.
+  nobody else. `list-clients`, `detach-client` and `C-b D` take care of them.
 - The mouse is always on: select panes and windows, drag borders, scroll, select
   text (double and triple click too), and paste with the middle button. Programs
   that ask for the mouse get it, and holding shift leaves it to Ghostty.
@@ -153,10 +153,12 @@ Things panes can ask for that stop at kl today.
 - Going easy on slow links. Pixels go out uncompressed, 72 MB took 2.3 seconds
   locally, and an image that left the screen is sent again when it comes back.
 
-### 6. Clients and persistence
+### 6. Clients
 
-- Commands for several clients: `attach-session -d`, `detach-client -a` and `-t`,
-  `list-clients` and `C-b D`.
+- Moving the view of a client smaller than the window by hand, with `refresh-client
+  -L` and the like. It follows the cursor for now.
+- What is left of tmux's flags for clients: read-only clients with `attach-session
+  -r`, and `-P`, `-E` and `-x` to end what a client runs in along with it.
 
 ### Later: settings
 

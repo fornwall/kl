@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use crate::base64;
 use crate::ghostty::{Notification, OuterColors};
-use crate::proto::{self, AttachMode, ClientMessage, ServerMessage};
+use crate::proto::{self, AttachMode, ClientInfo, ClientMessage, ServerMessage};
 use crate::sys::{self, SIGCHLD, SIGHUP, SIGINT, SIGTERM, Selector, WinSize};
 use buffers::Buffers;
 use client::Client;
@@ -250,7 +250,12 @@ pub fn run(socket: &Path, state: Option<&Path>) -> Result<(), Box<dyn Error>> {
         connections: Vec::new(),
         next_connection: 0,
         acting: None,
-        nobody: Client::new(WinSize::default(), OuterColors::default(), now),
+        nobody: Client::new(
+            WinSize::default(),
+            OuterColors::default(),
+            now,
+            ClientInfo::default(),
+        ),
         session,
         canvas: Canvas::default(),
         buffers,
@@ -488,13 +493,16 @@ impl Server {
         connection.unwrap_or(&mut self.nobody)
     }
 
+    fn acting_client(&self) -> Option<&Client> {
+        let connections = self.connections.iter();
+        connections
+            .filter(|connection| Some(connection.id) == self.acting)
+            .find_map(|connection| connection.client.as_ref())
+    }
+
     /// See [`Server::client`].
     pub fn client_ref(&self) -> &Client {
-        let connections = self.connections.iter();
-        let connection = connections
-            .filter(|connection| Some(connection.id) == self.acting)
-            .find_map(|connection| connection.client.as_ref());
-        connection.unwrap_or(&self.nobody)
+        self.acting_client().unwrap_or(&self.nobody)
     }
 
     fn connection_mut(&mut self, id: u64) -> Option<&mut Connection> {
@@ -511,8 +519,9 @@ impl Server {
                 version,
                 size,
                 mode,
+                info,
                 environment,
-            } => self.attach(id, version, size, mode, environment),
+            } => self.attach(id, version, size, mode, info, environment),
             ClientMessage::Input(bytes) if attached => self.handle_input(&bytes),
             ClientMessage::Resize(size) if attached => {
                 self.client().size = size;
@@ -550,6 +559,7 @@ impl Server {
         version: u32,
         size: WinSize,
         mode: AttachMode,
+        info: ClientInfo,
         environment: Vec<String>,
     ) {
         if let Some(error) = Self::version_error(version) {
@@ -559,16 +569,20 @@ impl Server {
             return;
         }
         let colors = self.session.colors.clone();
-        // Clients coming back behave as they did, as far as that is known.
-        let active_at = match mode {
-            AttachMode::New => {
-                self.session.environment = environment;
-                Instant::now()
+        if mode == AttachMode::Alone {
+            for other in self.client_ids() {
+                self.detach_client(other);
             }
-            AttachMode::Reattach => self.started_at,
+        }
+        // Clients coming back behave as they did, as far as that is known.
+        let active_at = if mode == AttachMode::Reattach {
+            self.started_at
+        } else {
+            self.session.environment = environment;
+            Instant::now()
         };
         if let Some(connection) = self.connection_mut(id) {
-            connection.client = Some(Client::new(size, colors, active_at));
+            connection.client = Some(Client::new(size, colors, active_at, info));
         }
         self.follow_latest();
         self.update_focus();

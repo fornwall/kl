@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::proto::{self, AttachMode, ClientMessage, ServerMessage};
+use crate::proto::{self, AttachMode, ClientInfo, ClientMessage, ServerMessage};
 use crate::sys::{self, SIGHUP, SIGTERM, SIGWINCH, Selector};
 
 /// How long to wait for a newly started server to come up.
@@ -183,7 +183,7 @@ impl Receiver {
 }
 
 /// Attaches this terminal, returning what to tell the user afterwards.
-pub fn attach(socket: &Path) -> Result<String, Box<dyn Error>> {
+pub fn attach(socket: &Path, mut mode: AttachMode) -> Result<String, Box<dyn Error>> {
     if env::var_os("KL").is_some() {
         return Err("sessions should be nested with care, unset $KL to force".into());
     }
@@ -200,7 +200,6 @@ pub fn attach(socket: &Path) -> Result<String, Box<dyn Error>> {
     stdout.write_all(ENTER_TERMINAL)?;
     stdout.flush()?;
 
-    let mut mode = AttachMode::New;
     let result = loop {
         match attached_loop(&stream, &signals, mode) {
             Ok(Some(text)) => break Ok(text),
@@ -245,6 +244,11 @@ fn attached_loop(
         version: proto::VERSION,
         size: sys::winsize(terminal)?,
         mode,
+        info: ClientInfo {
+            pid: std::process::id(),
+            tty: sys::tty_name(terminal).unwrap_or_default(),
+            term: env::var("TERM").unwrap_or_default(),
+        },
         environment: UPDATE_ENVIRONMENT.map(environment_entry).to_vec(),
     };
     send(stream, &attach)?;

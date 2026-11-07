@@ -9,7 +9,7 @@ use super::format::Context;
 use super::keys;
 use super::layout::{Divider, Layout, PaneId, Rect};
 use super::pane::Pane;
-use super::session::Monitor;
+use super::session::{Monitor, Session};
 use super::ui::{List, ListOutcome, ListRow, Prompt, PromptAction, PromptOutcome};
 use super::{Lifecycle, Server};
 use crate::command::{self, BufferCommand, Command, Direction, PaneScope, PasteOptions};
@@ -19,7 +19,6 @@ use crate::ghostty::{
     MouseButton, MouseInput,
 };
 use crate::input::{Event, KeyEvent, MouseEvent};
-use crate::proto::ServerMessage;
 use crate::sys;
 
 /// How long dragging at the edge of a pane takes to scroll a row, as in tmux.
@@ -89,7 +88,7 @@ pub struct Selecting {
 }
 
 /// A line of a format for each of what `-f` lets through.
-fn listing<'a>(
+pub fn listing<'a>(
     contexts: impl Iterator<Item = Context<'a>>,
     format: &str,
     filter: Option<&str>,
@@ -393,9 +392,14 @@ impl Server {
                 self.run_interactive(command);
             }
             ListOutcome::Delete(command, row) => {
+                let clients = matches!(command, Command::DetachClient { .. });
                 self.close_list();
                 self.run_interactive(command);
-                self.choose_buffer(row);
+                if clients {
+                    self.choose_client(row);
+                } else {
+                    self.choose_buffer(row);
+                }
             }
         }
     }
@@ -595,20 +599,32 @@ impl Server {
                 return Ok(self.tell_about(id, print.as_deref()));
             }
             Command::Buffer(command) => return self.run_buffer_command(command),
+            Command::ChooseClient => self.choose_client(0),
             Command::ChooseTree => self.choose_tree(),
             Command::Prompt {
                 prompt,
                 initial,
                 template,
-            } => self.command_prompt(prompt.as_deref(), initial.as_deref(), template),
+            } => {
+                self.require_client()?;
+                self.command_prompt(prompt.as_deref(), initial.as_deref(), template);
+            }
             Command::ConfirmBefore { prompt, command } => {
+                self.require_client()?;
                 self.confirm_before(prompt.as_deref(), command);
             }
             Command::CopyMode { page_up, target } => {
                 let id = self.session.find_pane(target.as_deref())?;
                 self.start_copy_mode(id, page_up);
             }
-            Command::DetachClient => self.detach(),
+            Command::DetachClient {
+                session,
+                target,
+                who,
+            } => {
+                Session::check_session(session.as_deref())?;
+                self.detach_clients(target.as_deref(), who)?;
+            }
             Command::DisplayMessage {
                 target,
                 print,
@@ -651,6 +667,14 @@ impl Server {
             Command::LastWindow => {
                 let last = self.session.last.ok_or("no last window")?;
                 self.session.select_window(last);
+            }
+            Command::ListClients {
+                session,
+                format,
+                filter,
+            } => {
+                Session::check_session(session.as_deref())?;
+                return Ok(self.list_clients(format.as_deref(), filter.as_deref()));
             }
             Command::ListKeys { notes } => {
                 return Ok(format!("{}\n", keys::list(notes).join("\n")));
@@ -922,22 +946,16 @@ impl Server {
         let id = self.session.find_pane(target)?;
         let format = format.unwrap_or(DISPLAY_MESSAGE);
         let format = with_local_time(format);
-        let text = Context::of_pane(&self.session, id).expand(&format);
+        let context = Context {
+            client: Some(self.client_ref()),
+            ..Context::of_pane(&self.session, id)
+        };
+        let text = context.expand(&format);
         if print {
             return Ok(format!("{text}\n"));
         }
         self.client().ui.show_message(text);
         Ok(String::new())
-    }
-
-    fn detach(&mut self) {
-        if let Some(id) = self.acting
-            && let Some(connection) = self.connection_mut(id)
-            && connection.client.take().is_some()
-        {
-            connection.finish(&ServerMessage::Exit("[detached]".to_owned()));
-            self.after_client_left();
-        }
     }
 
     fn start_copy_mode(&mut self, id: PaneId, page_up: bool) {

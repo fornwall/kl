@@ -1,6 +1,7 @@
 //! The command language, which follows tmux. The same commands are reached from
 //! key bindings, the `:` prompt and the `kl` command line.
 
+use crate::proto::AttachMode;
 use std::path::PathBuf;
 
 use std::time::Duration;
@@ -179,6 +180,17 @@ pub struct Place {
 /// one, a command is about the current one.
 pub type Target = Option<String>;
 
+/// Who `detach-client` is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detach {
+    /// The target, or else the current client.
+    Client,
+    /// Every client but that one.
+    Others,
+    /// Every client.
+    All,
+}
+
 /// Which panes `list-panes` shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneScope {
@@ -244,6 +256,7 @@ pub enum Command {
     },
     Buffer(BufferCommand),
     /// Lets the user pick a window from a list.
+    ChooseClient,
     ChooseTree,
     /// Asks for a line, and runs it or fills it in to a template at `%%`.
     Prompt {
@@ -259,7 +272,12 @@ pub enum Command {
         page_up: bool,
         target: Target,
     },
-    DetachClient,
+    DetachClient {
+        /// The session of `-s`, which there is only the one of.
+        session: Option<String>,
+        target: Target,
+        who: Detach,
+    },
     DisplayMessage {
         target: Target,
         /// To the output rather than the status line.
@@ -299,6 +317,12 @@ pub enum Command {
     },
     LastWindow,
     /// `list-keys`, with what each key does in words for `-N`.
+    ListClients {
+        /// The session of `-t`, which there is only the one of.
+        session: Option<String>,
+        format: Option<String>,
+        filter: Option<String>,
+    },
     ListKeys {
         notes: bool,
     },
@@ -438,11 +462,12 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
     match name.as_str() {
         "break-pane" | "breakp" => parse_break_pane(args),
         "choose-buffer" => parse_choose_buffer(args),
+        "choose-client" => parse_choose_client(args),
         "choose-tree" => parse_choose_tree(args),
         "command-prompt" => parse_command_prompt(args),
         "confirm-before" | "confirm" => parse_confirm_before(args),
         "copy-mode" => parse_copy_mode(args),
-        "detach-client" | "detach" => no_args("detach-client", args, Command::DetachClient),
+        "detach-client" | "detach" => parse_detach_client(args),
         "display-message" | "display" => parse_display_message(args),
         "delete-buffer" | "deleteb" => {
             parse_buffer_name("delete-buffer", args, BufferCommand::Delete)
@@ -458,6 +483,7 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
         "list-buffers" | "lsb" => parse_list_buffers(args),
         "list-keys" | "lsk" => parse_list_keys(args),
         "list-panes" | "lsp" => parse_list_panes(args),
+        "list-clients" | "lsc" => parse_list_clients(args),
         "list-windows" | "lsw" => parse_list_windows(args),
         "load-buffer" | "loadb" => parse_load_buffer(args),
         "move-window" | "movew" => parse_move_window(args),
@@ -728,6 +754,48 @@ fn parse_set_buffer(args: &[String]) -> Result<Command, String> {
 
 /// With a single session, `-s` and `-w` end up with the same list, and it
 /// always covers the window as with `-Z`.
+fn parse_choose_client(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("choose-client", args, "NrZ")?;
+    flags.at_most(0).map(|()| Command::ChooseClient)
+}
+
+fn parse_detach_client(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("detach-client", args, "as:t:")?;
+    flags.at_most(0)?;
+    let who = match (flags.has('s'), flags.has('a')) {
+        (true, _) => Detach::All,
+        (false, true) => Detach::Others,
+        (false, false) => Detach::Client,
+    };
+    Ok(Command::DetachClient {
+        session: flags.value('s'),
+        target: flags.value('t'),
+        who,
+    })
+}
+
+fn parse_list_clients(args: &[String]) -> Result<Command, String> {
+    let flags = Flags::parse("list-clients", args, "F:f:t:")?;
+    flags.at_most(0)?;
+    Ok(Command::ListClients {
+        session: flags.value('t'),
+        format: flags.value('F'),
+        filter: flags.value('f'),
+    })
+}
+
+/// How `attach-session` goes about it. Runs on the client's side, before there is
+/// a server to ask, so that `-t` can only be there for the sake of scripts.
+pub fn attach_mode(args: &[String]) -> Result<AttachMode, String> {
+    let flags = Flags::parse("attach-session", args, "dt:")?;
+    flags.at_most(0)?;
+    Ok(if flags.has('d') {
+        AttachMode::Alone
+    } else {
+        AttachMode::New
+    })
+}
+
 fn parse_choose_tree(args: &[String]) -> Result<Command, String> {
     let flags = Flags::parse("choose-tree", args, "swZ")?;
     flags.at_most(0).map(|()| Command::ChooseTree)
@@ -1098,17 +1166,17 @@ fn parse_send_prefix(args: &[String]) -> Result<Command, String> {
 /// The only option so far is the one tmux makes it impossible to do without.
 fn parse_set_option(args: &[String]) -> Result<Command, String> {
     let flags = Flags::parse("set-option", args, "t:w")?;
+    flags.at_most(2)?;
     let target = flags.value('t');
     let value = match flags.rest {
         [name, ..] if name != "monitor-activity" => return Err(format!("invalid option: {name}")),
         [] => return Err("usage: set-option [-w] [-t target] option [value]".to_owned()),
-        [_] => None,
+        [_] | [_, _, _, ..] => None,
         [_, value] => match value.as_str() {
             "on" | "yes" | "1" => Some(true),
             "off" | "no" | "0" => Some(false),
             _ => return Err(format!("bad value: {value}")),
         },
-        _ => return flags.at_most(2).map(|()| Command::DetachClient),
     };
     Ok(Command::SetMonitorActivity { target, value })
 }
@@ -1213,7 +1281,14 @@ mod tests {
     #[test]
     fn parses_names_and_aliases_alike() {
         assert_eq!(command("next-window"), command("next"));
-        assert_eq!(command("detach"), Command::DetachClient);
+        assert_eq!(
+            command("detach"),
+            Command::DetachClient {
+                session: None,
+                target: None,
+                who: Detach::Client,
+            }
+        );
         assert_eq!(command("resizep -Z"), Command::ToggleZoom { target: None });
     }
 

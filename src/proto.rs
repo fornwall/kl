@@ -7,7 +7,7 @@
 use crate::sys::WinSize;
 
 /// Bumped on any change to the messages below.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// Larger than anything sent in practice, to catch a corrupt stream.
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
@@ -27,6 +27,8 @@ const TAG_REATTACH: u8 = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachMode {
     New,
+    /// Detaches every other client, as `attach-session -d`.
+    Alone,
     /// It was attached to the server that this one replaced, so that coming back
     /// is not something its user did.
     Reattach,
@@ -36,6 +38,7 @@ impl AttachMode {
     const fn word(self) -> &'static str {
         match self {
             Self::New => "new",
+            Self::Alone => "alone",
             Self::Reattach => "reattach",
         }
     }
@@ -43,12 +46,20 @@ impl AttachMode {
     /// Anything else is from a client of another version, which is not going to
     /// get any further than being told so.
     fn from_word(word: &str) -> Self {
-        if word == Self::Reattach.word() {
-            Self::Reattach
-        } else {
-            Self::New
-        }
+        let modes = [Self::Alone, Self::Reattach];
+        let mode = modes.into_iter().find(|mode| mode.word() == word);
+        mode.unwrap_or(Self::New)
     }
+}
+
+/// What a client says about itself on attaching.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClientInfo {
+    pub pid: u32,
+    /// The path of its terminal, which is what tmux knows a client by.
+    pub tty: String,
+    /// Its `TERM`.
+    pub term: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +69,7 @@ pub enum ClientMessage {
         version: u32,
         size: WinSize,
         mode: AttachMode,
+        info: ClientInfo,
         /// What new panes should get of the client's environment: `NAME=value`
         /// to set a variable, and a bare `NAME` to remove it.
         environment: Vec<String>,
@@ -229,11 +241,15 @@ impl ClientMessage {
                 version,
                 size,
                 mode,
+                info,
                 environment,
             } => {
                 let mut payload = version.to_le_bytes().to_vec();
                 payload.extend(size_bytes(*size));
                 put_bytes(&mut payload, mode.word().as_bytes());
+                put_bytes(&mut payload, info.pid.to_string().as_bytes());
+                put_bytes(&mut payload, info.tty.as_bytes());
+                put_bytes(&mut payload, info.term.as_bytes());
                 put_texts(&mut payload, environment);
                 put_frame(out, TAG_ATTACH, &payload);
             }
@@ -270,11 +286,18 @@ impl ClientMessage {
                 // Texts all the way, which has been the case in every version,
                 // so that any client gets as far as hearing that it does not fit.
                 let mut texts = reader.take_texts()?.into_iter();
-                let mode = texts.next().ok_or(Malformed)?;
+                let mut text = || texts.next().ok_or(Malformed);
+                let mode = AttachMode::from_word(&text()?);
+                let info = ClientInfo {
+                    pid: text()?.parse().unwrap_or(0),
+                    tty: text()?,
+                    term: text()?,
+                };
                 Self::Attach {
                     version,
                     size,
-                    mode: AttachMode::from_word(&mode),
+                    mode,
+                    info,
                     environment: texts.collect(),
                 }
             }
@@ -370,7 +393,19 @@ mod tests {
             version: 7,
             size,
             mode: AttachMode::Reattach,
+            info: ClientInfo {
+                pid: 1234,
+                tty: "/dev/pts/7".to_owned(),
+                term: "xterm-ghostty".to_owned(),
+            },
             environment: vec!["DISPLAY=:0".to_owned(), "XAUTHORITY".to_owned()],
+        });
+        round_trip_client(&ClientMessage::Attach {
+            version: 7,
+            size,
+            mode: AttachMode::Alone,
+            info: ClientInfo::default(),
+            environment: Vec::new(),
         });
         round_trip_client(&ClientMessage::Input(vec![0, 1, 255]));
         round_trip_client(&ClientMessage::Resize(size));
@@ -391,6 +426,21 @@ mod tests {
             text: "unknown command".to_owned(),
         });
         round_trip_server(&ServerMessage::Reattach);
+    }
+
+    /// What a client needs from a server of any version, here one that says less
+    /// about itself: it must get as far as hearing that it does not fit.
+    #[test]
+    fn an_attach_of_another_version_can_be_read() {
+        let mut payload = 7_u32.to_le_bytes().to_vec();
+        payload.extend(size_bytes(WinSize::default()));
+        for entry in ["DISPLAY=:0", "KRB5CCNAME", "SSH_AUTH_SOCK", "XAUTHORITY"] {
+            put_bytes(&mut payload, entry.as_bytes());
+        }
+        let mut bytes = Vec::new();
+        put_frame(&mut bytes, TAG_ATTACH, &payload);
+        let message = ClientMessage::decode(&bytes).unwrap().unwrap().0;
+        assert!(matches!(message, ClientMessage::Attach { version: 7, .. }));
     }
 
     /// What a client needs from a server of any version.

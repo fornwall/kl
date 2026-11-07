@@ -87,6 +87,15 @@ pub fn winsize(fd: BorrowedFd<'_>) -> io::Result<WinSize> {
     })
 }
 
+/// The path of the terminal behind a descriptor.
+pub fn tty_name(fd: BorrowedFd<'_>) -> Option<String> {
+    let mut name = [0_u8; 256];
+    // SAFETY: `name` is valid for writes of the length given.
+    let result = unsafe { libc::ttyname_r(fd.as_raw_fd(), name.as_mut_ptr().cast(), name.len()) };
+    let name = CStr::from_bytes_until_nul(&name).ok()?;
+    (result == 0).then(|| name.to_string_lossy().into_owned())
+}
+
 pub fn set_winsize(fd: BorrowedFd<'_>, size: WinSize) -> io::Result<()> {
     let size = size.to_libc();
     // SAFETY: TIOCSWINSZ reads a `winsize` from the valid pointer it gets.
