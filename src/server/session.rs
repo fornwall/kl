@@ -45,6 +45,9 @@ pub struct Session {
     pub repaint: bool,
     /// The outer terminal's default foreground and background.
     pub colors: (Option<Rgb>, Option<Rgb>),
+    /// What new panes get of the environment of the latest client, in the form
+    /// of [`crate::proto::ClientMessage::Attach`].
+    pub environment: Vec<String>,
     socket: String,
     next_pane: PaneId,
 }
@@ -64,6 +67,7 @@ impl Session {
             },
             repaint: true,
             colors: (None, None),
+            environment: Vec::new(),
             socket,
             next_pane: 0,
         }
@@ -147,6 +151,7 @@ impl Session {
             program,
             cwd: cwd.as_deref(),
             socket: &self.socket,
+            environment: &self.environment,
         };
         let size = WinSize {
             cols: size.width,

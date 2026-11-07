@@ -87,13 +87,18 @@ impl Screen {
     }
 
     fn attach(dir: Rc<Scratch>, cols: u16, rows: u16) -> Self {
+        let command = kl_command(&dir.0);
+        Self::attach_with(command, dir, cols, rows)
+    }
+
+    fn attach_with(command: Command, dir: Rc<Scratch>, cols: u16, rows: u16) -> Self {
         let size = WinSize {
             cols,
             rows,
             width_px: cols * 10,
             height_px: rows * 20,
         };
-        let (pty, child) = sys::spawn_on_pty(kl_command(&dir.0), size).unwrap();
+        let (pty, child) = sys::spawn_on_pty(command, size).unwrap();
         let mut terminal = Terminal::new(cols, rows).unwrap();
         terminal.resize(cols, rows, 10, 20).unwrap();
         let mut screen = Self {
@@ -576,6 +581,25 @@ fn reattaching_at_another_size_resizes_the_panes() {
     let mut screen = Screen::attach(dir, 100, 30);
     screen.run("stty size");
     screen.wait_for_text("29 100");
+}
+
+#[test]
+fn new_panes_get_the_environment_of_the_latest_client() {
+    let dir = Rc::new(Scratch::new());
+    let mut command = kl_command(&dir.0);
+    command.env("SSH_AUTH_SOCK", "/old").env("DISPLAY", ":1");
+    let mut screen = Screen::attach_with(command, dir, 80, 24);
+    screen.prefix("d");
+    screen.wait_for_exit();
+
+    let Screen { dir, .. } = screen;
+    let mut command = kl_command(&dir.0);
+    command.env("SSH_AUTH_SOCK", "/new").env_remove("DISPLAY");
+    let mut screen = Screen::attach_with(command, dir, 80, 24);
+    screen.prefix("c");
+    screen.wait_for_text("1:");
+    screen.run("echo \"[$SSH_AUTH_SOCK ${DISPLAY-unset}]\"");
+    screen.wait_for_text("[/new unset]");
 }
 
 #[test]

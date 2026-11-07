@@ -96,7 +96,6 @@ Things panes can ask for that stop at kl today.
 - Several clients at once. A new client currently takes over from the old one.
   This raises the question of which size wins, and tmux's answers are a good
   start.
-- Refreshing `SSH_AUTH_SOCK`, `DISPLAY` and the like on attach.
 - Surviving a server restart, with libghostty-vt's `snapshot` feature.
 - Compressing idle scrollback with `ghostty_terminal_compress`.
 - `TERM=xterm-ghostty` where Ghostty started the server, `xterm-256color`

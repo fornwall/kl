@@ -7,7 +7,7 @@
 use crate::sys::WinSize;
 
 /// Bumped on any change to the messages below.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Larger than anything sent in practice, to catch a corrupt stream.
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
@@ -28,6 +28,9 @@ pub enum ClientMessage {
     Attach {
         version: u32,
         size: WinSize,
+        /// What new panes should get of the client's environment: `NAME=value`
+        /// to set a variable, and a bare `NAME` to remove it.
+        environment: Vec<String>,
     },
     /// Bytes the terminal sent, to be parsed by the server.
     Input(Vec<u8>),
@@ -119,12 +122,23 @@ impl<'a> Reader<'a> {
         let bytes = self.take(len)?;
         Ok(String::from_utf8_lossy(bytes).into_owned())
     }
+
+    /// The texts that make up the rest of a payload.
+    fn take_texts(&mut self) -> Result<Vec<String>, Malformed> {
+        let mut texts = Vec::new();
+        while !self.0.is_empty() {
+            texts.push(self.take_text()?);
+        }
+        Ok(texts)
+    }
 }
 
-fn put_text(out: &mut Vec<u8>, text: &str) {
-    let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(text.as_bytes());
+fn put_texts(out: &mut Vec<u8>, texts: &[String]) {
+    for text in texts {
+        let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
+    }
 }
 
 /// A frame's tag and payload, and how many bytes it took up.
@@ -149,18 +163,21 @@ fn split_frame(buffer: &[u8]) -> Result<Option<Frame<'_>>, Malformed> {
 impl ClientMessage {
     pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
-            Self::Attach { version, size } => {
+            Self::Attach {
+                version,
+                size,
+                environment,
+            } => {
                 let mut payload = version.to_le_bytes().to_vec();
                 payload.extend(size_bytes(*size));
+                put_texts(&mut payload, environment);
                 put_frame(out, TAG_ATTACH, &payload);
             }
             Self::Input(bytes) => put_frame(out, TAG_INPUT, bytes),
             Self::Resize(size) => put_frame(out, TAG_RESIZE, &size_bytes(*size)),
             Self::Command { version, args } => {
                 let mut payload = version.to_le_bytes().to_vec();
-                for arg in args {
-                    put_text(&mut payload, arg);
-                }
+                put_texts(&mut payload, args);
                 put_frame(out, TAG_COMMAND, &payload);
             }
         }
@@ -177,17 +194,14 @@ impl ClientMessage {
             TAG_ATTACH => Self::Attach {
                 version: reader.take_u32()?,
                 size: reader.take_size()?,
+                environment: reader.take_texts()?,
             },
             TAG_INPUT => Self::Input(reader.take_rest().to_vec()),
             TAG_RESIZE => Self::Resize(reader.take_size()?),
-            TAG_COMMAND => {
-                let version = reader.take_u32()?;
-                let mut args = Vec::new();
-                while !reader.0.is_empty() {
-                    args.push(reader.take_text()?);
-                }
-                Self::Command { version, args }
-            }
+            TAG_COMMAND => Self::Command {
+                version: reader.take_u32()?,
+                args: reader.take_texts()?,
+            },
             _ => return Err(Malformed),
         };
         Ok(Some((message, used)))
@@ -258,7 +272,11 @@ mod tests {
             width_px: 800,
             height_px: 480,
         };
-        round_trip_client(&ClientMessage::Attach { version: 7, size });
+        round_trip_client(&ClientMessage::Attach {
+            version: 7,
+            size,
+            environment: vec!["DISPLAY=:0".to_owned(), "XAUTHORITY".to_owned()],
+        });
         round_trip_client(&ClientMessage::Input(vec![0, 1, 255]));
         round_trip_client(&ClientMessage::Resize(size));
         round_trip_client(&ClientMessage::Command {

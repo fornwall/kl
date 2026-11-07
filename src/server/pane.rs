@@ -24,6 +24,8 @@ pub struct Spawn<'a> {
     pub cwd: Option<&'a Path>,
     /// The socket path, for programs to find their way back to the server.
     pub socket: &'a str,
+    /// See [`crate::proto::ClientMessage::Attach`].
+    pub environment: &'a [String],
 }
 
 /// Things a program did in the last read, for the caller to act on.
@@ -104,6 +106,12 @@ fn build_command(spawn: &Spawn<'_>, id: PaneId) -> Command {
         .env("KL_PANE", format!("%{id}"))
         .env_remove("LINES")
         .env_remove("COLUMNS");
+    for entry in spawn.environment {
+        match entry.split_once('=') {
+            Some((name, value)) => command.env(name, value),
+            None => command.env_remove(entry),
+        };
+    }
     command
 }
 

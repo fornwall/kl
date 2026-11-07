@@ -44,6 +44,20 @@ const LEAVE_TERMINAL: &[u8] = b"\x1b[?1004l\
     \x1b[0m\x1b[0 q\x1b[?25h\
     \x1b[?1049l";
 
+/// Variables that come with the terminal a client runs in rather than with the
+/// session, as tmux's `update-environment` has them. New panes get the values of
+/// the client that attached last, so that they reach its agent and its display.
+const UPDATE_ENVIRONMENT: [&str; 8] = [
+    "DISPLAY",
+    "KRB5CCNAME",
+    "SSH_AGENT_PID",
+    "SSH_ASKPASS",
+    "SSH_AUTH_SOCK",
+    "SSH_CONNECTION",
+    "WINDOWID",
+    "XAUTHORITY",
+];
+
 /// Where the server's socket lives, in a directory only this user can enter.
 pub fn socket_path() -> io::Result<PathBuf> {
     let base = env::var_os("KL_TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
@@ -171,6 +185,11 @@ pub fn attach(socket: &Path) -> Result<String, Box<dyn Error>> {
     result
 }
 
+/// A variable in the form [`ClientMessage::Attach`] takes it.
+fn environment_entry(name: &str) -> String {
+    env::var(name).map_or_else(|_| name.to_owned(), |value| format!("{name}={value}"))
+}
+
 fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn Error>> {
     let stdin = io::stdin();
     let terminal = stdin.as_fd();
@@ -178,9 +197,12 @@ fn attached_loop(stream: &UnixStream, signals: &File) -> Result<String, Box<dyn 
     let mut stdout = io::stdout();
     let mut receiver = Receiver::default();
 
-    let size = sys::winsize(terminal)?;
-    let version = proto::VERSION;
-    send(stream, &ClientMessage::Attach { version, size })?;
+    let attach = ClientMessage::Attach {
+        version: proto::VERSION,
+        size: sys::winsize(terminal)?,
+        environment: UPDATE_ENVIRONMENT.map(environment_entry).to_vec(),
+    };
+    send(stream, &attach)?;
 
     loop {
         let mut selector = Selector::new();

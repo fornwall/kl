@@ -334,7 +334,11 @@ impl Server {
 
     fn handle_message(&mut self, id: u64, message: ClientMessage) {
         match message {
-            ClientMessage::Attach { version, size } => self.attach(id, version, size),
+            ClientMessage::Attach {
+                version,
+                size,
+                environment,
+            } => self.attach(id, version, size, environment),
             ClientMessage::Input(bytes) if self.attached == Some(id) => self.handle_input(&bytes),
             ClientMessage::Resize(size) if self.attached == Some(id) => {
                 self.session.resize(size);
@@ -355,7 +359,7 @@ impl Server {
         })
     }
 
-    fn attach(&mut self, id: u64, version: u32, size: WinSize) {
+    fn attach(&mut self, id: u64, version: u32, size: WinSize, environment: Vec<String>) {
         if let Some(error) = Self::version_error(version) {
             if let Some(connection) = self.connection_mut(id) {
                 connection.finish(&ServerMessage::Exit(error));
@@ -373,6 +377,7 @@ impl Server {
         self.prefix = false;
         self.swallowed.clear();
         self.drag = Drag::None;
+        self.session.environment = environment;
         self.session.resize(size);
         if self.lifecycle == Lifecycle::Starting {
             self.lifecycle = Lifecycle::Running;
