@@ -4,7 +4,9 @@ use std::ffi::{CString, c_int};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use super::copy_mode::{self, Action, Binding as CopyBinding, CopyMode, CopyPrompt, Outcome};
+use super::copy_mode::{
+    self, Action, Binding as CopyBinding, CopyMode, CopyPrompt, Outcome, Scroll,
+};
 use super::format::Context;
 use super::keys;
 use super::layout::{Divider, PaneId};
@@ -841,7 +843,7 @@ impl Server {
         if let Some(pane) = self.session.panes.get_mut(&id) {
             CopyMode::enter(pane, false);
             if page_up {
-                copy_mode::page_up(pane, false);
+                copy_mode::run(pane, Action::Scroll(Scroll::PageUp));
             }
         }
     }

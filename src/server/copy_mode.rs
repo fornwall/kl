@@ -2,11 +2,16 @@
 //! keyboard, with the keys of tmux's `copy-mode-vi` table and the meaning of its
 //! `send-keys -X` commands. The viewport and selection live in the terminal.
 
+use std::time::{Duration, Instant};
+
 use super::motion::{self, Jump, Lines, Motion, NO_SEPARATORS, Position, SEPARATORS};
 use super::pane::Pane;
 use crate::ghostty::key::{self, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use crate::ghostty::{Line, Match, Scrollbar, Terminal};
 use crate::input::KeyEvent;
+
+/// How long a command with a count may keep the server from everything else.
+const COUNT_TIME: Duration = Duration::from_millis(100);
 
 impl Lines for Terminal {
     fn rows(&self) -> u32 {
@@ -134,6 +139,7 @@ impl Action {
                 | Self::ClearSelection
                 | Self::RectangleToggle
                 | Self::SelectLine
+                | Self::OtherEnd
                 | Self::GotoLine(_)
                 | Self::Cancel
                 | Self::CopySelection
@@ -493,16 +499,7 @@ const fn page_rows(pane: &Pane, half: bool) -> u32 {
     }
 }
 
-/// Goes a page up, or as far as there is history and then the cursor goes on.
-pub fn page_up(pane: &mut Pane, half: bool) {
-    let Some(mut mode) = pane.copy_mode.take() else {
-        return;
-    };
-    page(pane, &mut mode, true, half);
-    update_selection(pane, &mode);
-    pane.copy_mode = Some(mode);
-}
-
+/// Goes a page up or down. Once the view is at the end, the cursor goes on.
 fn page(pane: &mut Pane, mode: &mut CopyMode, up: bool, half: bool) {
     remember_column(pane, mode);
     let rows = page_rows(pane, half);
@@ -697,7 +694,7 @@ fn line_selection_column(pane: &Pane, mode: &mut CopyMode) {
 /// Selects the text from here to the end of the line, for copying it.
 fn select_to_end_of_line(pane: &mut Pane, mode: &mut CopyMode, lines: u32) {
     begin_selection(pane, mode);
-    for _ in 1..lines {
+    for _ in 1..lines.min(pane.terminal.rows()) {
         move_row(pane, mode, false);
     }
     let at = cursor(pane, mode);
@@ -906,9 +903,10 @@ pub fn run(pane: &mut Pane, action: Action) -> Outcome {
     let repeat = std::mem::replace(&mut mode.repeat, 1);
     let mut outcome = Outcome::Stay;
     let times = if action.repeats() { repeat } else { 1 };
+    let started = Instant::now();
     for _ in 0..times {
         outcome = run_once(pane, &mut mode, action, repeat);
-        if outcome != Outcome::Stay {
+        if outcome != Outcome::Stay || started.elapsed() >= COUNT_TIME {
             break;
         }
     }

@@ -2437,6 +2437,22 @@ fn a_count_repeats_the_next_key_in_copy_mode() {
 }
 
 #[test]
+fn a_huge_count_does_not_hold_up_the_server() {
+    let mut screen = Screen::new(80, 24);
+    screen.run("seq 1 100");
+    screen.wait_for_line("100");
+    screen.prefix("[");
+    screen.wait_for_text("[0/");
+    screen.type_text("?");
+    screen.run("1");
+    screen.wait_for_text("results)");
+    screen.type_text("999999999n");
+    screen.type_text("q");
+    screen.wait_for_no_text("results)");
+    assert_eq!(output_of(&screen, &["list-buffers"]), "");
+}
+
+#[test]
 fn copy_mode_goes_to_a_line() {
     let mut screen = Screen::new(80, 24);
     screen.run("seq 1 100");
