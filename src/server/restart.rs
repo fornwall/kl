@@ -27,7 +27,7 @@ use crate::sys;
 
 /// Bumped on any change to the file written here. Failing to read it would end
 /// every program, so a binary with another version is refused beforehand.
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
 /// What a server starts from when it takes over from another one.
 pub struct Restored {
@@ -134,17 +134,18 @@ fn put_node(out: &mut Vec<u8>, node: &Node) {
         }
         Node::Split {
             kind,
-            ratio,
-            first,
-            second,
+            shares,
+            children,
         } => {
             out.push(match kind {
                 SplitKind::Horizontal => 1,
                 SplitKind::Vertical => 2,
             });
-            put_u32(out, *ratio);
-            put_node(out, first);
-            put_node(out, second);
+            put_u32(out, u32::try_from(children.len()).unwrap_or(0));
+            for (share, child) in shares.iter().zip(children) {
+                put_u32(out, *share);
+                put_node(out, child);
+            }
         }
     }
 }
@@ -156,11 +157,20 @@ fn take_node(reader: &mut Reader<'_>) -> Result<Node, Malformed> {
         [2] => SplitKind::Vertical,
         _ => return Err(Malformed),
     };
+    let count = reader.take_u32()?;
+    if count < 2 {
+        return Err(Malformed);
+    }
+    let mut shares = Vec::new();
+    let mut children = Vec::new();
+    for _ in 0..count {
+        shares.push(reader.take_u32()?);
+        children.push(take_node(reader)?);
+    }
     Ok(Node::Split {
         kind,
-        ratio: reader.take_u32()?,
-        first: Box::new(take_node(reader)?),
-        second: Box::new(take_node(reader)?),
+        shares,
+        children,
     })
 }
 
@@ -342,13 +352,21 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    use super::super::layout::Rect;
     use super::*;
+
+    const AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    };
 
     #[test]
     fn layouts_survive_a_round_trip() {
         let mut node = Node::Leaf(1);
-        node.split(1, 2, SplitKind::Horizontal);
-        node.split(2, 3, SplitKind::Vertical);
+        node.split(1, 2, SplitKind::Horizontal, AREA);
+        node.split(2, 3, SplitKind::Vertical, AREA);
         let mut bytes = Vec::new();
         put_node(&mut bytes, &node);
         assert_eq!(take_node(&mut Reader::new(&bytes)), Ok(node));
@@ -357,7 +375,7 @@ mod tests {
     #[test]
     fn a_truncated_layout_is_an_error() {
         let mut node = Node::Leaf(1);
-        node.split(1, 2, SplitKind::Horizontal);
+        node.split(1, 2, SplitKind::Horizontal, AREA);
         let mut bytes = Vec::new();
         put_node(&mut bytes, &node);
         bytes.pop();

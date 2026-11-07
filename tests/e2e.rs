@@ -485,7 +485,7 @@ fn splits_side_by_side_and_keeps_typing_in_the_new_pane() {
     let lines = screen.wait_for("a border", |lines| lines[5].contains('│'));
     assert_eq!(
         lines[5].chars().position(|c| c == '│'),
-        Some(39),
+        Some(40),
         "{lines:?}"
     );
 
@@ -495,7 +495,7 @@ fn splits_side_by_side_and_keeps_typing_in_the_new_pane() {
         .iter()
         .find(|line| line.contains("echo second"))
         .unwrap();
-    assert!(row.find("echo second").unwrap() > 39, "{row}");
+    assert!(row.find("echo second").unwrap() > 40, "{row}");
 
     let panes = screen.command(&["list-panes"]);
     let panes = String::from_utf8_lossy(&panes.stdout);
@@ -1283,10 +1283,10 @@ fn follows_the_outer_terminal_size() {
     screen.wait_for("a border", |lines| lines[5].contains('│'));
     screen.resize(120, 40);
     screen.wait_for("the border to move", |lines| {
-        lines[5].chars().nth(59) == Some('│')
+        lines[5].chars().nth(60) == Some('│')
     });
     screen.run("stty size");
-    screen.wait_for_text("39 60");
+    screen.wait_for_text("39 59");
     let status = screen.lines();
     assert!(status[39].starts_with("[kl]"), "{status:?}");
 }
@@ -1613,7 +1613,7 @@ fn the_pointer_shape_goes_with_the_pane_under_it() {
     screen.mouse(35, 10, 5, true);
     screen.wait_for_pointer_shape("pointer");
     // Neither a border nor the status line is part of a pane.
-    screen.mouse(35, 39, 5, true);
+    screen.mouse(35, 40, 5, true);
     screen.wait_for_pointer_shape("text");
     screen.mouse(35, 10, 5, true);
     screen.wait_for_pointer_shape("pointer");
@@ -2002,7 +2002,7 @@ fn dragging_a_border_resizes_panes() {
     let mut screen = Screen::new(80, 24);
     screen.prefix("%");
     screen.wait_for("a border", |lines| lines[5].contains('│'));
-    screen.mouse(0, 39, 5, true);
+    screen.mouse(0, 40, 5, true);
     screen.mouse(32, 30, 5, true);
     screen.mouse(32, 20, 5, true);
     screen.mouse(0, 20, 5, false);
@@ -2052,9 +2052,9 @@ fn programs_that_track_the_mouse_get_its_events() {
     screen.prefix("%");
     screen.wait_for("the new pane's prompt", |lines| lines[0].ends_with("│$"));
     screen.run_setup_then_cat(r"printf '\033[?1000h\033[?1006h'");
-    // Inside the right pane, which starts at column 40.
-    screen.mouse(0, 42, 3, true);
-    screen.mouse(0, 42, 3, false);
+    // Inside the right pane, which starts at column 41.
+    screen.mouse(0, 43, 3, true);
+    screen.mouse(0, 43, 3, false);
     screen.enter();
     screen.wait_for_text("^[[<0;3;4M");
 }

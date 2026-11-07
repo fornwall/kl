@@ -294,7 +294,7 @@ impl Session {
         let id = self.spawn_pane(program, rect)?;
         if let Some(window) = self.window_mut() {
             window.zoomed = false;
-            window.root.split(target, id, kind);
+            window.root.split(target, id, kind, area);
         }
         self.select_pane(id);
         self.relayout();
