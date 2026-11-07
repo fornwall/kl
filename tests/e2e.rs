@@ -585,6 +585,13 @@ fn print_link(uri: &str, text: &str) -> String {
     format!(r"printf '\033]8;;{uri}\033\\{text}\033]8;;\033\\'")
 }
 
+/// How far copy mode is from the bottom of history, by the `[offset/history]` it
+/// shows on this line. For a view that is still moving, wait for a range: the
+/// exact offset may come and go between two looks at the screen.
+fn copy_offset(line: &str) -> Option<u32> {
+    line.rsplit_once('[')?.1.split_once('/')?.0.parse().ok()
+}
+
 fn ghostty_key(c: char) -> i32 {
     ghostty::key::from_codepoint(u32::from(c))
 }
@@ -3556,7 +3563,9 @@ fn dragging_past_the_top_of_a_pane_scrolls_and_selects() {
     let y = screen.wait_for_line("100");
     screen.mouse(0, 2, y, true);
     screen.mouse(32, 0, 0, true);
-    screen.wait_for("the view to scroll", |lines| lines[0].contains("[5/"));
+    screen.wait_for("the view to scroll", |lines| {
+        copy_offset(&lines[0]).is_some_and(|offset| offset >= 5)
+    });
     screen.mouse(0, 0, 0, false);
     let copied = screen.wait_for_clipboard();
     let text = String::from_utf8_lossy(&copied[0]);
@@ -3581,7 +3590,9 @@ fn dragging_past_the_bottom_of_a_pane_scrolls_back_down() {
     screen.mouse(0, 0, 10, true);
     // The status line is below the pane.
     screen.mouse(32, 0, 23, true);
-    screen.wait_for("the view to scroll", |lines| lines[0].contains("[37/"));
+    screen.wait_for("the view to scroll", |lines| {
+        copy_offset(&lines[0]).is_some_and(|offset| offset <= 37)
+    });
     screen.mouse(0, 0, 23, false);
     let copied = screen.wait_for_clipboard();
     let text = String::from_utf8_lossy(&copied[0]);
