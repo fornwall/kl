@@ -83,10 +83,14 @@ framebuffer held:
   has colors one step off from resampling. After switching windows, a list on top
   of it and detaching and attaching, an image looks as it did before. Replies to
   programs match, but for refusing files. A raw image of 48 MB and a PNG of 6000 by
-  4000 pixels show after 0.7 and 2.3 seconds, against 1.7 and 1.6 directly. Next to
-  them, a pane updating ten times a second missed 0.13 and 0.31 seconds at most, and
-  commands were answered within 0.1 seconds. Leaving a window, detaching or closing
-  the pane while such an image is on its way breaks nothing.
+  4000 pixels show after about 1 and 2.3 seconds, against 1.7 and 1.6 directly. Next
+  to them, a pane updating ten times a second missed 0.13 and 0.31 seconds at most,
+  and commands were answered within 0.1 seconds. Leaving a window, detaching or
+  closing the pane while such an image is on its way breaks nothing. With two
+  windows on the session, both show images the same as one does, also after
+  switching windows and after one detaches. One that stops reading holds nothing up
+  for the other, and gets the image once it goes on. A window of another size and
+  one with other cells were only looked at.
 - **Pointer shapes.** Read through XFixes, 9 shapes by name, an unknown name, the
   default and a program taking the mouse and letting go of it give the cursor they
   give directly, and the shape goes with the pane under the pointer. An animated
@@ -107,9 +111,8 @@ framebuffer held:
   output, focus reports, key repeat and copy mode from the keyboard.
 
 Not covered: Wayland, the macOS app, a GPU, a real input method such as ibus,
-images with several clients attached or across `restart-server`, and what is hard
-to see from outside, such as notifications, the bell and following a live color
-scheme change.
+`restart-server` and what is hard to see from outside, such as notifications, the
+bell and following a live color scheme change.
 
 The input parser, the protocol decoders, the command language and the way from
 parsed events and program output through libghostty-vt have been fuzzed on Linux
