@@ -6,6 +6,7 @@
 
 mod ffi;
 pub mod key;
+mod links;
 
 use std::collections::BTreeMap;
 use std::ffi::{c_int, c_void};
@@ -13,7 +14,10 @@ use std::ptr;
 use std::slice;
 use std::time::{Duration, Instant};
 
+use links::Links;
+
 pub use ffi::{Rgb, Scrollbar, Style, StyleColor};
+pub use links::Link;
 
 /// How long a program may freeze its pane with synchronized output.
 const RENDER_HOLD_LIMIT: Duration = Duration::from_secs(1);
@@ -175,6 +179,7 @@ pub struct Cell {
     pub style: Style,
     pub width: Width,
     pub selected: bool,
+    pub link: Option<Link>,
 }
 
 /// One row of text, for moving around in it rather than for drawing it.
@@ -404,10 +409,79 @@ pub struct Effects {
     pub progress_reported: bool,
     progress: Option<Progress>,
     render_state: ffi::Handle,
+    rows: ffi::Handle,
+    links: Links,
+    /// Reused between cells to avoid allocating for each one.
+    uri: Vec<u8>,
     hold_started: Option<Instant>,
     size: (u16, u16, u32, u32),
     /// A `GhosttyColorScheme` value.
     color_scheme: c_int,
+}
+
+impl Effects {
+    /// Brings the render state up to date with the terminal, and copies what it
+    /// leaves out. Only a grid reference has that, which reads the live terminal,
+    /// so the time is now, while the two agree. During a hold they will not.
+    ///
+    /// This runs in the middle of a write when a hold starts, as the library's
+    /// rendering guide calls for. Sequences are dispatched one at a time, so none
+    /// of the terminal is half done then, and a grid reference touches nothing
+    /// that the update did not just read.
+    fn update_render_state(&mut self, terminal: ffi::Handle) -> Result<(), Error> {
+        // SAFETY: Both handles are live. The render state is not the terminal,
+        // so this does not re-enter a write that called us.
+        check(unsafe { ffi::ghostty_render_state_update(self.render_state, terminal) })?;
+        self.copy_links(terminal);
+        Ok(())
+    }
+
+    /// Reads the links of the rows that changed. Only rows and cells with the
+    /// library's hyperlink flag get as far as a grid reference.
+    fn copy_links(&mut self, terminal: ffi::Handle) {
+        let mut rows = self.rows;
+        let out = (&raw mut rows).cast();
+        let state = self.render_state;
+        // SAFETY: The render state and iterator are live. The call points the
+        // iterator at this state's rows, and `out` is valid for a handle.
+        let result =
+            unsafe { ffi::ghostty_render_state_get(state, ffi::RENDER_DATA_ROW_ITERATOR, out) };
+        if result != ffi::SUCCESS {
+            return;
+        }
+        let all = fully_dirty(state);
+        let mut y = 0;
+        // SAFETY: The iterator was populated above and the state is unchanged.
+        while unsafe { ffi::ghostty_render_state_row_iterator_next(rows) } {
+            if all || row_dirty(rows) {
+                self.links.clear_row(usize::from(y));
+                if row_has_links(rows) {
+                    self.copy_row_links(terminal, y);
+                }
+            }
+            y = y.saturating_add(1);
+        }
+        self.links.forget_unused();
+    }
+
+    fn copy_row_links(&mut self, terminal: ffi::Handle, y: u16) {
+        for (x, cell) in (0..).zip(raw_cells(self.rows)) {
+            if cell_value::<bool>(*cell, ffi::CELL_DATA_HAS_HYPERLINK)
+                && let Some(grid_ref) = grid_ref(terminal, ffi::POINT_VIEWPORT, x, u32::from(y))
+            {
+                fill_buffer(&mut self.uri, |buf, len, written| {
+                    // SAFETY: The reference was made just now, `buf` is valid
+                    // for `len` bytes, and `written` for a write.
+                    unsafe {
+                        ffi::ghostty_grid_ref_hyperlink_uri(&raw const grid_ref, buf, len, written)
+                    }
+                });
+                if !self.uri.is_empty() {
+                    self.links.add(x, usize::from(y), &self.uri);
+                }
+            }
+        }
+    }
 }
 
 /// # Safety
@@ -593,10 +667,8 @@ unsafe extern "C" fn on_render_hold(terminal: ffi::Handle, userdata: *mut c_void
     // SAFETY: Called by libghostty-vt with the registered userdata.
     let effects = unsafe { effects_of(userdata) };
     if held {
-        // SAFETY: Both handles are live. The render state is not the terminal,
-        // so this does not re-enter the write that called us.
-        let result = unsafe { ffi::ghostty_render_state_update(effects.render_state, terminal) };
-        effects.hold_started = (result == ffi::SUCCESS).then(Instant::now);
+        let updated = effects.update_render_state(terminal);
+        effects.hold_started = updated.is_ok().then(Instant::now);
     } else {
         effects.hold_started = None;
     }
@@ -756,6 +828,9 @@ impl Terminal {
             progress_reported: false,
             progress: None,
             render_state: handles.render_state,
+            rows: handles.rows,
+            links: Links::default(),
+            uri: Vec::new(),
             hold_started: None,
             size: (cols, rows, 1, 1),
             color_scheme: ffi::COLOR_SCHEME_DARK,
@@ -1045,11 +1120,8 @@ impl Terminal {
             self.effects().hold_started = None;
         }
         if self.effects().hold_started.is_none() {
-            let (state, terminal) = (self.handles.render_state, self.handles.terminal);
-            // SAFETY: Both handles are live.
-            best_effort(check(unsafe {
-                ffi::ghostty_render_state_update(state, terminal)
-            }));
+            let terminal = self.handles.terminal;
+            best_effort(self.effects().update_render_state(terminal));
         }
     }
 
@@ -1058,16 +1130,6 @@ impl Terminal {
         // SAFETY: Owned by `self`, and callbacks cannot run during this read.
         let started = unsafe { (*self.effects).hold_started };
         started.map(|started| started + RENDER_HOLD_LIMIT)
-    }
-
-    /// Whether every row needs drawing, whatever each row says about itself.
-    fn fully_dirty(&self) -> bool {
-        let mut dirty = ffi::RENDER_DIRTY_FULL;
-        let out = (&raw mut dirty).cast();
-        let state = self.handles.render_state;
-        // SAFETY: The render state is live, and `out` is valid for an enum.
-        let result = unsafe { ffi::ghostty_render_state_get(state, ffi::RENDER_DATA_DIRTY, out) };
-        result != ffi::SUCCESS || dirty == ffi::RENDER_DIRTY_FULL
     }
 
     /// What differs between the colors as of the last [`Terminal::refresh`] and
@@ -1164,14 +1226,14 @@ impl Terminal {
         }
         // Rows do not always hear of it: see UPSTREAM.md on reverse video.
         let own_colors = self.read_own_colors();
-        let all = all || self.fully_dirty() || own_colors != self.own_colors;
+        let all = all || fully_dirty(state) || own_colors != self.own_colors;
         self.own_colors = own_colors;
         let mut y = 0;
         // SAFETY: The iterator was populated above and the state is unchanged.
         while unsafe { ffi::ghostty_render_state_row_iterator_next(rows) } {
-            if all || self.row_dirty() {
+            if all || row_dirty(rows) {
                 let mut row = std::mem::take(&mut self.row);
-                self.read_row(&mut row);
+                self.read_row(y, &mut row);
                 draw(y, &row);
                 self.row = row;
             }
@@ -1179,15 +1241,6 @@ impl Terminal {
         }
         // SAFETY: The render state is live.
         best_effort(check(unsafe { ffi::ghostty_render_state_clean(state) }));
-    }
-
-    fn row_dirty(&self) -> bool {
-        let mut dirty = true;
-        let out = (&raw mut dirty).cast();
-        let rows = self.handles.rows;
-        // SAFETY: The iterator points at a row, and `out` is valid for a bool.
-        let result = unsafe { ffi::ghostty_render_state_row_get(rows, ffi::ROW_DATA_DIRTY, out) };
-        result != ffi::SUCCESS || dirty
     }
 
     fn row_selection(&self) -> Option<(u16, u16)> {
@@ -1204,7 +1257,7 @@ impl Terminal {
         (result == ffi::SUCCESS).then_some((selection.start_x, selection.end_x))
     }
 
-    fn read_row(&self, row: &mut Vec<Cell>) {
+    fn read_row(&self, y: u16, row: &mut Vec<Cell>) {
         row.clear();
         let mut cells = self.handles.cells;
         let out = (&raw mut cells).cast();
@@ -1224,6 +1277,19 @@ impl Terminal {
             row.push(cell);
             x = x.saturating_add(1);
         }
+        self.links().apply(usize::from(y), row);
+    }
+
+    const fn links(&self) -> &Links {
+        // SAFETY: Owned by `self`, and callbacks cannot run during this borrow,
+        // since they only run during `write`, which takes `&mut self`.
+        unsafe { &(*self.effects).links }
+    }
+
+    /// The URI of a link in a cell of this terminal, for as long as the cell is
+    /// in the viewport.
+    pub fn link_uri(&self, link: Link) -> Option<&[u8]> {
+        self.links().uri(link)
     }
 
     /// Bytes for the program in this terminal, in the encoding its modes ask
@@ -1322,18 +1388,7 @@ impl Terminal {
     }
 
     fn grid_ref(&self, tag: c_int, x: u16, y: u32) -> Option<ffi::GridRef> {
-        let point = ffi::Point {
-            tag,
-            value: ffi::PointValue {
-                coordinate: ffi::PointCoordinate { x, y },
-                padding: 0,
-            },
-        };
-        let mut grid_ref = NO_REF;
-        let terminal = self.handles.terminal;
-        // SAFETY: The terminal is live, and the out pointer is valid.
-        let result = unsafe { ffi::ghostty_terminal_grid_ref(terminal, point, &raw mut grid_ref) };
-        (result == ffi::SUCCESS).then_some(grid_ref)
+        grid_ref(self.handles.terminal, tag, x, y)
     }
 
     fn set_selection(&mut self, selection: &ffi::Selection) {
@@ -1640,6 +1695,20 @@ const NO_REF: ffi::GridRef = ffi::GridRef {
     y: 0,
 };
 
+fn grid_ref(terminal: ffi::Handle, tag: c_int, x: u16, y: u32) -> Option<ffi::GridRef> {
+    let point = ffi::Point {
+        tag,
+        value: ffi::PointValue {
+            coordinate: ffi::PointCoordinate { x, y },
+            padding: 0,
+        },
+    };
+    let mut grid_ref = NO_REF;
+    // SAFETY: The terminal is live, and the out pointer is valid.
+    let result = unsafe { ffi::ghostty_terminal_grid_ref(terminal, point, &raw mut grid_ref) };
+    (result == ffi::SUCCESS).then_some(grid_ref)
+}
+
 const fn selection_at(grid_ref: ffi::GridRef) -> ffi::Selection {
     ffi::Selection {
         start: grid_ref,
@@ -1779,6 +1848,54 @@ fn read_row_flags(grid_ref: &ffi::GridRef, line: &mut Line) {
     line.prompt = prompt == ffi::ROW_SEMANTIC_PROMPT;
 }
 
+/// Whether every row needs drawing, whatever each row says about itself.
+fn fully_dirty(state: ffi::Handle) -> bool {
+    let mut dirty = ffi::RENDER_DIRTY_FULL;
+    let out = (&raw mut dirty).cast();
+    // SAFETY: The render state is live, and `out` is valid for an enum.
+    let result = unsafe { ffi::ghostty_render_state_get(state, ffi::RENDER_DATA_DIRTY, out) };
+    result != ffi::SUCCESS || dirty == ffi::RENDER_DIRTY_FULL
+}
+
+fn row_dirty(rows: ffi::Handle) -> bool {
+    let mut dirty = true;
+    let out = (&raw mut dirty).cast();
+    // SAFETY: The iterator points at a row, and `out` is valid for a bool.
+    let result = unsafe { ffi::ghostty_render_state_row_get(rows, ffi::ROW_DATA_DIRTY, out) };
+    result != ffi::SUCCESS || dirty
+}
+
+/// Whether a row may have links in it, which sometimes turns out not to be so.
+fn row_has_links(rows: ffi::Handle) -> bool {
+    let mut row: u64 = 0;
+    let out = (&raw mut row).cast();
+    // SAFETY: The iterator points at a row, and `out` is valid for its raw value.
+    let result = unsafe { ffi::ghostty_render_state_row_get(rows, ffi::ROW_DATA_RAW, out) };
+    let mut linked = false;
+    let out = (&raw mut linked).cast();
+    // SAFETY: `out` is valid for a bool.
+    result == ffi::SUCCESS
+        && unsafe { ffi::ghostty_row_get(row, ffi::SCREEN_ROW_DATA_HYPERLINK, out) } == ffi::SUCCESS
+        && linked
+}
+
+/// The cells of the row the iterator is at, as raw values. Valid until the next
+/// update of the render state.
+fn raw_cells<'a>(rows: ffi::Handle) -> &'a [u64] {
+    let mut view = ffi::CellsView {
+        ptr: ptr::null(),
+        len: 0,
+    };
+    let out = (&raw mut view).cast();
+    // SAFETY: The iterator points at a row, and `out` is valid for a view.
+    let result = unsafe { ffi::ghostty_render_state_row_get(rows, ffi::ROW_DATA_CELLS_RAW, out) };
+    if result != ffi::SUCCESS || view.ptr.is_null() {
+        return &[];
+    }
+    // SAFETY: The library guarantees `len` values at `ptr`.
+    unsafe { slice::from_raw_parts(view.ptr, view.len) }
+}
+
 fn read_cell(cells: ffi::Handle) -> Cell {
     let mut raw: u64 = 0;
     let out = (&raw mut raw).cast();
@@ -1799,6 +1916,7 @@ fn read_cell(cells: ffi::Handle) -> Cell {
             _ => Width::Narrow,
         },
         selected: false,
+        link: None,
     }
 }
 
@@ -1880,19 +1998,23 @@ fn read_text(cells: ffi::Handle) -> Text {
 }
 
 /// Runs an encoder that writes into a caller buffer, growing it if it asks.
-fn encode_into(mut encode: impl FnMut(*mut u8, usize, *mut usize) -> c_int) -> Vec<u8> {
-    let mut buf = vec![0; 128];
+fn encode_into(encode: impl FnMut(*mut u8, usize, *mut usize) -> c_int) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(128);
+    fill_buffer(&mut buf, encode);
+    buf
+}
+
+/// As [`encode_into`], with a buffer that may have room left from earlier. It
+/// ends up empty if the encoder fails.
+fn fill_buffer(buf: &mut Vec<u8>, mut encode: impl FnMut(*mut u8, usize, *mut usize) -> c_int) {
+    buf.resize(buf.capacity(), 0);
     let mut written = 0;
     let mut result = encode(buf.as_mut_ptr(), buf.len(), &raw mut written);
     if result == ffi::OUT_OF_SPACE {
         buf.resize(written, 0);
         result = encode(buf.as_mut_ptr(), buf.len(), &raw mut written);
     }
-    if result != ffi::SUCCESS {
-        return Vec::new();
-    }
-    buf.truncate(written);
-    buf
+    buf.truncate(if result == ffi::SUCCESS { written } else { 0 });
 }
 
 impl StyleColor {
@@ -2078,6 +2200,7 @@ mod tests {
             "unit_id" => unit_id);
         assert_layout!(m, "GhosttyDeviceAttributes", ffi::DeviceAttributes,
             "primary" => primary, "secondary" => secondary, "tertiary" => tertiary);
+        assert_layout!(m, "GhosttyCellsView", ffi::CellsView, "ptr" => ptr, "len" => len);
         assert_layout!(m, "GhosttyRenderStateRowSelection", ffi::RowSelection,
             "size" => size, "start_x" => start_x, "end_x" => end_x);
         assert_layout!(m, "GhosttyRenderStateCursor", ffi::RenderCursor,
@@ -2155,6 +2278,185 @@ mod tests {
         let mut row = Vec::new();
         terminal.draw_rows(true, |_, cells| row = cells.to_vec());
         assert_eq!(row[3].style.bg.as_rgb(), Some([1, 2, 3]));
+    }
+
+    /// What is drawn for each linked cell, as its text and URI.
+    fn links(terminal: &mut Terminal) -> Vec<(String, String)> {
+        terminal.refresh();
+        let mut cells = Vec::new();
+        terminal.draw_rows(true, |_, row| cells.extend_from_slice(row));
+        let linked = cells.iter().filter_map(|cell| {
+            let uri = terminal.link_uri(cell.link?).unwrap();
+            let uri = String::from_utf8_lossy(uri).into_owned();
+            Some((cell.text.as_str().to_owned(), uri))
+        });
+        linked.collect()
+    }
+
+    fn link(uri: &str, text: &str) -> String {
+        format!("\x1b]8;;{uri}\x1b\\{text}\x1b]8;;\x1b\\")
+    }
+
+    #[test]
+    fn a_cell_is_no_bigger_for_having_a_link() {
+        assert_eq!(size_of::<Cell>(), 48);
+    }
+
+    #[test]
+    fn reads_the_uri_of_each_cell() {
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        terminal.write(link("https://a", "a").as_bytes());
+        terminal.write(b"-");
+        terminal.write(link("https://b", "b").as_bytes());
+        assert_eq!(
+            links(&mut terminal),
+            [
+                ("a".to_owned(), "https://a".to_owned()),
+                ("b".to_owned(), "https://b".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_uris_of_any_length() {
+        let uri = format!("https://{}", "x".repeat(1500));
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        terminal.write(link(&uri, "a").as_bytes());
+        assert_eq!(links(&mut terminal), [("a".to_owned(), uri)]);
+    }
+
+    #[test]
+    fn a_uri_is_one_link_wherever_it_shows_up() {
+        let mut terminal = Terminal::new(10, 3).unwrap();
+        let text = link("https://a", "ab");
+        terminal.write(format!("{text}\r\n-{text}\x1b[3;1H").as_bytes());
+        terminal.write(link("https://b", "c").as_bytes());
+        terminal.refresh();
+        let mut cells = Vec::new();
+        terminal.draw_rows(true, |_, row| cells.extend_from_slice(row));
+        let numbers: Vec<_> = cells.iter().filter_map(|cell| cell.link).collect();
+        assert_eq!(numbers.len(), 5);
+        assert!(numbers[..4].iter().all(|link| *link == numbers[0]));
+        assert_ne!(numbers[4], numbers[0]);
+    }
+
+    #[test]
+    fn the_same_uri_is_a_different_link_in_another_terminal() {
+        let read = || {
+            let mut terminal = Terminal::new(10, 1).unwrap();
+            terminal.write(link("https://a", "a").as_bytes());
+            terminal.refresh();
+            let mut found = None;
+            terminal.draw_rows(true, |_, row| found = row[0].link);
+            found.unwrap()
+        };
+        assert_ne!(read(), read());
+    }
+
+    #[test]
+    fn a_link_goes_when_its_text_is_overwritten() {
+        let mut terminal = Terminal::new(10, 1).unwrap();
+        terminal.write(link("https://a", "a").as_bytes());
+        assert_eq!(links(&mut terminal).len(), 1);
+        terminal.write(b"\rb");
+        assert_eq!(links(&mut terminal), []);
+    }
+
+    #[test]
+    fn links_are_forgotten_once_they_are_gone_from_the_viewport() {
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        for number in 0..10_000 {
+            terminal.write(link(&format!("https://{number}"), "a\r").as_bytes());
+            terminal.refresh();
+        }
+        assert!(
+            terminal.links().known() < 1000,
+            "{}",
+            terminal.links().known()
+        );
+    }
+
+    /// The start of a hold arrives in the same write as what it hides, so this
+    /// reads links in the middle of the write.
+    #[test]
+    fn a_hold_keeps_old_text_with_its_old_link() {
+        let mut terminal = Terminal::new(10, 1).unwrap();
+        let old = link("https://old", "o");
+        let new = link("https://new", "n");
+        terminal.write(format!("{old}\x1b[?2026h\r{new}").as_bytes());
+        let held = [("o".to_owned(), "https://old".to_owned())];
+        assert_eq!(links(&mut terminal), held);
+        assert_eq!(links(&mut terminal), held, "drawing it again");
+        terminal.write(b"\x1b[?2026l");
+        assert_eq!(
+            links(&mut terminal),
+            [("n".to_owned(), "https://new".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_hold_starting_from_scrolled_back_history_keeps_its_links() {
+        let mut terminal = Terminal::new(10, 2).unwrap();
+        terminal.write(link("https://old", "o").as_bytes());
+        terminal.write(&b"\r\nline".repeat(100));
+        terminal.scroll_to_top();
+        terminal.write(b"\x1b[?2026h\r\nmore");
+        let held = [("o".to_owned(), "https://old".to_owned())];
+        assert_eq!(links(&mut terminal), held);
+    }
+
+    #[test]
+    fn a_hold_can_start_over_compressed_scrollback() {
+        let mut terminal = Terminal::new(40, 2).unwrap();
+        terminal.write(link("https://old", "o").as_bytes());
+        for line in 0..20_000 {
+            terminal.write(format!("\r\nline {line}").as_bytes());
+        }
+        terminal.compress_idle_scrollback();
+        while !terminal.compression.finished {
+            terminal.compress_idle_scrollback();
+        }
+        terminal.scroll_to_top();
+        terminal.write(b"\x1b[?2026h\r\nmore");
+        let held = [("o".to_owned(), "https://old".to_owned())];
+        assert_eq!(links(&mut terminal), held);
+    }
+
+    /// Whatever a program does, a cell's text and link come from the same moment.
+    /// Each letter is only ever written with its own URI. With a debug build of
+    /// the library, this also runs the integrity checks of the terminal around
+    /// reading links during writes.
+    #[test]
+    fn text_and_links_stay_paired_through_holds() {
+        let mut terminal = Terminal::new(12, 4).unwrap();
+        let mut seed: u32 = 1;
+        let mut random = |bound: u32| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) % bound
+        };
+        for round in 0..20_000 {
+            let letter = char::from(b'a' + u8::try_from(random(26)).unwrap());
+            let (x, y) = (random(12) + 1, random(4) + 1);
+            let text = link(&format!("https://{letter}"), &letter.to_string().repeat(3));
+            let mut bytes = format!("\x1b[{y};{x}H{text}").into_bytes();
+            match random(9) {
+                0 => bytes.extend_from_slice(b"\x1b[?2026h"),
+                1 => bytes.extend_from_slice(b"\x1b[?2026l"),
+                2 => bytes = [b"\x1b[?2026h", &bytes[..]].concat(),
+                3 => bytes.extend_from_slice(b"\x1b[4;1H\r\n"),
+                4 => bytes.extend_from_slice(b"\x1b[?1049h"),
+                5 => bytes.extend_from_slice(b"\x1b[?1049l"),
+                6 => terminal.resize(12, 4 + (round % 2), 1, 1).unwrap(),
+                7 => terminal.scroll_by(-1),
+                _ => terminal.scroll_to_bottom(),
+            }
+            terminal.write(&bytes);
+            if random(3) == 0 {
+                for (text, uri) in links(&mut terminal) {
+                    assert_eq!(uri, format!("https://{text}"), "in round {round}");
+                }
+            }
+        }
     }
 
     #[test]

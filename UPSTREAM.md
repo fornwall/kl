@@ -40,10 +40,62 @@ from `VT_FEATURES` in `build.rs`.
 
 ### Hyperlinks in the render state
 
-The render state has no hyperlink data, so passing OSC 8 through would take a
-grid reference lookup for each linked cell, which the documentation of
-`grid-introspection` warns against using in render loops. A hyperlink getter on
-the render state's cells would fit a renderer better. Not implemented in kl yet.
+The render state knows which cells are linked, since
+`GHOSTTY_CELL_DATA_HAS_HYPERLINK` reads the flag from its raw cells, but not what
+they link to. Only a grid reference has that, and for anything that has to send
+the link along with each linked cell it paints, that falls short:
+
+- **The right link for the cell being painted.** A grid reference reads the live
+  terminal, not the snapshot, and the render state stays behind on purpose during
+  a render hold. Read while drawing, it pairs old text with a new URI: without
+  the workaround below, kl repainted `aaa` from before a hold with
+  `https://new.example` from after its start. `linkCells` documents the same
+  catch. Threaded embedders also need terminal access to draw links, which the
+  render state is there to avoid.
+- **No `id`.** `ghostty_grid_ref_hyperlink_uri` returns only the URI, but links
+  match on `id` plus URI (`src/terminal/hyperlink.zig`). Opening a link without
+  an `id` gets a fresh implicit one, so if a partial repaint did that, the link
+  would be split into pieces that highlight separately. The only way to get at an
+  `id` from C is the text of the VT formatter, and only if it is explicit.
+
+Speed is not the case to make, whatever `ghostty_terminal_grid_ref`, the
+documentation of `grid-introspection` and the grid guide say about render loops:
+"use grid references" would be a fair reply. Timed in C against kl's build of the
+library, with the median of 301 frames reading every row, the lookups for every
+linked cell add about 150 µs to the 125 µs it takes to read a 200×50 render state
+with 9,000 linked cells, and 870 µs to 480 µs at 400×100 with all 40,000 linked.
+That is 1% and 5% of a 60 Hz frame, and kl normally reads only dirty rows.
+
+Today: kl copies URIs with grid references right after each render state update,
+while the two still agree, and that includes the update where a hold starts,
+which runs in the middle of a write. Only rows and cells with the hyperlink flag
+pay for this. Cells refer to a number for each URI and pane, sent as `id=kl<hex>`
+the way tmux's `hyperlinks.c` sends `tmux%llX`, so two links in a pane with the
+same URI and different ids are one link to kl. When the render state has links:
+delete `src/ghostty/links.rs` and `Effects::copy_links` in `src/ghostty/mod.rs`.
+
+A shape that should work:
+
+- A list of link runs per row, in the row arena like `Row.placeholders`, since a
+  new field on `Cell` would grow every cell.
+- Built only for rows with the hyperlink flag, with one URI copy per run,
+  exposing the URI and the `id`. Not the internal `hyperlink.Id`, which only means
+  something within one page.
+- URI bytes live in page memory, so the copy has to happen in `beginUpdate` with
+  the lock held. That path is heavily tuned and the Ghostty app would not read
+  the result, so it could be opt-in like `overscan_request`. Comments in
+  `render.zig` already count hyperlinks among the managed memory it copies.
+
+This is mostly about multiplexers, and the reason is who handles the pointer. A
+GUI sees the hover itself, so it needs one cell's URI at that moment, which is
+what a grid reference is good for. A multiplexer never sees it, as the outer
+terminal does, so it has to send the URI with every linked cell. A terminal
+widget inside a TUI is in the same position. GUI embedders have a smaller gap:
+`linkCells` is Zig only, so from C they cannot reproduce whole-link highlighting
+on hover, which link runs would fix as well.
+
+Next step: a discussion in Feature Requests rather than a pull request, with kl
+as a working example. Nothing has been posted yet.
 
 ### Reverse video does not mark anything dirty
 

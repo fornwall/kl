@@ -21,9 +21,9 @@ The first iteration has the core of tmux, with no configuration:
 - Full-fidelity input: the kitty keyboard protocol towards the outer terminal,
   and libghostty-vt's encoders towards panes. Programs get the encoding they
   asked for, as if no multiplexer was in between.
-- Clipboard writes, bells, titles, desktop notifications and progress reports
-  reach the outer terminal, as does the pointer shape of the pane under the
-  pointer. Its colors and color scheme reach programs that ask for them, also
+- Clipboard writes, bells, titles, hyperlinks, desktop notifications and progress
+  reports reach the outer terminal, as does the pointer shape of the pane under
+  the pointer. Its colors and color scheme reach programs that ask for them, also
   when they change. Colors a program changes for itself, with OSC 4, 10 and 11 or
   reverse video, stay in its pane.
 
@@ -81,8 +81,6 @@ What is missing for daily use compared with tmux.
 
 Things panes can ask for that stop at kl today.
 
-- OSC 8 hyperlinks. Cells keep them, but the render state does not expose them,
-  so see [UPSTREAM.md](UPSTREAM.md).
 - Kitty graphics, which is a project of its own: placements have to be clipped to
   panes and follow scrolling. libghostty-vt's `kitty_graphics` feature tracks
   images and placements.

@@ -5,7 +5,7 @@ use super::layout::{Divider, Rect};
 use super::session::{Session, Window};
 use super::ui::{List, Ui};
 use crate::ghostty::{
-    self, Cell, CursorShape, DEFAULT_POINTER_SHAPE, Match, Progress, STYLE_BLINK, STYLE_BOLD,
+    self, Cell, CursorShape, DEFAULT_POINTER_SHAPE, Link, Match, Progress, STYLE_BLINK, STYLE_BOLD,
     STYLE_FAINT, STYLE_INVERSE, STYLE_INVISIBLE, STYLE_ITALIC, STYLE_OVERLINE, STYLE_STRIKETHROUGH,
     STYLE_UNDERLINE_MASK, STYLE_UNDERLINE_SHIFT, Style, StyleColor, Text, Width,
 };
@@ -156,7 +156,7 @@ impl Grid {
                     } else {
                         Width::Narrow
                     },
-                    selected: false,
+                    ..Cell::default()
                 },
             );
             if width == 2 {
@@ -262,11 +262,12 @@ impl Renderer {
 
         let mut out = Vec::new();
         if self.reset {
+            push_link(&mut out, None);
             out.extend_from_slice(b"\x1b[0m\x1b[H\x1b[2J");
             self.shown = Grid::new(cols, rows);
             self.reset = false;
         }
-        self.emit_changes(&mut out);
+        self.emit_changes(|link| session.link_uri(link), &mut out);
         self.emit_cursor(session, ui, &mut out);
         self.emit_title(session, &mut out);
         self.emit_progress(session, &mut out);
@@ -426,7 +427,7 @@ impl Renderer {
         self.next.put_str(right_start, y, &right, style, cols);
     }
 
-    fn emit_changes(&mut self, out: &mut Vec<u8>) {
+    fn emit_changes<'a>(&mut self, uri: impl Fn(Link) -> Option<&'a [u8]>, out: &mut Vec<u8>) {
         let mut pen = Pen::default();
         let cols = usize::from(self.next.cols).max(1);
         let rows = self
@@ -439,12 +440,15 @@ impl Renderer {
             while let Some((x, (next, shown))) = cells.next() {
                 // The right half of a character is drawn along with its left.
                 if next != shown && next.width != Width::Tail {
-                    pen.draw(x, y, next, out);
+                    pen.draw(x, y, next, &uri, out);
                     if next.width == Width::Wide {
                         cells.next();
                     }
                 }
             }
+        }
+        if pen.link.is_some() {
+            push_link(out, None);
         }
         if pen.drew {
             out.extend_from_slice(b"\x1b[0m");
@@ -725,11 +729,19 @@ fn push_move(out: &mut Vec<u8>, x: u16, y: u16) {
 struct Pen {
     position: Option<(u16, u16)>,
     style: Option<Style>,
+    link: Option<Link>,
     drew: bool,
 }
 
 impl Pen {
-    fn draw(&mut self, x: u16, y: u16, cell: &Cell, out: &mut Vec<u8>) {
+    fn draw<'a>(
+        &mut self,
+        x: u16,
+        y: u16,
+        cell: &Cell,
+        uri: impl Fn(Link) -> Option<&'a [u8]>,
+        out: &mut Vec<u8>,
+    ) {
         if self.position != Some((x, y)) {
             push_move(out, x, y);
         }
@@ -737,11 +749,43 @@ impl Pen {
             push_style(out, &cell.style);
             self.style = Some(cell.style);
         }
+        if self.link != cell.link {
+            // Terminals refuse a URI that is too long, and it may have got too
+            // long here. Text must then end up without a link, not with the last.
+            if self.link.is_some() {
+                push_link(out, None);
+            }
+            self.link = cell.link;
+            if let Some(open) = cell.link.and_then(|link| Some((link, uri(link)?))) {
+                push_link(out, Some(open));
+            }
+        }
         out.extend_from_slice(cell.text.as_str().as_bytes());
         let width = if cell.width == Width::Wide { 2 } else { 1 };
         self.position = Some((x + width, y));
         self.drew = true;
     }
+}
+
+/// Opens a link, or closes the open one. The `id` makes the outer terminal see
+/// one link however many pieces it is drawn in, and the number behind it differs
+/// between panes, as the same URI in two panes is two links.
+fn push_link(out: &mut Vec<u8>, link: Option<(Link, &[u8])>) {
+    out.extend_from_slice(b"\x1b]8;");
+    if let Some((link, uri)) = link {
+        out.extend_from_slice(format!("id=kl{:X};", link.number()).as_bytes());
+        for byte in uri {
+            // What programs get into a URI must not get out of the sequence.
+            if (0x20..0x7f).contains(byte) {
+                out.push(*byte);
+            } else {
+                out.extend_from_slice(format!("%{byte:02X}").as_bytes());
+            }
+        }
+    } else {
+        out.push(b';');
+    }
+    out.extend_from_slice(b"\x1b\\");
 }
 
 /// The SGR parameter for a foreground or background color, where `base` is 30
@@ -1012,7 +1056,7 @@ mod tests {
 
     fn emitted(renderer: &mut Renderer) -> String {
         let mut out = Vec::new();
-        renderer.emit_changes(&mut out);
+        renderer.emit_changes(|_| None, &mut out);
         String::from_utf8(out).unwrap()
     }
 
@@ -1033,6 +1077,77 @@ mod tests {
         renderer.resize(5, 2);
         renderer.next.put_str(1, 1, "abc", Style::default(), 5);
         assert_eq!(emitted(&mut renderer), "\x1b[2;2H\x1b[0mabc\x1b[0m");
+    }
+
+    fn a_link() -> Link {
+        let mut terminal = Terminal::new(1, 1).unwrap();
+        terminal.write(b"\x1b]8;;https://a\x1b\\a");
+        terminal.refresh();
+        let mut link = None;
+        terminal.draw_rows(true, |_, cells| link = cells[0].link);
+        link.unwrap()
+    }
+
+    fn emitted_links(renderer: &mut Renderer) -> String {
+        let mut out = Vec::new();
+        renderer.emit_changes(|_| Some(b"uri"), &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_link_opens_and_closes_around_its_cells() {
+        let link = a_link();
+        let mut renderer = Renderer::default();
+        renderer.resize(5, 1);
+        renderer.next.put_str(0, 0, "abcd", Style::default(), 5);
+        renderer.next.cells[1].link = Some(link);
+        renderer.next.cells[2].link = Some(link);
+        let id = link.number();
+        assert_eq!(
+            emitted_links(&mut renderer),
+            format!("\x1b[1;1H\x1b[0ma\x1b]8;id=kl{id:X};uri\x1b\\bc\x1b]8;;\x1b\\d\x1b[0m"),
+        );
+    }
+
+    #[test]
+    fn a_link_is_closed_before_the_next_one_opens() {
+        let (first, second) = (a_link(), a_link());
+        let mut renderer = Renderer::default();
+        renderer.resize(5, 1);
+        renderer.next.put_str(0, 0, "ab", Style::default(), 5);
+        renderer.next.cells[0].link = Some(first);
+        renderer.next.cells[1].link = Some(second);
+        let (first, second) = (first.number(), second.number());
+        assert_eq!(
+            emitted_links(&mut renderer),
+            format!(
+                "\x1b[1;1H\x1b[0m\x1b]8;id=kl{first:X};uri\x1b\\a\x1b]8;;\x1b\\\
+                 \x1b]8;id=kl{second:X};uri\x1b\\b\x1b]8;;\x1b\\\x1b[0m"
+            ),
+        );
+    }
+
+    #[test]
+    fn a_link_does_not_outlast_what_changed() {
+        let link = a_link();
+        let mut renderer = Renderer::default();
+        renderer.resize(5, 2);
+        renderer.next.put_str(4, 0, "a", Style::default(), 5);
+        renderer.next.cells[4].link = Some(link);
+        let id = link.number();
+        assert_eq!(
+            emitted_links(&mut renderer),
+            format!("\x1b[1;5H\x1b[0m\x1b]8;id=kl{id:X};uri\x1b\\a\x1b]8;;\x1b\\\x1b[0m"),
+        );
+        assert_eq!(emitted_links(&mut renderer), "");
+    }
+
+    #[test]
+    fn only_what_is_allowed_in_a_uri_gets_through() {
+        let mut out = Vec::new();
+        push_link(&mut out, Some((a_link(), b"a;b\x1b\\\x07\xc3\xa9\x7f")));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.ends_with(";a;b%1B\\%07%C3%A9%7F\x1b\\"), "{text:?}");
     }
 
     #[test]

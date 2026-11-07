@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use super::layout::{self, Node, PaneId, Rect};
 use super::pane::{self, Pane, Spawn};
 use crate::command::{Direction, SplitKind};
-use crate::ghostty::{DEFAULT_POINTER_SHAPE, MODE_SGR_PIXELS, OuterColors, Progress};
+use crate::ghostty::{DEFAULT_POINTER_SHAPE, Link, MODE_SGR_PIXELS, OuterColors, Progress};
 use crate::sys::WinSize;
 
 pub struct Window {
@@ -214,6 +214,12 @@ impl Session {
             flags.push('Z');
         }
         flags
+    }
+
+    /// The URI of a link in a pane.
+    pub fn link_uri(&self, link: Link) -> Option<&[u8]> {
+        let mut panes = self.panes.values();
+        panes.find_map(|pane| pane.terminal.link_uri(link))
     }
 
     /// Fits every pane of every window to the current size.

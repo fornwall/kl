@@ -176,6 +176,68 @@ impl Screen {
         lines
     }
 
+    /// Each run of linked cells, as its text and URI.
+    fn links(&mut self) -> Vec<(String, String)> {
+        self.pump();
+        self.terminal.refresh();
+        let mut rows = Vec::new();
+        self.terminal
+            .draw_rows(true, |_, cells| rows.push(cells.to_vec()));
+        let mut links = Vec::new();
+        for row in rows {
+            let mut run: Option<(ghostty::Link, String)> = None;
+            for cell in row.iter().filter(|cell| cell.width != Width::Tail) {
+                if run.as_ref().map(|(link, _)| *link) != cell.link {
+                    links.extend(run.take().map(|run| self.link_of(run)));
+                    run = cell.link.map(|link| (link, String::new()));
+                }
+                if let Some((_, text)) = &mut run {
+                    text.push_str(cell.text.as_str());
+                }
+            }
+            links.extend(run.map(|run| self.link_of(run)));
+        }
+        links
+    }
+
+    fn link_of(&self, (link, text): (ghostty::Link, String)) -> (String, String) {
+        let uri = self.terminal.link_uri(link).unwrap();
+        (text, String::from_utf8_lossy(uri).into_owned())
+    }
+
+    fn wait_for_links(&mut self, wanted: &[(&str, &str)]) {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let links = self.links();
+            if links
+                .iter()
+                .map(|(text, uri)| (&**text, &**uri))
+                .eq(wanted.iter().copied())
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {wanted:?}, with {links:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The `id` kl sent the outer terminal each time it opened a link to `uri`.
+    fn link_ids(&self, uri: &str) -> Vec<String> {
+        let text = self.raw_text();
+        let opens = text.split("\x1b]8;id=").skip(1);
+        let opens = opens.filter_map(|open| open.split_once(';'));
+        opens
+            .filter(|(_, rest)| {
+                rest.strip_prefix(uri)
+                    .is_some_and(|end| end.starts_with('\x1b'))
+            })
+            .map(|(id, _)| id.to_owned())
+            .collect()
+    }
+
     fn wait_for(&mut self, what: &str, done: impl Fn(&[String]) -> bool) -> Vec<String> {
         let deadline = Instant::now() + TIMEOUT;
         loop {
@@ -453,6 +515,11 @@ impl Screen {
     fn raw_text(&self) -> String {
         String::from_utf8_lossy(&self.raw).into_owned()
     }
+}
+
+/// The shell command to print a link.
+fn print_link(uri: &str, text: &str) -> String {
+    format!(r"printf '\033]8;;{uri}\033\\{text}\033]8;;\033\\'")
 }
 
 fn ghostty_key(c: char) -> i32 {
@@ -2281,4 +2348,224 @@ fn the_wheel_scrolls_full_screen_programs_with_arrow_keys() {
     screen.mouse(65, 5, 5, true);
     screen.enter();
     screen.wait_for_text("^[[B^[[B^[[B");
+}
+
+#[test]
+fn links_reach_the_outer_terminal() {
+    let mut screen = Screen::new(80, 24);
+    screen.run(&format!(
+        "clear; {}; echo ' and'; {}; echo",
+        print_link("https://a.example/?b=1;c=2", "first"),
+        print_link("file:///etc/hosts", "second"),
+    ));
+    screen.wait_for_links(&[
+        ("first", "https://a.example/?b=1;c=2"),
+        ("second", "file:///etc/hosts"),
+    ]);
+    screen.wait_for_text("first and");
+}
+
+#[test]
+fn no_link_stays_open_past_a_frame() {
+    let mut screen = Screen::new(80, 24);
+    // The link runs to the end of a row, right up against the status line.
+    screen.run(&format!(
+        "clear; printf '\\033[23;71H'; {}; read x",
+        print_link("https://a.example", "0123456789"),
+    ));
+    screen.wait_for_links(&[("0123456789", "https://a.example")]);
+    screen.prefix("c");
+    screen.wait_for_links(&[]);
+    screen.prefix("p");
+    screen.wait_for_links(&[("0123456789", "https://a.example")]);
+
+    let text = screen.raw_text();
+    for frame in text.split("\x1b[?2026l") {
+        if let Some((_, last)) = frame.rsplit_once("\x1b]8;") {
+            assert!(last.starts_with(";\x1b\\"), "open at the end of {frame:?}");
+        }
+    }
+}
+
+#[test]
+fn a_link_redrawn_in_part_stays_one_link() {
+    let mut screen = Screen::new(80, 24);
+    let uri = "https://a.example";
+    screen.run(&format!(
+        r"clear; {}; read x; printf '\033[1;3H'; {}; read x",
+        print_link(uri, "abcdef"),
+        print_link(uri, "X"),
+    ));
+    screen.wait_for_links(&[("abcdef", uri)]);
+    screen.enter();
+    screen.wait_for_links(&[("abXdef", uri)]);
+
+    let ids = screen.link_ids(uri);
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert_eq!(ids[0], ids[1]);
+    assert!(ids[0].starts_with("kl"), "{ids:?}");
+}
+
+#[test]
+fn panes_keep_their_links_apart() {
+    let mut screen = Screen::new(80, 24);
+    let (shared, own) = ("https://shared.example", "https://own.example");
+    screen.run(&format!("clear; {}; echo", print_link(shared, "left")));
+    screen.wait_for_links(&[("left", shared)]);
+    screen.prefix("%");
+    screen.wait_for("the new pane's prompt", |lines| lines[0].contains("│$"));
+    screen.run(&format!(
+        "clear; {}; {}; echo",
+        print_link(shared, "right"),
+        print_link(own, "more")
+    ));
+    screen.wait_for_links(&[("left", shared), ("right", shared), ("more", own)]);
+
+    // The same URI in two panes is not the same link.
+    let mut ids = screen.link_ids(shared);
+    ids.dedup();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+
+    // With the right pane gone, its links go as well.
+    screen.prefix("x");
+    screen.wait_for_text("kill-pane");
+    screen.type_text("y");
+    screen.wait_for_links(&[("left", shared)]);
+}
+
+#[test]
+fn links_cover_all_of_a_wide_character() {
+    let mut screen = Screen::new(80, 24);
+    let uri = "https://a.example";
+    screen.run(&format!(
+        "clear; printf 'x'; {}; echo y",
+        print_link(uri, "\u{4e16}\u{754c}")
+    ));
+    screen.wait_for_links(&[("\u{4e16}\u{754c}", uri)]);
+    screen.wait_for_text("x\u{4e16}\u{754c}y");
+}
+
+#[test]
+fn links_move_with_their_text() {
+    let mut screen = Screen::new(80, 24);
+    let uri = "https://a.example";
+    screen.run(&format!(
+        r"clear; printf '\033[10;1H'; {}; echo",
+        print_link(uri, "link")
+    ));
+    screen.wait_for_links(&[("link", uri)]);
+
+    screen.run("seq 1 15");
+    screen.wait_for_line("15");
+    let lines = screen.lines();
+    assert_eq!(lines[5], "link", "{lines:?}");
+    screen.wait_for_links(&[("link", uri)]);
+
+    screen.run("seq 1 40");
+    screen.wait_for_line("40");
+    screen.wait_for_links(&[]);
+}
+
+#[test]
+fn copy_mode_shows_the_links_in_history() {
+    let mut screen = Screen::new(80, 24);
+    let uri = "https://a.example";
+    screen.run(&format!("{}; echo; seq 1 100", print_link(uri, "link")));
+    screen.wait_for_line("100");
+    screen.wait_for_links(&[]);
+
+    screen.prefix("[");
+    screen.wait_for("the position indicator", |lines| lines[0].contains("[0/"));
+    screen.type_text("g");
+    screen.wait_for_text("link");
+    screen.wait_for_links(&[("link", uri)]);
+
+    screen.type_text("q");
+    screen.wait_for_line("100");
+    screen.wait_for_links(&[]);
+}
+
+#[test]
+fn reattaching_brings_links_back() {
+    let mut screen = Screen::new(80, 24);
+    let uri = "https://a.example";
+    screen.run(&format!("{}; echo", print_link(uri, "link")));
+    screen.wait_for_links(&[("link", uri)]);
+    let ids = screen.link_ids(uri);
+    screen.prefix("d");
+    screen.wait_for_exit();
+
+    let Screen { dir, .. } = screen;
+    let mut screen = Screen::attach(dir, 80, 24);
+    screen.wait_for_links(&[("link", uri)]);
+    assert_eq!(screen.link_ids(uri), ids);
+}
+
+#[test]
+fn a_restart_brings_links_back() {
+    let mut screen = Screen::new(80, 24);
+    let uri = "https://a.example";
+    screen.run(&format!("{}; echo", print_link(uri, "link")));
+    screen.wait_for_links(&[("link", uri)]);
+    screen.restart_server();
+    screen.wait_for_links(&[("link", uri)]);
+}
+
+/// A URI read from the live terminal while drawing the frame from before a hold
+/// would pair old text with a new URI.
+#[test]
+fn a_held_screen_keeps_old_text_with_its_old_link() {
+    let mut screen = Screen::new(80, 24);
+    let (old, new) = ("https://old.example", "https://new.example");
+    screen.run(&format!(
+        r"clear; {}; read x; printf '\033[?2026h\033[1;1H'; {}; read x; printf '\033[?2026l'; read x",
+        print_link(old, "aaa"),
+        print_link(new, "bbb"),
+    ));
+    screen.wait_for_links(&[("aaa", old)]);
+    screen.enter();
+    // Going to another window and back draws the whole pane again, from what
+    // the render state held on to.
+    screen.prefix("c");
+    screen.wait_for_no_text("aaa");
+    screen.prefix("p");
+    let pair = |links: &[(String, String)]| {
+        matches!(
+            links,
+            [(text, uri)] if (text == "aaa" && uri == old) || (text == "bbb" && uri == new)
+        )
+    };
+    let deadline = Instant::now() + TIMEOUT;
+    let mut links = screen.links();
+    while links.is_empty() {
+        assert!(Instant::now() < deadline, "the link did not come back");
+        links = screen.links();
+    }
+    assert!(pair(&links), "{links:?}");
+    screen.enter();
+    screen.wait_for_links(&[("bbb", new)]);
+}
+
+/// A pane takes URIs that are too long for the outer terminal once they have an
+/// `id`, and the outer terminal ignores those.
+#[test]
+fn a_link_refused_by_the_outer_terminal_does_not_take_on_the_last_one() {
+    let mut screen = Screen::new(80, 24);
+    screen.run(&format!(
+        r"u=$(printf '%2035s' | tr ' ' x); clear; {}; printf '\033]8;;https://b/'$u'\033\\b\033]8;;\033\\\n'",
+        print_link("https://a.example", "a"),
+    ));
+    screen.wait_for_text("ab");
+    screen.wait_for_links(&[("a", "https://a.example")]);
+}
+
+#[test]
+fn a_uri_cannot_write_to_the_outer_terminal() {
+    let mut screen = Screen::new(80, 24);
+    // C1 ST as UTF-8, a raw byte that is one in some terminals, and a DEL.
+    screen.run(&format!(
+        "clear; {}; echo",
+        print_link(r"https://a.example/\302\234\234\177", "link")
+    ));
+    screen.wait_for_links(&[("link", "https://a.example/%C2%9C%9C%7F")]);
 }

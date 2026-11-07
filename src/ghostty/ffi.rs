@@ -72,8 +72,10 @@ pub const RENDER_DATA_COLORS: c_int = 19;
 pub const RENDER_DIRTY_FULL: c_int = 2;
 
 pub const ROW_DATA_DIRTY: c_int = 1;
+pub const ROW_DATA_RAW: c_int = 2;
 pub const ROW_DATA_CELLS: c_int = 3;
 pub const ROW_DATA_SELECTION: c_int = 4;
+pub const ROW_DATA_CELLS_RAW: c_int = 5;
 
 pub const CELLS_DATA_RAW: c_int = 1;
 pub const CELLS_DATA_STYLE: c_int = 2;
@@ -83,10 +85,12 @@ pub const CELLS_DATA_GRAPHEMES_UTF8: c_int = 9;
 pub const CELL_DATA_CODEPOINT: c_int = 1;
 pub const CELL_DATA_CONTENT_TAG: c_int = 2;
 pub const CELL_DATA_WIDE: c_int = 3;
+pub const CELL_DATA_HAS_HYPERLINK: c_int = 7;
 pub const CELL_DATA_COLOR_PALETTE: c_int = 10;
 pub const CELL_DATA_COLOR_RGB: c_int = 11;
 
 pub const SCREEN_ROW_DATA_WRAP: c_int = 1;
+pub const SCREEN_ROW_DATA_HYPERLINK: c_int = 5;
 pub const SCREEN_ROW_DATA_SEMANTIC_PROMPT: c_int = 6;
 
 pub const ROW_SEMANTIC_PROMPT: c_int = 1;
@@ -241,6 +245,13 @@ pub struct SelectLineOptions {
 pub struct ModeConfig {
     pub mode: u16,
     pub value: bool,
+}
+
+/// `GhosttyCellsView`.
+#[repr(C)]
+pub struct CellsView {
+    pub ptr: *const u64,
+    pub len: usize,
 }
 
 #[repr(C)]
@@ -409,6 +420,12 @@ unsafe extern "C" {
     pub fn ghostty_grid_ref_cell(grid_ref: *const GridRef, out: *mut u64) -> c_int;
     pub fn ghostty_grid_ref_row(grid_ref: *const GridRef, out: *mut u64) -> c_int;
     pub fn ghostty_row_get(row: u64, data: c_int, out: *mut c_void) -> c_int;
+    pub fn ghostty_grid_ref_hyperlink_uri(
+        grid_ref: *const GridRef,
+        buf: *mut u8,
+        buf_len: usize,
+        written: *mut usize,
+    ) -> c_int;
     pub fn ghostty_terminal_select_word(
         terminal: Handle,
         options: *const SelectWordOptions,

@@ -53,8 +53,12 @@ What does not work today. [PLAN.md](PLAN.md) has what is planned, and how far
 each target has been verified.
 
 - **One client at a time.** A new client takes over from the one attached.
-- **Not everything programs ask for gets through.** OSC 8 hyperlinks and Kitty
-  graphics stop at kl.
+- **Not everything programs ask for gets through.** Kitty graphics stop at kl.
+- **Hyperlinks only go by their URI.** libghostty-vt does not give out their
+  `id`, so links in a pane with the same URI highlight together, even if the
+  program kept them apart. A URI with anything but printable ASCII in it arrives
+  percent-encoded, and one that this or kl's own `id` takes past about 2 KB loses
+  its link in Ghostty.
 - **The terminal's title does not come back in Ghostty.** It has no title stack,
   so leaving kl clears the title rather than restoring it, until something like
   the shell's prompt sets it again.
